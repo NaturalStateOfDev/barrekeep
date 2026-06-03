@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned third-party actions in release.yml updated via
+  # reviewable PRs (preserves the pinning style + version comment).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Frontend (package.json / package-lock.json)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Rust shell
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"

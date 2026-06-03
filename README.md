@@ -1,116 +1,114 @@
-# Example Barre Studio — Scheduler
+# Barrekeep
 
-Desktop app for building monthly class schedules for a barre studio.
+A desktop app for building a barre studio's monthly class schedule.
 
-Setting up a dev machine, generating updater signing keys, or cutting a release? See **[SETUP.md](./SETUP.md)**.
-
-## Quick start
-
-```powershell
-# One-time: install dependencies
-npm install
-
-# Run in dev mode (hot-reloads frontend, recompiles Rust on change)
-npm run tauri dev
-
-# Build the installer
-npm run tauri build
-# Output: src-tauri/target/release/bundle/msi/*.msi
-```
-
-> **First Rust build is slow.** The DuckDB Rust crate compiles DuckDB from C++
-> source — expect 5–10 minutes the first time. Subsequent builds are fast.
-> If you'd rather not wait, you can switch the `duckdb` dep in
-> `src-tauri/Cargo.toml` from `bundled` to a system DuckDB once we know the
-> install path is stable.
-
-## What this app does
-
-Pulls teacher availability from Sling, generates a monthly schedule using
-rule-based + Claude-assisted proposal, lets you edit in a calendar UI, then
-pushes back to Sling as planning-status (unpublished) shifts. Manager
+It pulls teacher availability and recent history from [Sling](https://getsling.com),
+proposes a draft month with a rule-based algorithm (optionally critiqued by
+Claude), lets you review and edit it in a calendar UI, and pushes the approved
+draft back to Sling as **planning-status** (unpublished) shifts — a manager
 publishes from Sling's web UI as the final step.
+
+Single-user, local-first. No server, no cloud database. Ships with a
+placeholder demo roster; you configure your own studio at runtime.
+
+> Setting up a dev machine, generating updater signing keys, or cutting a
+> release? See **[SETUP.md](./SETUP.md)**.
+
+## What works
+
+- **Pull from Sling** — roster, qualifications (from Sling position groups),
+  availability blocks, and existing/historical shifts for a chosen month.
+- **Generate** a draft schedule for any month (rule-based; ranking learned
+  from recent history, candidate pool from Sling positions).
+- **Review** in a month-grid calendar with an issue queue (unassigned slots,
+  over-cap teachers, qualification conflicts, leave conflicts) and one-click
+  fixes.
+- **Edit** teacher assignments and weekly caps inline.
+- **Push** approved drafts to Sling (batched + rate-limit-aware), as planning
+  status only.
+- **In-app Sling login** (captures the bearer token) or paste one manually;
+  tokens persist in the OS keychain (Stronghold).
+- **Auto-update** — installs pick up new signed releases from GitHub.
 
 ## Stack
 
-- **Desktop shell:** Tauri 2 (Rust)
-- **Frontend:** React 18 + TypeScript + Vite
+- **Shell:** Tauri 2 (Rust) — small native installer, WebView2/WebKitGTK
+- **Frontend:** React 18 + TypeScript + Vite, plain CSS
 - **Storage:** DuckDB (single-file embedded database)
-- **Secrets:** Tauri Stronghold plugin (OS keychain) — _wired up later_
-- **AI integration:** Anthropic SDK — _wired up later_
-- **Sling integration:** Python sidecars in `scripts/`
+- **Secrets:** Tauri Stronghold plugin (OS keychain)
+- **AI:** Anthropic SDK (optional, for prompt-driven schedule review)
+- **Sling integration:** Python sidecars in `scripts/` + Rust (`ureq`)
+
+## Quick start
+
+```bash
+npm install
+npm run tauri dev          # hot-reload frontend, recompile Rust on change
+npm run tauri build        # -> src-tauri/target/release/bundle/
+```
+
+> **First Rust build is slow** (~5–10 min): the `duckdb` crate compiles DuckDB
+> from C++ source. Subsequent builds are fast.
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/), [Node.js 20+](https://nodejs.org/),
+  [Python 3.11+](https://www.python.org/)
+- Windows: [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+  + [MSVC C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+  Linux: `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`.
+
+### First-run configuration
+
+On first launch the app seeds a **placeholder demo roster** and creates its
+database at `%LOCALAPPDATA%\com.barrekeep.app\scheduler.duckdb` (Windows) /
+`~/.local/share/com.barrekeep.app/` (Linux). Then, in **Settings**:
+
+1. **Studio configuration** — enter your Sling **org id**, **acting-user id**
+   (an admin whose calendar feed is read), and **home location id**. Find them
+   in a Sling DevTools session (they appear in the calendar request URL). These
+   are stored locally only; nothing studio-specific is compiled into the app.
+2. **Sling token** — log in via the in-app browser, or paste a bearer token.
+3. (Optional) **Anthropic key** — to enable Claude-assisted review.
+
+Then pick a month → **Pull from Sling** → **Generate** → review → **Push**.
 
 ## Repository layout
 
 ```
 .
-├── CLAUDE.md                 # Read this if you're working on the project
-├── docs/                     # Architecture, Sling API notes, data model
-├── data/                     # DuckDB file + CSV exports (gitignored)
-├── prompts/                  # Claude prompts as versioned markdown
-├── scripts/                  # Python utilities (Sling pull/push)
-├── src/                      # React frontend
-├── src-tauri/                # Rust shell + DuckDB integration
-│   ├── migrations/           # SQL files, applied in order at startup
-│   └── src/
-│       ├── lib.rs            # Tauri entry — wires DB + commands
-│       ├── db.rs             # DuckDB connection management
-│       ├── migrations.rs     # Migration runner
-│       ├── seed.rs           # First-run roster + positions data
-│       └── commands.rs       # IPC commands the frontend calls
-└── .claude/                  # Skills + subagents for Claude Code
+├── CLAUDE.md          # orientation for working on the project
+├── docs/              # architecture, Sling API notes, data model
+├── prompts/           # Claude prompts as versioned markdown
+├── scripts/           # Python utilities (Sling pull/push, the algorithm)
+├── src/               # React frontend
+├── src-tauri/         # Rust shell + DuckDB
+│   ├── migrations/    # forward-only SQL, applied at startup
+│   └── src/           # commands.rs, sling.rs, seed.rs, secrets.rs, ...
+└── .claude/           # skills + subagents for Claude Code
 ```
 
-See `docs/architecture.md` for the full layout with explanations.
+## Known limitations & roadmap
 
-## First-time setup
+This started as a tool for one studio and is being generalized. Current edges:
 
-1. **Install Rust:** https://rustup.rs/
-2. **Install Node.js 20+:** https://nodejs.org/
-3. **Install Python 3.11+** (for the Sling sidecars): https://www.python.org/
-4. **Install WebView2 runtime** (usually pre-installed on Windows 10+): https://developer.microsoft.com/en-us/microsoft-edge/webview2/
-5. **Install Microsoft C++ Build Tools** (required for the DuckDB C++ compile): https://visualstudio.microsoft.com/visual-cpp-build-tools/
-6. Clone, then `npm install`
-7. Run `npm run tauri dev` — first run takes 5–10 min (DuckDB compile)
+- **Class-type / position mapping is hardcoded** in `scripts/propose.py`
+  (`POSITION_NAMES` / `CLASS_POSITION_IDS`) to one studio's Sling position ids
+  and class names. The Sling pull already fetches each studio's position
+  groups, so the next step is to pass that mapping through the payload instead
+  of hardcoding it — making the algorithm truly studio-agnostic (mirrors how
+  org/location ids were already moved to runtime config).
+- **Standalone `propose.py` is dev-only.** Run from the app, the target month
+  is parameterized (`--target-month`, driven by the month selector) and data
+  comes from the live pull — so it's run fresh each month by design. The
+  hardcoded month default and fixture file paths in the script only affect
+  running it standalone without the app.
+- **Per-studio scheduling rules** (priority slots, blocklists, hard
+  assignments, month-specific overrides) ship empty/generic; they're currently
+  code-level extension points rather than UI-configurable.
+- **DST.** Date queries send a fixed `-05:00` (US Central) offset; spring-/
+  fall-back will need real timezone handling.
 
-### Where the DB lives
+## License
 
-`%LOCALAPPDATA%\com.barrekeep.app\scheduler.duckdb`
-
-Delete that file to start fresh. Migrations + the seed (10 teachers + 7
-class types) will recreate it on next launch.
-
-## Development workflow
-
-| Task | Where |
-|---|---|
-| Add a UI screen | `src/App.tsx` (or split out `src/components/`) |
-| Add a Rust IPC command | `src-tauri/src/commands.rs` + register in `lib.rs` |
-| Change the data model | `.claude/skills/schema-change/` |
-| Touch Sling integration | `.claude/skills/sling-integration/` |
-| Tune the algorithm | `.claude/skills/schedule-algorithm/` |
-
-## Foundation status
-
-**Done:**
-
-- Tauri 2 shell that opens a window
-- DuckDB embedded with forward-only migrations
-- Roster + positions seeded on first run (Teacher A's qualifications populated;
-  others' qualifications come from a Sling pull)
-- React UI shell with Dashboard / Teachers / Class types views
-
-**Not done (roadmap):**
-
-- [ ] Sling pull command (Python sidecar via Tauri shell plugin)
-- [ ] Sling token storage in Stronghold + UI to paste a fresh token
-- [ ] Calendar editor (port the existing HTML widget)
-- [ ] Algorithm v10 (the maintainer still has to drop the source somewhere)
-- [ ] Anthropic client + prompt-driven review
-- [ ] Push-to-Sling command + audit log surfacing
-- [ ] Bundle icons (`src-tauri/icons/*`) — needed for `tauri build`, not for `tauri dev`
-
-## Project history
-
-This app started as a series of Python scripts and an in-browser widget. See
-`docs/decisions/` for the trail of major architectural decisions.
+_Not yet licensed — all rights reserved until a license is added._
