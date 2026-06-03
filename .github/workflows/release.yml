@@ -1,0 +1,60 @@
+# Build and publish a signed Windows MSI on tag push.
+#
+# Trigger: push a tag matching v*.*.* (e.g. `git tag v0.1.0 && git push --tags`).
+# Output: a GitHub Release with the MSI, its .sig, and latest.json. The app's
+# updater plugin (see tauri.conf.json) reads latest.json on launch.
+#
+# Required repo secrets:
+#   - TAURI_SIGNING_PRIVATE_KEY           (output of `npx tauri signer generate`)
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD  (password you set when generating)
+#
+# Public key for verification lives in src-tauri/tauri.conf.json
+# (plugins.updater.pubkey) and ships inside the app binary.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        # Pinned to a commit SHA (supply-chain hardening): this workflow has
+        # access to the code-signing key, so a moved/compromised tag on a
+        # third-party action could exfiltrate it. Bump via Dependabot.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-06-03
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build, sign, and publish
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Barrekeep ${{ github.ref_name }}
+          releaseBody: See the assets below to install or upgrade. The desktop app will pick up this release automatically on next launch.
+          releaseDraft: false
+          prerelease: false

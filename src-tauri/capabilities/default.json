@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "Default permissions for the main window. Custom invoke commands (defined in src-tauri/src/commands.rs) are allowed by default; explicit permissions here are only needed for plugin commands.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:default",
+    "updater:default",
+    "process:default"
+  ]
+}

@@ -1,0 +1,379 @@
+/* Anthropic-style design tokens. Single source of truth for colors/spacing.
+   The widget code we'll port later expects these variable names. */
+
+:root {
+  --color-bg: #faf9f7;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f3f1ec;
+  --color-border: #e3e0d8;
+  --color-text: #1a1a1a;
+  --color-text-muted: #6b6b6b;
+  --color-accent: #c96442;
+  --color-accent-hover: #b25638;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-8: 48px;
+
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Consolas", monospace;
+
+  /* Class format chips */
+  --chip-slate:       hsl(210 14% 88%);
+  --chip-slate-fg:    hsl(210 14% 22%);
+  --chip-terracotta:  hsl(14 60% 86%);
+  --chip-terracotta-fg: hsl(14 70% 30%);
+  --chip-sage:        hsl(140 20% 84%);
+  --chip-sage-fg:     hsl(140 30% 24%);
+  --chip-ochre:       hsl(36 60% 84%);
+  --chip-ochre-fg:    hsl(36 70% 26%);
+  --chip-plum:        hsl(290 22% 86%);
+  --chip-plum-fg:     hsl(290 30% 28%);
+  --chip-accent:      hsl(190 50% 84%);
+  --chip-accent-fg:   hsl(190 60% 24%);
+  --chip-default:     hsl(0 0% 88%);
+  --chip-default-fg:  hsl(0 0% 30%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: var(--color-bg);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  background: var(--color-surface-alt);
+  border-right: 1px solid var(--color-border);
+  padding: var(--space-5) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebar h1 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  margin: 0 var(--space-3) var(--space-4);
+}
+
+.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  font-size: 14px;
+  color: var(--color-text);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.nav-item:hover {
+  background: var(--color-border);
+}
+
+.nav-item.active {
+  background: var(--color-accent);
+  color: white;
+}
+
+.main {
+  padding: var(--space-6);
+  overflow: auto;
+}
+
+.main h2 {
+  margin-top: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  margin-bottom: var(--space-4);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+th {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.muted {
+  color: var(--color-text-muted);
+}
+
+.error {
+  color: #b00020;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  margin-top: var(--space-3);
+}
+
+.ok {
+  color: #1a7f37;
+  font-size: 13px;
+  margin-top: var(--space-3);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: white;
+  border: 0;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--color-accent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-3);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn-ghost:hover {
+  background: var(--color-surface-alt);
+}
+
+tr.selected td {
+  background: var(--color-surface-alt);
+}
+
+tr.dropped td {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.cell-button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 2px var(--space-2);
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cell-button:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-alt);
+}
+
+.badge {
+  display: inline-block;
+  background: var(--color-accent);
+  color: white;
+  border-radius: 999px;
+  padding: 2px var(--space-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.disclosure {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  min-width: 480px;
+  max-width: 600px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+}
+
+.modal h3 {
+  margin: 0 0 var(--space-4);
+  font-size: 18px;
+}
+
+.modal-context {
+  width: 100%;
+  margin-bottom: var(--space-4);
+}
+
+.modal-context td {
+  border: 0;
+  padding: var(--space-1) var(--space-2);
+}
+
+.field {
+  display: block;
+  margin-bottom: var(--space-3);
+}
+
+.field span {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.field select,
+.field textarea {
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  background: var(--color-surface);
+}
+
+.field textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.suggestion {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  background: var(--color-surface-alt);
+}
+
+.pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.pill-add_rule {
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.pill-tweak_parameter {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.pill-fyi {
+  background: var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.pill-confidence {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.pill-high {
+  border-color: #16a34a;
+  color: #166534;
+}
+
+.pill-medium {
+  border-color: #d97706;
+  color: #b45309;
+}
+
+.pill-low {
+  border-color: var(--color-border);
+}
+
+.bk-tabs { display: flex; gap: 0.25rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--color-border); }
+.bk-tabs button { padding: 0.4rem 0.8rem; border: none; background: transparent; cursor: pointer; border-bottom: 2px solid transparent; }
+.bk-tabs button.active { border-bottom-color: var(--color-accent); font-weight: 600; }

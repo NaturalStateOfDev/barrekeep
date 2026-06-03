@@ -1,0 +1,22 @@
+{
+  "users": {
+    "users": [
+      { "id": 1001, "type": "user", "name": "Teacher", "lastname": "A", "active": true,  "groupIds": [29470407, 29303965, 29470419, 1] },
+      { "id": 1002, "type": "user", "name": "Teacher", "lastname": "B", "active": true,  "groupIds": [29303965, 1] },
+      { "id": 1003, "type": "user", "name": "Teacher", "lastname": "C", "active": true,  "groupIds": [29470407, 29304030, 1] },
+      { "id": 1004, "type": "user", "name": "Teacher", "lastname": "D", "active": true,  "groupIds": [29303965, 29304197, 1] },
+      { "id": 1005, "type": "user", "name": "Teacher", "lastname": "E", "active": true,  "groupIds": [29470419, 1] },
+      { "id": 1006, "type": "user", "name": "Front",   "lastname": "Desk", "active": true, "groupIds": [2] },
+      { "id": 1007, "type": "user", "name": "Teacher", "lastname": "F", "active": false, "groupIds": [29303965, 1] }
+    ]
+  },
+  "groups": [
+    { "id": 29470407, "type": "position", "name": "Empower" },
+    { "id": 29470419, "type": "position", "name": "Focus" },
+    { "id": 29303965, "type": "position", "name": "Classic" },
+    { "id": 29304030, "type": "position", "name": "Define" },
+    { "id": 29304197, "type": "position", "name": "Reform" },
+    { "id": 1, "type": "location", "name": "Example Barre Studio" },
+    { "id": 2, "type": "location", "name": "Another Location" }
+  ]
+}

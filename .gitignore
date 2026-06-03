@@ -1,0 +1,53 @@
+# Data files. ALL of data/ is local-only — it contains Sling PII (names,
+# emails, phones, schedules) and must never ship. (reference/ was formerly
+# tracked as v10 ground truth; removed and no longer an exception.)
+data/*.duckdb
+data/*.duckdb.wal
+data/*.csv
+data/output/
+data/backups/
+data/raw_pulls/
+data/fixtures/
+data/reference/
+!data/.gitkeep
+
+# Secrets
+.env
+.env.local
+*.token
+
+# Build artifacts
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/Cargo.lock
+src-tauri/gen/
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local config (per-machine permission allowlist)
+.claude/settings.local.json
+
+# Logs
+logs/
+*.log
+push_log.json
+
+# Python (for scripts/)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Sling test fixtures — contain real PII (names, emails, phones). Never ship.
+src-tauri/sling_test_fixtures/

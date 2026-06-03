@@ -1,0 +1,14 @@
+# Reproducible toolchain pins. Run `mise install` to materialize.
+# Anyone on macOS/Linux can clone, `mise install`, and get the exact runtimes
+# the project expects — no nvm/rustup/pyenv collisions with the system.
+#
+# Windows users: mise has Windows support but Teacher A's machine doesn't need
+# this file. Toolchain installs there go through rustup + the Node MSI.
+
+[tools]
+# 1.88 is the floor: a handful of transitive deps (duckdb 1.10502, plist 1.9,
+# serde_with 3.20, etc.) require Rust 1.85–1.88. Bumping below this re-runs
+# us into "requires Rust X" resolver failures.
+rust = "1.88"
+node = "22"
+python = "3.12"

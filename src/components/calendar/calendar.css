@@ -1,0 +1,161 @@
+/* Calendar styles. Scoped via class prefixes; no CSS Modules. */
+
+.bk-slot-row {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  line-height: 1.1;
+  cursor: pointer;
+}
+.bk-slot-row:hover { background: var(--surface-2, hsl(0 0% 96%)); }
+
+.bk-slot-time   { color: var(--text-muted, hsl(0 0% 40%)); font-variant-numeric: tabular-nums; }
+.bk-slot-chip   {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bk-slot-teacher { font-weight: 500; }
+.bk-slot-teacher.bk-unassigned { color: var(--danger, hsl(0 60% 45%)); }
+.bk-slot-row.bk-dropped { opacity: 0.45; text-decoration: line-through; }
+
+.bk-warn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--danger, hsl(0 60% 45%)); }
+
+.bk-day-cell {
+  border: 1px solid var(--border, hsl(0 0% 90%));
+  border-radius: 6px;
+  padding: 0.35rem 0.4rem;
+  min-height: 8.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  background: var(--surface-1, hsl(0 0% 100%));
+}
+.bk-day-cell.bk-out-of-month { opacity: 0.35; pointer-events: none; }
+.bk-day-cell.bk-selected     { outline: 2px solid var(--accent, hsl(210 80% 55%)); }
+.bk-day-label { font-size: 0.72rem; font-weight: 600; color: var(--text-muted, hsl(0 0% 45%)); margin-bottom: 0.15rem; }
+.bk-day-label.bk-today { color: var(--accent, hsl(210 80% 55%)); }
+
+.bk-month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.4rem;
+}
+.bk-month-grid-head {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted, hsl(0 0% 45%));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.bk-month-grid-head > div { padding: 0 0.4rem; }
+
+.bk-issue-queue {
+  width: 360px;
+  max-width: 90vw;
+  border-left: 1px solid var(--color-border, hsl(0 0% 90%));
+  background: var(--color-surface, hsl(0 0% 100%));
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+.bk-issue-queue-head {
+  padding: 0.6rem 0.85rem;
+  font-weight: 600;
+  border-bottom: 1px solid var(--color-border, hsl(0 0% 90%));
+}
+.bk-issue-queue-body {
+  padding: 0.5rem;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.bk-issue-card {
+  border: 1px solid var(--color-border, hsl(0 0% 90%));
+  border-left: 3px solid var(--color-border, hsl(0 0% 90%));
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  background: var(--color-surface-alt, hsl(0 0% 97%));
+}
+.bk-issue-card.bk-issue-danger { border-left-color: hsl(0 60% 45%); }
+.bk-issue-card.bk-issue-warn   { border-left-color: hsl(36 70% 45%); }
+.bk-issue-card.bk-issue-info   { border-left-color: hsl(210 70% 45%); }
+.bk-issue-header {
+  display: flex; justify-content: space-between;
+  font-size: 0.7rem; color: var(--color-text-muted, hsl(0 0% 45%));
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 0.25rem;
+}
+.bk-issue-msg { font-size: 0.85rem; line-height: 1.3; }
+.bk-issue-fix { font-size: 0.8rem; margin-top: 0.35rem; color: var(--color-text-muted, hsl(0 0% 45%)); }
+.bk-issue-actions { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }
+.bk-issue-actions button { padding: 0.25rem 0.55rem; font-size: 0.78rem; }
+
+.bk-cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0 0.5rem;
+}
+.bk-cal-header h2 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.bk-cal-header .bk-cal-nav button { margin-left: 0.25rem; }
+
+.bk-slot-editor {
+  padding: 0.6rem;
+  border: 1px solid var(--border, hsl(0 0% 90%));
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+}
+.bk-slot-editor.bk-dirty { border-color: var(--accent, hsl(210 80% 55%)); }
+.bk-slot-editor-head { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.4rem; font-weight: 600; }
+.bk-slot-editor-warn { margin-top: 0.4rem; font-size: 0.78rem; color: var(--danger, hsl(0 60% 45%)); }
+.bk-slot-editor label { display: block; font-size: 0.78rem; color: var(--text-muted, hsl(0 0% 45%)); margin-bottom: 0.15rem; }
+.bk-slot-editor select { width: 100%; padding: 0.3rem; }
+
+.bk-day-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 360px;
+  max-width: 90vw;
+  height: 100vh;
+  background: var(--surface-1, white);
+  border-left: 1px solid var(--border, hsl(0 0% 90%));
+  box-shadow: -4px 0 16px rgba(0,0,0,0.06);
+  display: flex;
+  flex-direction: column;
+}
+.bk-day-panel-head { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border, hsl(0 0% 90%)); display: flex; justify-content: space-between; align-items: center; }
+.bk-day-panel-body { padding: 0.75rem 1rem; overflow-y: auto; flex: 1; }
+
+.bk-add-teacher-form { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.4rem; font-size: 0.8rem; }
+.bk-add-teacher-form label { display: flex; align-items: center; gap: 0.4rem; }
+.bk-add-teacher-form input[type="number"] { width: 4rem; }
+
+.bk-issue-slot {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+  font-size: 0.82rem;
+}
+.bk-issue-day  { color: var(--color-text-muted, hsl(0 0% 45%)); font-weight: 500; }
+.bk-issue-time { font-variant-numeric: tabular-nums; font-weight: 600; }
+.bk-issue-class { font-weight: 600; }

@@ -1,0 +1,42 @@
+[package]
+name = "barrekeep"
+version = "0.1.0"
+description = "Example Barre Studio monthly schedule planner"
+authors = ["Barrekeep contributors"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "barrekeep_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Bundled = compiles DuckDB from C++ source. First build is slow (5-10 min)
+# but produces a self-contained binary with no system DuckDB dependency.
+duckdb = { version = "1.1", features = ["bundled"] }
+thiserror = "2"
+anyhow = "1"
+# HTTP client for the Anthropic API. Sync (blocking) is fine — Tauri commands
+# run on a worker thread pool so blocking calls don't stall the main thread.
+# Using ureq instead of reqwest to keep compile time and binary size down.
+ureq = { version = "2", features = ["json"] }
+# Persistent secret storage (OS keychain on macOS/Windows, in-process vault on Linux).
+# Holds the Sling auth token between sessions. CLAUDE.md: never plaintext, always keychain.
+tauri-plugin-stronghold = "2"
+# SHA-256 for deriving the Stronghold vault encryption key at startup.
+sha2 = "0.10"
+chrono = "0.4"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
