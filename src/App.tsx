@@ -4,6 +4,14 @@ import { api } from "./lib/api";
 import { CalendarView } from "./components/calendar/CalendarView";
 import { SlingTokenModal } from "./components/SlingTokenModal";
 import { MonthSelector } from "./components/MonthSelector";
+import { UpdateBanner } from "./components/UpdateBanner";
+import {
+  getCurrentVersion,
+  checkForUpdate,
+  installUpdate,
+  type Update,
+  type DownloadProgress,
+} from "./lib/updater";
 import { monthWindow, isReadOnlyMonth } from "./lib/dates";
 
 function todayIso(): string {
@@ -64,6 +72,7 @@ export function App() {
         </button>
       </aside>
       <main className="main">
+        <UpdateBanner />
         {view === "dashboard" && <Dashboard />}
         {view === "proposals" && <ProposalsView />}
         {view === "teachers" && <TeachersView />}
@@ -886,7 +895,104 @@ function SettingsView() {
       <SlingTokenCard />
 
       <SlingCredentialsCard />
+
+      <UpdatesCard />
     </>
+  );
+}
+
+function UpdatesCard() {
+  const [version, setVersion] = useState<string>("");
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [state, setState] = useState<
+    "idle" | "checking" | "current" | "available" | "installing" | "error"
+  >("idle");
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCurrentVersion().then(setVersion).catch(() => {});
+  }, []);
+
+  const onCheck = async () => {
+    setState("checking");
+    setError(null);
+    try {
+      const u = await checkForUpdate();
+      if (u) {
+        setUpdate(u);
+        setState("available");
+      } else {
+        setState("current");
+      }
+    } catch (e) {
+      setState("error");
+      setError(String(e));
+    }
+  };
+
+  const onInstall = async () => {
+    if (!update) return;
+    setState("installing");
+    setError(null);
+    try {
+      await installUpdate(update, setProgress);
+      // relaunches on success
+    } catch (e) {
+      setState("error");
+      setError(String(e));
+    }
+  };
+
+  const pct = progress?.percent;
+
+  return (
+    <div className="card">
+      <strong>Updates</strong>
+      <p className="muted" style={{ marginTop: 4 }}>
+        Barrekeep checks for a newer signed release on startup and installs it
+        with your approval. You can also check on demand here.
+      </p>
+      <div style={{ marginTop: 12 }}>
+        Current version:{" "}
+        {version ? <code>v{version}</code> : <span className="muted">…</span>}
+      </div>
+
+      <div className="row" style={{ marginTop: 12 }}>
+        {state === "available" ? (
+          <button className="btn-primary" onClick={onInstall}>
+            Install v{update?.version} &amp; restart
+          </button>
+        ) : (
+          <button
+            className="btn-primary"
+            onClick={onCheck}
+            disabled={state === "checking" || state === "installing"}
+          >
+            {state === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        )}
+      </div>
+
+      {state === "current" && (
+        <div className="ok" style={{ marginTop: 8 }}>You're on the latest version.</div>
+      )}
+      {state === "available" && (
+        <div className="ok" style={{ marginTop: 8 }}>
+          v{update?.version} is available{update?.body ? ` — ${update.body}` : ""}.
+        </div>
+      )}
+      {state === "installing" && (
+        <div className="muted" style={{ marginTop: 8 }}>
+          Downloading{pct != null ? ` ${pct}%` : "…"} — the app will restart when done.
+        </div>
+      )}
+      {state === "error" && (
+        <div className="error" style={{ marginTop: 8 }}>
+          Couldn't check for updates: {error}
+        </div>
+      )}
+    </div>
   );
 }
 
