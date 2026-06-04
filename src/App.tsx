@@ -979,7 +979,7 @@ function UpdatesCard() {
       )}
       {state === "available" && (
         <div className="ok" style={{ marginTop: 8 }}>
-          v{update?.version} is available{update?.body ? ` — ${update.body}` : ""}.
+          v{update?.version} is ready to install.
         </div>
       )}
       {state === "installing" && (
