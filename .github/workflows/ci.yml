@@ -1,0 +1,46 @@
+# Cache warmer + smoke build on the default branch.
+#
+# Why: the release workflow runs on tags, and tag-triggered runs can only fall
+# back to the DEFAULT branch's Actions cache. Nothing else builds on main, so
+# every release recompiled DuckDB from C++ source (~25 min). This job compiles
+# src-tauri on each push to main and saves the cache under the same
+# `shared-key` the release workflow uses, so releases restore the compiled
+# DuckDB + deps instead of rebuilding them (~25 min -> a few min once warm).
+#
+# windows-latest matches the release runner so the cached artifacts apply.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  warm-cache:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-06-03
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: "barrekeep" # must match release.yml
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Compile Rust (release) — warms the DuckDB/deps cache
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
