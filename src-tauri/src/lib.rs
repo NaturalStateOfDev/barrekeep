@@ -103,6 +103,8 @@ pub fn run() {
             commands::list_availability_blocks,
             commands::list_external_shifts_for_month,
             commands::add_teacher_from_pull,
+            commands::push_proposal_dry_run,
+            commands::push_proposal_execute,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

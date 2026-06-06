@@ -1,6 +1,6 @@
 ---
 name: sling-integration
-description: Use this skill when modifying any code that talks to the Sling API — pull, push, dedupe, rate-limit handling, or auth. Sling's API is brittle, undocumented, and protected by Cloudflare WAF. Changes must be tested against a single test shift before any bulk operation.
+description: Use this skill when modifying any code that talks to the Sling API — pull, push, dedupe, rate-limit handling, or auth. Sling's API is brittle, undocumented, and protected by Cloudflare WAF.
 ---
 
 # Working on Sling integration
@@ -11,13 +11,11 @@ Sling has no public API. Everything we know is in `docs/sling-api.md`. Read it b
 
 1. **Read `docs/sling-api.md` for the endpoint shape** before assuming. The POST and PUT shapes are subtly different (array vs singular). Responses are always arrays.
 
-2. **Test new code against a single shift before any bulk operation.** Create one test shift, verify it appears in Sling's UI as expected, delete it, then proceed. Bulk pushes that fail mid-run are painful to clean up.
+2. **Throttle aggressively.** Sling rate-limits at ~20 requests/minute. The current scripts use batches of 10 with 10-second pauses and exponential backoff on 429. Don't loosen these without re-testing against a real Sling session.
 
-3. **Throttle aggressively.** Sling rate-limits at ~20 requests/minute. The current scripts use batches of 10 with 10-second pauses and exponential backoff on 429. Don't loosen these without re-testing against a real Sling session.
+3. **Always send browser-like headers.** Cloudflare's WAF blocks any request that doesn't look like a real browser. The User-Agent, Origin, Referer, and Sec-Fetch-* headers are mandatory.
 
-4. **Always send browser-like headers.** Cloudflare's WAF blocks any request that doesn't look like a real browser. The User-Agent, Origin, Referer, and Sec-Fetch-* headers are mandatory.
-
-5. **Audit-log every request.** For pushes, write to `pushes` and `push_results` tables. For pulls, write the raw JSON to a timestamped file in `data/raw_pulls/` for forensics.
+4. **Audit-log every request.** For pushes, write to `pushes` and `push_results` tables. For pulls, write the raw JSON to a timestamped file in `data/raw_pulls/` for forensics.
 
 ## Never do these
 

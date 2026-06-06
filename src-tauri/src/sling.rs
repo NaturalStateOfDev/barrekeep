@@ -80,6 +80,36 @@ pub struct SlingEventLocationRef {
     pub id: i64,
 }
 
+/// Input row from the `proposal_shifts` table, passed to build_push_specs.
+#[derive(Debug, Clone)]
+pub struct ProposalShiftInput {
+    pub proposal_shift_id: i64,
+    pub date: String,
+    pub start: String,
+    pub end: String,
+    pub position_id: i64,
+    pub user_id: Option<i64>,
+    pub teacher_name: Option<String>,
+    pub class_name: String,
+    pub is_coteach: bool,
+    pub coteach_label: Option<String>,
+    pub is_dropped: bool,
+}
+
+/// A single shift to be created or verified against Sling.
+/// Produced by push_to_sling (commands.rs) from the `proposal_shifts` table.
+#[derive(Debug, Clone)]
+pub struct PushSpec {
+    pub proposal_shift_id: i64,
+    pub date: String,         // "2026-06-01"
+    pub start: String,        // "05:45"
+    pub end: String,          // "06:45"
+    pub position_id: i64,
+    pub user_id: i64,
+    pub class_name: String,   // display only
+    pub teacher_name: String, // display only
+}
+
 // Sling returns some id fields as JSON strings (notably the top-level event
 // `id` — stringified to preserve precision beyond JS's 53-bit limit), others
 // as JSON numbers. Accept both shapes.
@@ -220,6 +250,86 @@ fn http_get_with_query(token: &str, url: &str, query: &[(&str, &str)]) -> Result
     }
 }
 
+/// POST JSON with browser-like headers + percent-encoded query params.
+/// Returns parsed JSON on 2xx; maps known statuses to sentinel errors that
+/// the command layer recognizes (sling-401, sling-429, sling-1010).
+fn http_post(token: &str, url: &str, query: &[(&str, &str)], body: &serde_json::Value) -> Result<serde_json::Value> {
+    let mut req = ureq::post(url)
+        .set("Authorization", token)
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .set("Origin", "https://app.getsling.com")
+        .set("Referer", "https://app.getsling.com/")
+        .set("Sec-Fetch-Dest", "empty")
+        .set("Sec-Fetch-Mode", "cors")
+        .set("Sec-Fetch-Site", "same-site")
+        .set("Accept", "application/json, text/plain, */*");
+    for (k, v) in query { req = req.query(k, v); }
+    match req.send_json(body.clone()) {
+        Ok(r) => Ok(r.into_json::<serde_json::Value>()
+            .with_context(|| format!("invalid JSON from {url}"))?),
+        Err(ureq::Error::Status(401, _)) => Err(anyhow!("sling-401")),
+        Err(ureq::Error::Status(429, _)) => Err(anyhow!("sling-429")),
+        Err(ureq::Error::Status(1010, _)) => Err(anyhow!("sling-1010")),
+        Err(ureq::Error::Status(code, r)) => {
+            let b = r.into_string().unwrap_or_default();
+            Err(anyhow!("sling-{code}: {b}"))
+        }
+        Err(e) => Err(anyhow!("sling-network: {e}")),
+    }
+}
+
+const PUSH_MAX_RETRIES: u32 = 3;
+const PUSH_RATE_LIMIT_BACKOFF_SECS: u64 = 30;
+
+/// Create one planning shift. Retries on 429 up to PUSH_MAX_RETRIES with
+/// linear backoff (30s, 60s, 90s). Returns the created Sling shift id.
+/// Propagates "sling-401" unchanged so the caller can abort the whole run.
+pub fn push_shift(token: &str, cfg: &StudioConfig, s: &PushSpec, viewdates: &str, cachedates: &str) -> Result<i64> {
+    let url = format!("{BASE_URL}/{}/shifts", cfg.org_id);
+    let body = build_shift_body(s, cfg.home_location_id);
+    let query: [(&str, &str); 5] = [
+        ("user-fields", "id"),
+        ("checkRestBreakConflicts", "true"),
+        ("viewdates", viewdates),
+        ("cachedates", cachedates),
+        ("checkConsecutiveWorkDaysConflicts", "true"),
+    ];
+    let mut last_err = anyhow!("push_shift: no attempts");
+    for attempt in 1..=PUSH_MAX_RETRIES {
+        match http_post(token, &url, &query, &body) {
+            Ok(resp) => {
+                // Responses are always arrays; unwrap [0]. id may be string or int.
+                let obj = resp.as_array().and_then(|a| a.first()).cloned().unwrap_or(resp);
+                let id = obj.get("id")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .ok_or_else(|| anyhow!("create response missing id: {obj}"))?;
+                return Ok(id);
+            }
+            Err(e) if e.to_string() == "sling-429" => {
+                last_err = e;
+                std::thread::sleep(std::time::Duration::from_secs(PUSH_RATE_LIMIT_BACKOFF_SECS * attempt as u64));
+                continue;
+            }
+            Err(e) => return Err(e), // includes sling-401 -> caller aborts
+        }
+    }
+    Err(anyhow!("create failed after {PUSH_MAX_RETRIES} retries: {last_err}"))
+}
+
+/// Fetch the target month's calendar events (for push dedupe). Mirrors the
+/// pull's calendar GET: -05:00 offset, percent-encoded dates, nonce.
+pub fn fetch_calendar(token: &str, cfg: &StudioConfig, month: &str) -> Result<Vec<CalendarEvent>> {
+    let (start, end) = month_range(month)?;
+    let url = format!("{BASE_URL}/{}/calendar/{}/users/{}", cfg.org_id, cfg.org_id, cfg.acting_user_id);
+    let dates = format!("{start}/{end}");
+    let nonce = chrono::Utc::now().timestamp_millis().to_string();
+    let doc = http_get_with_query(token, &url, &[
+        ("dates", &dates), ("user-fields", "id"), ("nonce", &nonce),
+    ])?;
+    let arr = doc.as_array().ok_or_else(|| anyhow!("calendar not array"))?;
+    Ok(arr.iter().filter_map(|e| serde_json::from_value(e.clone()).ok()).collect())
+}
+
 /// Returns (startISO, endISO) for the target month, last day of month at 23:59,
 /// with a -05:00 offset. Matches scripts/sling_extract.py:82-85 — Sling
 /// returns empty on historical /calendar queries when the offset is omitted.
@@ -240,6 +350,118 @@ pub fn month_range(target_month: &str) -> Result<(String, String)> {
     }.ok_or_else(|| anyhow!("invalid date"))?;
     let end = next.pred_opt().unwrap();
     Ok((format!("{start}T00:00:00-05:00"), format!("{end}T23:59:59-05:00")))
+}
+
+/// POST viewdates/cachedates windows for the target month. These are
+/// cache-invalidation hints Sling's server uses; we reproduce the web
+/// client's padding (prev day .. first-of-next-month + 4 days, cachedates
+/// one day wider each side). NB: offset is "-0500" (no colon) here, unlike
+/// the calendar `dates=` param which uses "-05:00". Matches
+/// scripts/push_to_sling.py VIEWDATES/CACHEDATES for June 2026.
+pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
+    let parts: Vec<&str> = month.split('-').collect();
+    if parts.len() != 2 { return Err(anyhow!("bad month: {month}")); }
+    let year: i32 = parts[0].parse()?;
+    let mon: u32 = parts[1].parse()?;
+    let first = chrono::NaiveDate::from_ymd_opt(year, mon, 1)
+        .ok_or_else(|| anyhow!("invalid date"))?;
+    let next_first = if mon == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, mon + 1, 1)
+    }.ok_or_else(|| anyhow!("invalid date"))?;
+    // NB: "-0500" (no colon) — Sling's viewdates/cachedates format. Do NOT
+    // change to "-05:00"; that colon-form is only for the calendar dates= param.
+    let fmt = |d: chrono::NaiveDate| format!("{d}T00:00:00-0500");
+    let view_start = first - chrono::Duration::days(1);
+    let view_end = next_first + chrono::Duration::days(4);
+    let cache_start = view_start - chrono::Duration::days(1);
+    let cache_end = view_end + chrono::Duration::days(1);
+    Ok((
+        format!("{}/{}", fmt(view_start), fmt(view_end)),
+        format!("{}/{}", fmt(cache_start), fmt(cache_end)),
+    ))
+}
+
+/// Split a Sling dtstart ("2026-06-01T05:45:00-05:00") into (date, "HH:MM").
+pub fn split_dt(dt: &str) -> (String, String) {
+    if let Some((date, time)) = dt.split_once('T') {
+        (date.to_string(), time.chars().take(5).collect())
+    } else {
+        (dt.chars().take(10).collect(), "00:00".to_string())
+    }
+}
+
+/// Stable dedupe key: "date|HH:MM|user_id|position_id|location_id".
+pub fn spec_fingerprint(s: &PushSpec, home_location_id: i64) -> String {
+    format!("{}|{}|{}|{}|{}", s.date, s.start, s.user_id, s.position_id, home_location_id)
+}
+
+/// Build the set of fingerprints already present at the home location.
+/// Only planning + published shifts count (matches push_to_sling.py).
+pub fn existing_fingerprints(events: &[CalendarEvent], home_location_id: i64) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for ev in events {
+        if ev.kind != "shift" { continue; }
+        // Unlike filter_events (which lets location-less events through), we
+        // require an explicit home-location match here — matches
+        // push_to_sling.py's existing_shifts_at_home. A shift returned without
+        // a location can't be confirmed as home, so it's conservatively not
+        // counted as a duplicate; the push would re-attempt it, and re-push is
+        // idempotent. Our own created shifts always echo back their location.
+        let Some(loc) = ev.location.as_ref() else { continue; };
+        if loc.id != home_location_id { continue; }
+        match ev.status.as_deref() {
+            Some("planning") | Some("published") => {}
+            _ => continue,
+        }
+        let Some(user) = ev.user.as_ref() else { continue; };
+        let Some(pos) = ev.position.as_ref() else { continue; };
+        let (date, hhmm) = split_dt(&ev.dtstart);
+        out.insert(format!("{}|{}|{}|{}|{}", date, hhmm, user.id, pos.id, home_location_id));
+    }
+    out
+}
+
+/// Build POST specs from proposal rows. Dropped shifts are skipped. A
+/// non-dropped shift with no teacher is a hard error (it can't become a
+/// valid Sling shift). Co-teach rows expand into one spec per teacher named
+/// in `coteach_label`, resolved through `name_to_id` (display_name -> id).
+pub fn build_push_specs(
+    inputs: &[ProposalShiftInput],
+    name_to_id: &std::collections::HashMap<String, i64>,
+) -> Result<Vec<PushSpec>, String> {
+    let mut specs = Vec::new();
+    for inp in inputs {
+        if inp.is_dropped { continue; }
+        if inp.is_coteach {
+            let label = inp.coteach_label.as_deref().unwrap_or("");
+            let names: Vec<&str> = label.split(" + ").map(str::trim).filter(|n| !n.is_empty()).collect();
+            if names.is_empty() {
+                return Err(format!("co-teach shift on {} {} has no teacher names", inp.date, inp.start));
+            }
+            for name in names {
+                let uid = name_to_id.get(name).ok_or_else(|| format!(
+                    "co-teach shift on {} {} references unknown teacher '{}'", inp.date, inp.start, name))?;
+                specs.push(PushSpec {
+                    proposal_shift_id: inp.proposal_shift_id, date: inp.date.clone(), start: inp.start.clone(),
+                    end: inp.end.clone(), position_id: inp.position_id, user_id: *uid,
+                    class_name: inp.class_name.clone(), teacher_name: name.to_string(),
+                });
+            }
+        } else {
+            let uid = inp.user_id.ok_or_else(|| format!(
+                "shift on {} {} ({}) has no teacher assigned — resolve it before pushing",
+                inp.date, inp.start, inp.class_name))?;
+            specs.push(PushSpec {
+                proposal_shift_id: inp.proposal_shift_id, date: inp.date.clone(), start: inp.start.clone(),
+                end: inp.end.clone(), position_id: inp.position_id, user_id: uid,
+                class_name: inp.class_name.clone(),
+                teacher_name: inp.teacher_name.clone().unwrap_or_default(),
+            });
+        }
+    }
+    Ok(specs)
 }
 
 pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result<PullPayload> {
@@ -356,6 +578,22 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
     })
 }
 
+/// The create-shift POST body. `users` is an array on POST (PUT uses
+/// singular `user`); `status` is always the literal "planning" — this app
+/// never publishes. dtstart/dtend are naive local strings; Sling applies the
+/// timezone on echo. See docs/sling-api.md.
+pub fn build_shift_body(s: &PushSpec, home_location_id: i64) -> serde_json::Value {
+    serde_json::json!({
+        "location": { "id": home_location_id },
+        "dtstart": format!("{}T{}", s.date, s.start),
+        "dtend": format!("{}T{}", s.date, s.end),
+        "users": [{ "id": s.user_id }],
+        "slots": 1,
+        "position": { "id": s.position_id },
+        "status": "planning",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +645,144 @@ mod tests {
         let pos_ids = position_group_ids(&groups);
         assert!(pos_ids.contains(&29470407), "Empower position group present");
         assert!(pos_ids.contains(&29303965), "Classic position group present");
+    }
+
+    #[test]
+    fn view_cache_dates_reproduce_june_window() {
+        let (view, cache) = view_cache_dates("2026-06").unwrap();
+        // Matches the constants the working push_to_sling.py used for June 2026.
+        assert_eq!(view, "2026-05-31T00:00:00-0500/2026-07-05T00:00:00-0500");
+        assert_eq!(cache, "2026-05-30T00:00:00-0500/2026-07-06T00:00:00-0500");
+    }
+
+    #[test]
+    fn view_cache_dates_handles_december_year_rollover() {
+        let (view, cache) = view_cache_dates("2026-12").unwrap();
+        assert_eq!(view, "2026-11-30T00:00:00-0500/2027-01-05T00:00:00-0500");
+        assert_eq!(cache, "2026-11-29T00:00:00-0500/2027-01-06T00:00:00-0500");
+    }
+
+    #[test]
+    fn split_dt_extracts_date_and_hhmm() {
+        assert_eq!(split_dt("2026-06-01T05:45:00-05:00"), ("2026-06-01".into(), "05:45".into()));
+        assert_eq!(split_dt("2026-06-01"), ("2026-06-01".into(), "00:00".into()));
+    }
+
+    #[test]
+    fn existing_fingerprints_filters_and_keys_correctly() {
+        let events = vec![
+            // home shift, planning -> included
+            CalendarEvent {
+                id: Some(1),
+                kind: "shift".into(),
+                dtstart: "2026-06-01T05:45:00-05:00".into(),
+                dtend: "2026-06-01T06:45:00-05:00".into(),
+                user: Some(SlingEventUserRef { id: 1001 }),
+                users: None,
+                position: Some(SlingEventPositionRef { id: 29470407 }),
+                location: Some(SlingEventLocationRef { id: 5 }),
+                status: Some("planning".into()),
+            },
+            // wrong location -> excluded
+            CalendarEvent {
+                id: Some(2),
+                kind: "shift".into(),
+                dtstart: "2026-06-01T05:45:00-05:00".into(),
+                dtend: "2026-06-01T06:45:00-05:00".into(),
+                user: Some(SlingEventUserRef { id: 1002 }),
+                users: None,
+                position: Some(SlingEventPositionRef { id: 29470407 }),
+                location: Some(SlingEventLocationRef { id: 999 }),
+                status: Some("planning".into()),
+            },
+            // leave event -> excluded
+            CalendarEvent {
+                id: Some(3),
+                kind: "leave".into(),
+                dtstart: "2026-06-02T00:00:00-05:00".into(),
+                dtend: "".into(),
+                user: Some(SlingEventUserRef { id: 1001 }),
+                users: None,
+                position: None,
+                location: Some(SlingEventLocationRef { id: 5 }),
+                status: None,
+            },
+            // published home shift -> included (published counts as present)
+            CalendarEvent {
+                id: Some(4),
+                kind: "shift".into(),
+                dtstart: "2026-06-03T09:00:00-05:00".into(),
+                dtend: "2026-06-03T10:00:00-05:00".into(),
+                user: Some(SlingEventUserRef { id: 1003 }),
+                users: None,
+                position: Some(SlingEventPositionRef { id: 29303965 }),
+                location: Some(SlingEventLocationRef { id: 5 }),
+                status: Some("published".into()),
+            },
+        ];
+        let fp = existing_fingerprints(&events, 5);
+        assert_eq!(fp.len(), 2);
+        assert!(fp.contains("2026-06-01|05:45|1001|29470407|5"));
+        assert!(fp.contains("2026-06-03|09:00|1003|29303965|5"));
+    }
+
+    #[test]
+    fn build_push_specs_expands_coteach_and_skips_dropped() {
+        let mut name_to_id = std::collections::HashMap::new();
+        name_to_id.insert("Teacher A".to_string(), 1001i64);
+        name_to_id.insert("Teacher E".to_string(), 1005i64);
+        let inputs = vec![
+            ProposalShiftInput { proposal_shift_id: 10, date: "2026-06-01".into(), start: "05:45".into(),
+                end: "06:45".into(), position_id: 29470407, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+                class_name: "Empower".into(), is_coteach: false, coteach_label: None, is_dropped: false },
+            ProposalShiftInput { proposal_shift_id: 11, date: "2026-06-02".into(), start: "09:00".into(),
+                end: "10:00".into(), position_id: 29303965, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+                class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Teacher E".into()), is_dropped: false },
+            ProposalShiftInput { proposal_shift_id: 12, date: "2026-06-03".into(), start: "09:00".into(),
+                end: "10:00".into(), position_id: 29303965, user_id: None, teacher_name: None,
+                class_name: "Classic".into(), is_coteach: false, coteach_label: None, is_dropped: true },
+        ];
+        let specs = build_push_specs(&inputs, &name_to_id).unwrap();
+        assert_eq!(specs.len(), 3); // 1 normal + 2 from co-teach + 0 dropped
+        let coteach_ids: Vec<i64> = specs.iter().filter(|s| s.proposal_shift_id == 11).map(|s| s.user_id).collect();
+        assert_eq!(coteach_ids, vec![1001, 1005]);
+    }
+
+    #[test]
+    fn build_push_specs_errors_on_unassigned() {
+        let name_to_id = std::collections::HashMap::new();
+        let inputs = vec![ProposalShiftInput { proposal_shift_id: 20, date: "2026-06-01".into(), start: "05:45".into(),
+            end: "06:45".into(), position_id: 29470407, user_id: None, teacher_name: None,
+            class_name: "Empower".into(), is_coteach: false, coteach_label: None, is_dropped: false }];
+        let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
+        assert!(e.contains("no teacher"), "got: {e}");
+    }
+
+    #[test]
+    fn build_push_specs_errors_on_unknown_coteach_name() {
+        let mut name_to_id = std::collections::HashMap::new();
+        name_to_id.insert("Teacher A".to_string(), 1001i64);
+        let inputs = vec![ProposalShiftInput { proposal_shift_id: 30, date: "2026-06-02".into(), start: "09:00".into(),
+            end: "10:00".into(), position_id: 29303965, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+            class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Ghost".into()), is_dropped: false }];
+        let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
+        assert!(e.contains("Ghost"), "got: {e}");
+    }
+
+    #[test]
+    fn build_shift_body_matches_sling_contract() {
+        let s = PushSpec { proposal_shift_id: 1, date: "2026-06-01".into(), start: "05:45".into(),
+            end: "06:45".into(), position_id: 29470407, user_id: 1001,
+            class_name: "Empower".into(), teacher_name: "Teacher A".into() };
+        let body = build_shift_body(&s, 5);
+        assert_eq!(body["dtstart"], "2026-06-01T05:45");
+        assert_eq!(body["dtend"], "2026-06-01T06:45");
+        assert_eq!(body["status"], "planning");
+        assert_eq!(body["slots"], 1);
+        assert_eq!(body["location"]["id"], 5);
+        assert_eq!(body["position"]["id"], 29470407);
+        // users is an ARRAY on POST (not singular `user`)
+        assert_eq!(body["users"][0]["id"], 1001);
+        assert!(body.get("user").is_none());
     }
 }
