@@ -26,8 +26,9 @@ and `rollback_push.py` scripts are retired from the runtime path (kept in
 
 Rationale: the user chose the in-process port for native progress streaming.
 `docs/architecture.md:47` argues for keeping debugged Python, so the mitigation
-is **faithful replication** of every request shape plus a **single-shift live
-validation round** before any bulk push (per the `sling-integration` skill).
+is **faithful replication** of every request shape, verified by unit tests
+against captured fixtures plus an end-to-end manual run against a real Sling
+session.
 
 ### Approaches considered
 
@@ -37,7 +38,7 @@ validation round** before any bulk push (per the `sling-integration` skill).
    streaming; viable but more sidecar plumbing.
 3. **Pure-Rust port (chosen)** — in-process, native progress, drops the Python
    dependency for push; risk is re-implementing debugged logic, mitigated by
-   exact replication + single-shift validation.
+   exact replication (unit-tested against fixtures) + an end-to-end manual run.
 
 ## API fidelity (must match `push_to_sling.py` / `docs/sling-api.md` exactly)
 
@@ -48,7 +49,7 @@ validation round** before any bulk push (per the `sling-integration` skill).
 | dtstart/dtend | naive local `YYYY-MM-DDTHH:MM`, **no offset** (Sling applies tz on echo); built from `proposal_shifts.shift_date` + `start_time`/`end_time` |
 | Response | array → unwrap `[0]` → read `.id` (flex string-or-int) |
 | Dedupe GET | reuse existing calendar GET; filter `type=="shift"`, `location.id == home_location_id` (exact match, skip no-location), `status ∈ {planning, published}`; fingerprint `(date, HH:MM, user_id, position_id, location_id)` |
-| DELETE (rollback / single-shift test cleanup) | `DELETE /v1/{org}/shifts/{id}?viewdates=…&cachedates=…` → 204 |
+| DELETE (documented for a future rollback feature; not built this iteration) | `DELETE /v1/{org}/shifts/{id}?viewdates=…&cachedates=…` → 204 |
 | Headers | same browser/Cloudflare set already in `sling.rs` (UA, Origin, Referer, Sec-Fetch-*) |
 | Rate limit | batch 10, 1s intra / 10s inter, 429 backoff `30·attempt`, **max 3 retries**, then log-and-skip |
 
@@ -68,7 +69,7 @@ ProposalView ──"Push to Sling"──▶ push_proposal_dry_run(proposalId)   
                                    ├─ gate: error if any non-dropped shift unassigned
                                    ├─ GET calendar, dedupe → {to_create, skipped}
                                    └─ returns PushPreview (zero writes)
-   user reviews preview ──"Confirm"──▶ push_proposal_execute(proposalId, limit?)  [Rust, bg thread]
+   user reviews preview ──"Confirm"──▶ push_proposal_execute(proposalId)  [Rust, bg thread]
                                    ├─ INSERT pushes row (started_at)
                                    ├─ for each batch/shift: POST → emit "push-progress",
                                    │     INSERT push_results row (outcome, sling_shift_id|error)
@@ -79,15 +80,15 @@ ProposalView ──"Push to Sling"──▶ push_proposal_dry_run(proposalId)   
 ### Components
 
 - **`sling.rs`** (new): `push_shift(token, cfg, spec) -> Result<i64>` (returns
-  Sling shift id), `delete_shift(token, cfg, id) -> Result<()>`, `push_month`
-  driver (batching/backoff/dedupe), `PushSpec`, `PushPreview`, `PushProgress`
-  types, and `view_cache_dates(month)` helper. Reuses `http_get_with_query`;
-  adds `http_post`/`http_delete` (ureq `send_json` / DELETE).
+  Sling shift id), `push_month` driver (batching/backoff/dedupe), `PushSpec`,
+  `PushPreview`, `PushProgress` types, and `view_cache_dates(month)` helper.
+  Reuses `http_get_with_query`; adds `http_post` (ureq `send_json`).
 - **`commands.rs`** (new commands): `push_proposal_dry_run` and
   `push_proposal_execute`. Both load `studio_config`, build specs from
   `proposal_shifts` joined to `teachers`/`positions`. Execute runs on a
   background thread (same deferred-thread + `emit` pattern as the
-  `sling_login.rs` fix), streaming `push-progress` events.
+  `sling_login.rs` fix), streaming `push-progress` events. No partial/limit
+  mode — a full month is always pushed (idempotent dedupe makes that safe).
 - **`api.ts`**: `pushProposalDryRun(proposalId)`, `pushProposalExecute(proposalId)`.
 - **`PushModal.tsx`**: preview list (to-create grouped by date/teacher, skipped
   count) → Confirm → live progress bar + per-shift result rows → summary. Shows
@@ -108,20 +109,16 @@ state machine. The summary reports created / failed / skipped.
 2. **Dry-run-first is structural** — `execute` is a separate command; the UI
    cannot reach it without first rendering the preview; `dry_run` issues zero
    writes.
-3. **Single-shift live validation before bulk** — `execute` accepts an optional
-   `limit` so the first validation round creates exactly one real planning
-   shift; we confirm it in Sling's UI, delete it via `delete_shift`, then run a
-   full month. Required by the `sling-integration` skill.
-4. **Unassigned gating** — dry-run hard-errors if any non-dropped shift lacks a
+3. **Unassigned gating** — dry-run hard-errors if any non-dropped shift lacks a
    teacher (`sling_user_id IS NULL`); dropped shifts (`is_dropped`) skipped.
    Flagged-but-assigned shifts are allowed (flag is advisory).
-5. **Dedupe before every POST** — no idempotency key exists; never POST a
+4. **Dedupe before every POST** — no idempotency key exists; never POST a
    fingerprint already present at the home location.
-6. **Rate-limit ceiling respected** — never more than 3 retries per shift;
+5. **Rate-limit ceiling respected** — never more than 3 retries per shift;
    batch/backoff values unchanged from the proven script.
-7. **Full audit** — `pushes` + `push_results` rows written incrementally so a
+6. **Full audit** — `pushes` + `push_results` rows written incrementally so a
    crash mid-run still leaves a record.
-8. **401 mid-run** — stop gracefully, show what already landed, trigger the
+7. **401 mid-run** — stop gracefully, show what already landed, trigger the
    existing `SlingTokenModal` re-login flow; user re-pushes (idempotent).
 
 ## Testing
@@ -130,14 +127,16 @@ state machine. The summary reports created / failed / skipped.
   fixture; the unassigned-gate error; `view_cache_dates` computation + exact
   string format (`-0500` vs `-05:00`); POST-body shape (assert `users` is an
   array and `status == "planning"`) against a captured fixture.
-- **Live validation round (manual, gated):** create one real planning shift via
-  the `limit=1` path, verify it in Sling's UI, delete it, then run a full month
-  dry-run + execute. This is the "test one shift before bulk" gate.
+- **Manual end-to-end run:** against a real Sling session, run a full-month
+  dry-run, review the preview, then execute and confirm the planning shifts
+  appear in Sling's UI. This is the validation round before relying on the
+  feature for a real monthly schedule.
 
 ## Out of scope
 
 - Publishing shifts (manager does this in Sling's UI).
 - A persistent push-history view (only "last pushed …" surfaced for now).
-- An automated rollback UI — `delete_shift` exists for the validation round and
-  future use, but no rollback button this iteration.
+- Rollback — neither a `delete_shift` client nor a rollback UI is built this
+  iteration. The DELETE shape is documented in the API table above for when a
+  rollback feature is taken up.
 - DST-correct offsets (existing fixed `-05:00`/`-0500` TODO carries forward).
