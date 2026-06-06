@@ -1512,6 +1512,160 @@ pub fn pull_month_from_sling(
     })
 }
 
+// ============================================================
+// Push proposal to Sling — dry-run (preview) command
+// ============================================================
+
+#[derive(serde::Serialize)]
+pub struct PushPreviewItem {
+    pub date: String,
+    pub start: String,
+    pub end: String,
+    pub class_name: String,
+    pub teacher_name: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct PushPreview {
+    pub total: i64,
+    pub skipped_count: i64,
+    pub to_create: Vec<PushPreviewItem>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct PushSummary {
+    pub push_id: i64,
+    pub created: i64,
+    pub failed: i64,
+    pub skipped: i64,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct PushProgress {
+    pub total: i64,
+    pub done: i64,
+    pub created: i64,
+    pub failed: i64,
+    pub skipped: i64,
+    pub last_label: String,
+    pub last_outcome: String,
+}
+
+/// Load proposal rows + roster map + studio config, then build the gated
+/// push specs and the target month string. Shared by dry-run and execute.
+fn build_specs_for_proposal(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+) -> Result<(Vec<crate::sling::PushSpec>, crate::sling::StudioConfig, String), String> {
+    let studio_cfg = load_studio_config(conn)?;
+    if studio_cfg.org_id == 0 || studio_cfg.home_location_id == 0 {
+        return Err(
+            "Studio not configured — set your Sling org, acting-user, and location IDs in \
+             Settings → Studio configuration before pushing."
+                .to_string(),
+        );
+    }
+    let target_month: String = conn
+        .query_row(
+            "SELECT target_month FROM proposals WHERE id = ?",
+            duckdb::params![proposal_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("proposal {proposal_id} not found: {e}"))?;
+
+    let name_to_id: std::collections::HashMap<String, i64> = {
+        let mut stmt = conn
+            .prepare("SELECT display_name, sling_user_id FROM teachers")
+            .map_err(err)?;
+        stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)? as i64))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let inputs: Vec<crate::sling::ProposalShiftInput> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ps.id, CAST(ps.shift_date AS VARCHAR), ps.start_time, ps.end_time,
+                        ps.sling_position_id, ps.sling_user_id, t.display_name, pos.class_name,
+                        ps.is_coteach, ps.coteach_label, ps.is_dropped
+                 FROM proposal_shifts ps
+                 JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
+                 LEFT JOIN teachers t ON t.sling_user_id = ps.sling_user_id
+                 WHERE ps.proposal_id = ?
+                 ORDER BY ps.shift_date, ps.start_time",
+            )
+            .map_err(err)?;
+        stmt.query_map(duckdb::params![proposal_id], |r| {
+            let uid: Option<i32> = r.get(5)?;
+            Ok(crate::sling::ProposalShiftInput {
+                proposal_shift_id: r.get::<_, i64>(0)?,
+                date: r.get(1)?,
+                start: r.get(2)?,
+                end: r.get(3)?,
+                position_id: r.get::<_, i32>(4)? as i64,
+                user_id: uid.map(|u| u as i64),
+                teacher_name: r.get(6)?,
+                class_name: r.get(7)?,
+                is_coteach: r.get(8)?,
+                coteach_label: r.get(9)?,
+                is_dropped: r.get(10)?,
+            })
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let specs = crate::sling::build_push_specs(&inputs, &name_to_id)?;
+    Ok((specs, studio_cfg, target_month))
+}
+
+#[tauri::command]
+pub fn push_proposal_dry_run(
+    db: State<'_, Db>,
+    token: State<'_, SlingToken>,
+    proposal_id: i64,
+) -> Result<PushPreview, String> {
+    let token_str = {
+        let t = token.0.lock().map_err(err)?;
+        t.clone()
+            .ok_or_else(|| "no Sling token — paste one in Settings".to_string())?
+    };
+    let (specs, cfg, month) = {
+        let conn = db.0.lock().map_err(err)?;
+        build_specs_for_proposal(&conn, proposal_id)?
+    };
+    let events =
+        crate::sling::fetch_calendar(&token_str, &cfg, &month).map_err(err)?;
+    let existing =
+        crate::sling::existing_fingerprints(&events, cfg.home_location_id);
+
+    let total = specs.len() as i64;
+    let mut to_create = Vec::new();
+    let mut skipped_count = 0i64;
+    for s in &specs {
+        if existing.contains(&crate::sling::spec_fingerprint(s, cfg.home_location_id)) {
+            skipped_count += 1;
+        } else {
+            to_create.push(PushPreviewItem {
+                date: s.date.clone(),
+                start: s.start.clone(),
+                end: s.end.clone(),
+                class_name: s.class_name.clone(),
+                teacher_name: s.teacher_name.clone(),
+            });
+        }
+    }
+    Ok(PushPreview {
+        total,
+        skipped_count,
+        to_create,
+    })
+}
+
 #[tauri::command]
 pub fn import_external_shift(
     db: State<'_, Db>,
