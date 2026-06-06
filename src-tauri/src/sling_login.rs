@@ -4,15 +4,21 @@
 //! injected interceptor script. When the page makes its first
 //! authenticated request to api.getsling.com, the script triggers a
 //! same-origin navigation to `/__bk_capture?t=<token>`. The Rust-side
-//! `on_navigation` hook intercepts that URL, extracts the token, saves
-//! it into the SlingToken state, emits `sling-token-saved`, and closes
-//! the window.
+//! `on_navigation` hook intercepts that URL, extracts the token into the
+//! in-memory SlingToken state, then hands persistence + window-close off
+//! to a background thread.
 //!
 //! Why navigation rather than a Tauri event emit: Tauri 2 does not
 //! expose the IPC bridge on external (remote) URLs by default, so a
-//! JS-emitted event would silently no-op. Navigation interception works
-//! identically on WebKitGTK / WebView2 / WKWebView with no capability
-//! config.
+//! JS-emitted event would silently no-op. Navigation interception fires
+//! on WebKitGTK / WebView2 / WKWebView with no capability config.
+//!
+//! IMPORTANT: the `on_navigation` callback runs on the UI thread *inside*
+//! the webview's navigation event. Doing blocking I/O or window-lifecycle
+//! work (close) there deadlocks WebView2 on Windows (reentrancy into the
+//! controller mid-event). WebKitGTK tolerated it, so the bug only surfaced
+//! on Windows. Anything beyond a cheap in-memory write must be deferred to
+//! run after the handler returns — see the handler body.
 //!
 //! See docs/superpowers/specs/2026-05-20-sling-browser-login-design.md.
 
@@ -77,21 +83,39 @@ pub fn open_login_window(app: AppHandle) -> Result<()> {
             eprintln!("[sling_login] sentinel URL had no 't' query param");
             return false;
         };
+        // Store the in-memory token now — this is a cheap, non-blocking mutex
+        // write and is safe to do inside the handler.
         if let Some(state) = app_for_nav.try_state::<SlingToken>() {
             if let Ok(mut guard) = state.0.lock() {
                 *guard = Some(token.clone());
             }
         }
-        // Persist to Stronghold so the token survives app restarts.
-        if let Some(secrets) = app_for_nav.try_state::<crate::secrets::Secrets>() {
-            if let Err(e) = secrets.set(crate::secrets::KEY_SLING_TOKEN, &token) {
-                eprintln!("[sling_login] failed to persist token: {e}");
+        // CRITICAL — Windows / WebView2: do NOT perform window-lifecycle
+        // (close) or blocking I/O (Stronghold save) synchronously inside
+        // on_navigation. This callback runs on the UI thread *inside* the
+        // webview's NavigationStarting event; calling close() re-enters the
+        // event loop to tear down the WebView2 controller mid-event and
+        // deadlocks the whole app (the main window shares this thread).
+        // WebKitGTK tolerates it, which is why it only froze on Windows.
+        // Defer everything to a thread that runs AFTER this handler returns,
+        // and close via run_on_main_thread so it lands on the next event-loop
+        // tick rather than reentrantly.
+        let app_deferred = app_for_nav.clone();
+        std::thread::spawn(move || {
+            // Persist off the UI thread (Stronghold save = disk I/O + crypto).
+            if let Some(secrets) = app_deferred.try_state::<crate::secrets::Secrets>() {
+                if let Err(e) = secrets.set(crate::secrets::KEY_SLING_TOKEN, &token) {
+                    eprintln!("[sling_login] failed to persist token: {e}");
+                }
             }
-        }
-        let _ = app_for_nav.emit("sling-token-saved", ());
-        if let Some(w) = app_for_nav.get_webview_window(LABEL) {
-            let _ = w.close();
-        }
+            let _ = app_deferred.emit("sling-token-saved", ());
+            let app_close = app_deferred.clone();
+            let _ = app_deferred.run_on_main_thread(move || {
+                if let Some(w) = app_close.get_webview_window(LABEL) {
+                    let _ = w.close();
+                }
+            });
+        });
         false
     })
     .build()?;
