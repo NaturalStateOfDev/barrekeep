@@ -52,7 +52,7 @@
 2. **Generate proposal.** User clicks "Generate proposal." Tauri runs the rule-based proposer (in Rust or Python sidecar) which reads from DuckDB and writes to a `proposals` table with a generation id.
 3. **Optional Claude pass.** User clicks "Have Claude review." App reads the proposal, sends it + the prompt from `prompts/verifier.md` to the Anthropic API, and writes Claude's suggestions to a `suggestions` table linked to the proposal.
 4. **Edit in calendar view.** User clicks cells, swaps teachers. Each edit becomes a row in the `edits` table (so we have full undo/redo and audit history).
-5. **Push to Sling.** User clicks "Push to Sling." App calls `push_to_sling.py` with the final proposal as a CSV. Audit log goes to `pushes` and `push_results` tables.
+5. **Push to Sling.** User clicks "Push to Sling" on a proposal. The app builds the shift list from `proposal_shifts` in DuckDB, dedupes against shifts already in Sling, and POSTs the missing ones in-process (Rust, `sling.rs::push_shift`) as `status: "planning"`, batched + rate-limit-aware. A dry-run preview is shown for confirmation first; live progress streams via the `push-progress` event. Audit goes to the `pushes` and `push_results` tables. (The legacy `scripts/push_to_sling.py` is retained for reference only and is no longer invoked.)
 6. **Publish.** User goes to Sling's web UI to publish.
 
 ## DuckDB schema overview
