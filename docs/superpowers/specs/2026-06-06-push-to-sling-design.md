@@ -90,10 +90,10 @@ ProposalView ──"Push to Sling"──▶ push_proposal_dry_run(proposalId)   
   `sling_login.rs` fix), streaming `push-progress` events. No partial/limit
   mode — a full month is always pushed (idempotent dedupe makes that safe).
 - **`api.ts`**: `pushProposalDryRun(proposalId)`, `pushProposalExecute(proposalId)`.
-- **`PushModal.tsx`**: preview list (to-create grouped by date/teacher, skipped
-  count) → Confirm → live progress bar + per-shift result rows → summary. Shows
-  "last pushed …" from the most recent `pushes` row for the proposal. Listens to
-  `push-progress` / `push-done` / `sling-401`.
+- **`PushModal.tsx`**: preview list (to-create rows: date/time, class, teacher,
+  plus skipped count) → Confirm → live progress bar + current-shift line →
+  summary. Listens to `push-progress`; routes 401 to the existing
+  `SlingTokenModal`.
 - **Proposal toolbar**: a "Push to Sling" button that opens `PushModal`.
 
 ### Idempotent retry (partial failure)
