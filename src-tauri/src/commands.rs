@@ -1666,6 +1666,99 @@ pub fn push_proposal_dry_run(
     })
 }
 
+const PUSH_BATCH_SIZE: usize = 10;
+const PUSH_INTRA_DELAY_SECS: u64 = 1;
+const PUSH_INTER_DELAY_SECS: u64 = 10;
+
+#[tauri::command]
+pub fn push_proposal_execute(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    token: State<'_, SlingToken>,
+    proposal_id: i64,
+) -> Result<PushSummary, String> {
+    use tauri::Emitter;
+
+    let token_str = {
+        let t = token.0.lock().map_err(err)?;
+        t.clone().ok_or_else(|| "no Sling token — paste one in Settings".to_string())?
+    };
+    let (specs, cfg, month) = {
+        let conn = db.0.lock().map_err(err)?;
+        build_specs_for_proposal(&conn, proposal_id)?
+    };
+    let (viewdates, cachedates) = crate::sling::view_cache_dates(&month).map_err(err)?;
+
+    // Re-dedupe at execute time (idempotent re-push: only POST what's missing).
+    let events = crate::sling::fetch_calendar(&token_str, &cfg, &month).map_err(err)?;
+    let existing = crate::sling::existing_fingerprints(&events, cfg.home_location_id);
+    let to_create: Vec<&crate::sling::PushSpec> = specs.iter()
+        .filter(|s| !existing.contains(&crate::sling::spec_fingerprint(s, cfg.home_location_id)))
+        .collect();
+    let skipped = (specs.len() - to_create.len()) as i64;
+    let total = to_create.len() as i64;
+
+    // Open the audit row.
+    let push_id: i64 = {
+        let conn = db.0.lock().map_err(err)?;
+        conn.query_row(
+            "INSERT INTO pushes (proposal_id, shifts_attempted, shifts_skipped) VALUES (?, ?, ?) RETURNING id",
+            duckdb::params![proposal_id, total, skipped],
+            |r| r.get(0),
+        ).map_err(err)?
+    };
+
+    let mut created = 0i64;
+    let mut failed = 0i64;
+    let mut aborted_401 = false;
+
+    'outer: for (idx, chunk) in to_create.chunks(PUSH_BATCH_SIZE).enumerate() {
+        for (j, s) in chunk.iter().enumerate() {
+            let label = format!("{} {} {} → {}", s.date, s.start, s.class_name, s.teacher_name);
+            let (outcome, sling_id, errmsg): (&str, Option<String>, Option<String>) =
+                match crate::sling::push_shift(&token_str, &cfg, s, &viewdates, &cachedates) {
+                    Ok(id) => { created += 1; ("created", Some(id.to_string()), None) }
+                    Err(e) if e.to_string() == "sling-401" => { aborted_401 = true; failed += 1; ("failed", None, Some("token expired".into())) }
+                    Err(e) => { failed += 1; ("failed", None, Some(e.to_string())) }
+                };
+            {
+                let conn = db.0.lock().map_err(err)?;
+                conn.execute(
+                    "INSERT INTO push_results (push_id, proposal_shift_id, outcome, sling_shift_id, error_message)
+                     VALUES (?, ?, ?, ?, ?)",
+                    duckdb::params![push_id, s.proposal_shift_id, outcome, sling_id, errmsg],
+                ).map_err(err)?;
+            }
+            let done = created + failed;
+            let _ = app.emit("push-progress", PushProgress {
+                total, done, created, failed, skipped,
+                last_label: label, last_outcome: outcome.to_string(),
+            });
+            if aborted_401 { break 'outer; }
+            if j < chunk.len() - 1 {
+                std::thread::sleep(std::time::Duration::from_secs(PUSH_INTRA_DELAY_SECS));
+            }
+        }
+        if idx < to_create.len().div_ceil(PUSH_BATCH_SIZE) - 1 {
+            std::thread::sleep(std::time::Duration::from_secs(PUSH_INTER_DELAY_SECS));
+        }
+    }
+
+    // Close the audit row.
+    {
+        let conn = db.0.lock().map_err(err)?;
+        conn.execute(
+            "UPDATE pushes SET finished_at = now(), shifts_succeeded = ?, shifts_failed = ? WHERE id = ?",
+            duckdb::params![created, failed, push_id],
+        ).map_err(err)?;
+    }
+
+    if aborted_401 {
+        return Err(format!("sling-401: token expired after creating {created} shift(s)"));
+    }
+    Ok(PushSummary { push_id, created, failed, skipped })
+}
+
 #[tauri::command]
 pub fn import_external_shift(
     db: State<'_, Db>,
