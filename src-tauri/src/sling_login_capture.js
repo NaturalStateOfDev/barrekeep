@@ -109,7 +109,11 @@
       if (!u.pathname.startsWith(AUTH_PATH)) return;
       if (!authHeader || String(authHeader).length < MIN_LEN) return;
       captured = true;
-      const target = CAPTURE_URL + "?t=" + encodeURIComponent(String(authHeader));
+      let target = CAPTURE_URL + "?t=" + encodeURIComponent(String(authHeader));
+      // Opportunistically grab the org id from an org-scoped /v1/{org}/… URL
+      // so the app can prefill studio config. Absent on non-org endpoints.
+      const orgMatch = u.pathname.match(/^\/v1\/(\d+)(?:\/|$)/);
+      if (orgMatch) target += "&o=" + orgMatch[1];
       window.location.replace(target);
     } catch (_) { /* swallow */ }
   }

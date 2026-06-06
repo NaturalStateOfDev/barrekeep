@@ -26,6 +26,10 @@ pub struct AnthropicKey(pub Mutex<Option<String>>);
 /// the in-memory cache to avoid keychain reads on every request.
 pub struct SlingToken(pub Mutex<Option<String>>);
 
+/// Org id opportunistically parsed from the Sling login request URL, used as a
+/// fallback when account/session doesn't expose it. See sling_login.rs.
+pub struct SlingOrgHint(pub Mutex<Option<i64>>);
+
 #[derive(Serialize)]
 pub struct DbInfo {
     pub path: String,

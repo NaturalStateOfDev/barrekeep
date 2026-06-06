@@ -90,6 +90,15 @@ pub fn open_login_window(app: AppHandle) -> Result<()> {
                 *guard = Some(token.clone());
             }
         }
+        // Stash the org hint (cheap mutex write — safe inside on_navigation).
+        if let Some(org) = url.query_pairs()
+            .find(|(k, _)| k == "o")
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+        {
+            if let Some(hint) = app_for_nav.try_state::<crate::commands::SlingOrgHint>() {
+                if let Ok(mut g) = hint.0.lock() { *g = Some(org); }
+            }
+        }
         // CRITICAL — Windows / WebView2: do NOT perform window-lifecycle
         // (close) or blocking I/O (Stronghold save) synchronously inside
         // on_navigation. This callback runs on the UI thread *inside* the
