@@ -250,6 +250,86 @@ fn http_get_with_query(token: &str, url: &str, query: &[(&str, &str)]) -> Result
     }
 }
 
+/// POST JSON with browser-like headers + percent-encoded query params.
+/// Returns parsed JSON on 2xx; maps known statuses to sentinel errors that
+/// the command layer recognizes (sling-401, sling-429, sling-1010).
+fn http_post(token: &str, url: &str, query: &[(&str, &str)], body: &serde_json::Value) -> Result<serde_json::Value> {
+    let mut req = ureq::post(url)
+        .set("Authorization", token)
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .set("Origin", "https://app.getsling.com")
+        .set("Referer", "https://app.getsling.com/")
+        .set("Sec-Fetch-Dest", "empty")
+        .set("Sec-Fetch-Mode", "cors")
+        .set("Sec-Fetch-Site", "same-site")
+        .set("Accept", "application/json, text/plain, */*");
+    for (k, v) in query { req = req.query(k, v); }
+    match req.send_json(body.clone()) {
+        Ok(r) => Ok(r.into_json::<serde_json::Value>()
+            .with_context(|| format!("invalid JSON from {url}"))?),
+        Err(ureq::Error::Status(401, _)) => Err(anyhow!("sling-401")),
+        Err(ureq::Error::Status(429, _)) => Err(anyhow!("sling-429")),
+        Err(ureq::Error::Status(1010, _)) => Err(anyhow!("sling-1010")),
+        Err(ureq::Error::Status(code, r)) => {
+            let b = r.into_string().unwrap_or_default();
+            Err(anyhow!("sling-{code}: {b}"))
+        }
+        Err(e) => Err(anyhow!("sling-network: {e}")),
+    }
+}
+
+const PUSH_MAX_RETRIES: u32 = 3;
+const PUSH_RATE_LIMIT_BACKOFF_SECS: u64 = 30;
+
+/// Create one planning shift. Retries on 429 up to PUSH_MAX_RETRIES with
+/// linear backoff (30s, 60s, 90s). Returns the created Sling shift id.
+/// Propagates "sling-401" unchanged so the caller can abort the whole run.
+pub fn push_shift(token: &str, cfg: &StudioConfig, s: &PushSpec, viewdates: &str, cachedates: &str) -> Result<i64> {
+    let url = format!("{BASE_URL}/{}/shifts", cfg.org_id);
+    let body = build_shift_body(s, cfg.home_location_id);
+    let query: [(&str, &str); 5] = [
+        ("user-fields", "id"),
+        ("checkRestBreakConflicts", "true"),
+        ("viewdates", viewdates),
+        ("cachedates", cachedates),
+        ("checkConsecutiveWorkDaysConflicts", "true"),
+    ];
+    let mut last_err = anyhow!("push_shift: no attempts");
+    for attempt in 1..=PUSH_MAX_RETRIES {
+        match http_post(token, &url, &query, &body) {
+            Ok(resp) => {
+                // Responses are always arrays; unwrap [0]. id may be string or int.
+                let obj = resp.as_array().and_then(|a| a.first()).cloned().unwrap_or(resp);
+                let id = obj.get("id")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .ok_or_else(|| anyhow!("create response missing id: {obj}"))?;
+                return Ok(id);
+            }
+            Err(e) if e.to_string() == "sling-429" => {
+                last_err = e;
+                std::thread::sleep(std::time::Duration::from_secs(PUSH_RATE_LIMIT_BACKOFF_SECS * attempt as u64));
+                continue;
+            }
+            Err(e) => return Err(e), // includes sling-401 -> caller aborts
+        }
+    }
+    Err(anyhow!("create failed after {PUSH_MAX_RETRIES} retries: {last_err}"))
+}
+
+/// Fetch the target month's calendar events (for push dedupe). Mirrors the
+/// pull's calendar GET: -05:00 offset, percent-encoded dates, nonce.
+pub fn fetch_calendar(token: &str, cfg: &StudioConfig, month: &str) -> Result<Vec<CalendarEvent>> {
+    let (start, end) = month_range(month)?;
+    let url = format!("{BASE_URL}/{}/calendar/{}/users/{}", cfg.org_id, cfg.org_id, cfg.acting_user_id);
+    let dates = format!("{start}/{end}");
+    let nonce = chrono::Utc::now().timestamp_millis().to_string();
+    let doc = http_get_with_query(token, &url, &[
+        ("dates", &dates), ("user-fields", "id"), ("nonce", &nonce),
+    ])?;
+    let arr = doc.as_array().ok_or_else(|| anyhow!("calendar not array"))?;
+    Ok(arr.iter().filter_map(|e| serde_json::from_value(e.clone()).ok()).collect())
+}
+
 /// Returns (startISO, endISO) for the target month, last day of month at 23:59,
 /// with a -05:00 offset. Matches scripts/sling_extract.py:82-85 — Sling
 /// returns empty on historical /calendar queries when the offset is omitted.
