@@ -17,6 +17,8 @@ import type {
   PullResult,
   AvailabilityBlock,
   ExternalShiftRow,
+  PushPreview,
+  PushSummary,
 } from "../types";
 
 export const api = {
@@ -71,4 +73,8 @@ export const api = {
   addTeacherFromPull: (input: { sling_user_id: number; display_name: string;
     weekly_target: number; weekly_max: number; is_lead: boolean; }) =>
     invoke<void>("add_teacher_from_pull", { input }),
+  pushProposalDryRun: (proposalId: number) =>
+    invoke<PushPreview>("push_proposal_dry_run", { proposalId }),
+  pushProposalExecute: (proposalId: number) =>
+    invoke<PushSummary>("push_proposal_execute", { proposalId }),
 };

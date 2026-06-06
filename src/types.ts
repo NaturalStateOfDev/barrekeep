@@ -159,6 +159,37 @@ export interface AvailabilityBlock {
   ends_at: string;
 }
 
+export interface PushPreviewItem {
+  date: string;
+  start: string;
+  end: string;
+  class_name: string;
+  teacher_name: string;
+}
+
+export interface PushPreview {
+  total: number;
+  skipped_count: number;
+  to_create: PushPreviewItem[];
+}
+
+export interface PushSummary {
+  push_id: number;
+  created: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface PushProgress {
+  total: number;
+  done: number;
+  created: number;
+  failed: number;
+  skipped: number;
+  last_label: string;
+  last_outcome: string;
+}
+
 export interface ExternalShiftRow {
   sling_shift_id: number;
   shift_date: string;
