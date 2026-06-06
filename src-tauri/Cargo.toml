@@ -20,7 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Bundled = compiles DuckDB from C++ source. First build is slow (5-10 min)
 # but produces a self-contained binary with no system DuckDB dependency.
-duckdb = { version = "1.1", features = ["bundled"] }
+duckdb = { version = "1.10503", features = ["bundled"] }
 thiserror = "2"
 anyhow = "1"
 # HTTP client for the Anthropic API. Sync (blocking) is fine — Tauri commands
