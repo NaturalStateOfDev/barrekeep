@@ -97,6 +97,7 @@ pub fn run() {
             commands::get_studio_config,
             commands::set_studio_config,
             commands::open_sling_login_window,
+            commands::discover_studio_config,
             commands::review_proposal,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
