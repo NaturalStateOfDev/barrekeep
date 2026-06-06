@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "./lib/api";
 import { CalendarView } from "./components/calendar/CalendarView";
 import { SlingTokenModal } from "./components/SlingTokenModal";
+import { PushModal } from "./components/PushModal";
 import { MonthSelector } from "./components/MonthSelector";
 import { UpdateBanner } from "./components/UpdateBanner";
 import {
@@ -135,6 +136,7 @@ function ProposalsView() {
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [tab, setTab] = useState<"calendar" | "list" | "edits" | "review">("calendar");
   const [slingExpiredModal, setSlingExpiredModal] = useState(false);
+  const [pushOpen, setPushOpen] = useState(false);
 
   const today = todayIso();
   const [selectedMonth, setSelectedMonth] = useState<string>(() => {
@@ -326,6 +328,16 @@ function ProposalsView() {
 
       {detail && (
         <>
+          <div className="row" style={{ justifyContent: "flex-end", marginBottom: 8 }}>
+            <button
+              className="btn-primary"
+              onClick={() => setPushOpen(true)}
+              disabled={isReadOnlyMonth(detail.summary.target_month, today)}
+              title={isReadOnlyMonth(detail.summary.target_month, today) ? "Past month — read only" : "Push these shifts to Sling as planning shifts"}
+            >
+              Push to Sling
+            </button>
+          </div>
           <div className="bk-tabs">
             <button onClick={() => setTab("calendar")} className={tab === "calendar" ? "active" : ""}>Calendar</button>
             <button onClick={() => setTab("list")} className={tab === "list" ? "active" : ""}>List</button>
@@ -351,6 +363,14 @@ function ProposalsView() {
           reason="expired"
           onSaved={() => setSlingExpiredModal(false)}
           onCancel={() => setSlingExpiredModal(false)}
+        />
+      )}
+      {pushOpen && detail && (
+        <PushModal
+          proposalId={detail.summary.id}
+          monthLabel={detail.summary.target_month}
+          onClose={() => { setPushOpen(false); onProposalChanged(); }}
+          onTokenExpired={() => { setPushOpen(false); setSlingExpiredModal(true); }}
         />
       )}
     </>
