@@ -29,6 +29,7 @@ import type {
   ReviewSuggestion,
   ReviewRunSummary,
   NewUserSummary,
+  DiscoveredLocation,
 } from "./types";
 
 type View = "dashboard" | "proposals" | "teachers" | "positions" | "settings";
@@ -1023,6 +1024,9 @@ function StudioConfigCard() {
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [locations, setLocations] = useState<DiscoveredLocation[]>([]);
+  const [detecting, setDetecting] = useState(false);
+  const [detectMsg, setDetectMsg] = useState<string | null>(null);
 
   const refresh = () =>
     api.getStudioConfig().then((c) => {
@@ -1032,7 +1036,40 @@ function StudioConfigCard() {
       setLoaded(true);
     }).catch((e) => setError(String(e)));
 
+  const detect = async () => {
+    setDetecting(true);
+    setDetectMsg(null);
+    setError(null);
+    try {
+      const d = await api.discoverStudioConfig();
+      setOrgId(String(d.org_id));
+      setActingUserId(String(d.acting_user_id));
+      setLocations(d.locations);
+      if (d.locations.length === 1) setHomeLocationId(String(d.locations[0].id));
+      setDetectMsg(
+        `Detected ${d.acting_user_name || "your"} studio (org ${d.org_id}). ` +
+        `Pick the home location and click Save.`,
+      );
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("sling-401")) {
+        setDetectMsg("Sling token expired — use “Log in to Sling” above to refresh, then Detect again.");
+      } else if (msg.includes("no Sling token")) {
+        setDetectMsg("Log in to Sling first (card above), then Detect.");
+      } else {
+        setDetectMsg("Couldn't auto-detect everything — enter the IDs manually below.");
+      }
+    } finally {
+      setDetecting(false);
+    }
+  };
+
   useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    const p = listen<void>("sling-token-saved", () => { detect(); });
+    return () => { p.then((un) => un()); };
+  }, []);
 
   const configured = loaded && Number(orgId) > 0 && Number(homeLocationId) > 0;
 
@@ -1084,12 +1121,25 @@ function StudioConfigCard() {
         <input type="number" min={0} value={actingUserId} onChange={(e) => setActingUserId(e.target.value)} placeholder="0" style={fieldStyle} />
       </label>
       <label className="field" style={{ marginTop: 8 }}>
-        <span>Home location id</span>
-        <input type="number" min={0} value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} placeholder="0" style={fieldStyle} />
+        <span>Home location{locations.length > 0 ? "" : " id"}</span>
+        {locations.length > 0 ? (
+          <select value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} style={fieldStyle}>
+            <option value="">— pick your studio —</option>
+            {locations.map((l) => (
+              <option key={l.id} value={String(l.id)}>{l.name} ({l.id})</option>
+            ))}
+          </select>
+        ) : (
+          <input type="number" min={0} value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} placeholder="0" style={fieldStyle} />
+        )}
       </label>
-      <div className="row" style={{ marginTop: 12 }}>
+      <div className="row" style={{ marginTop: 12, gap: 8 }}>
         <button className="btn-primary" onClick={onSave}>Save</button>
+        <button className="btn-ghost" onClick={detect} disabled={detecting}>
+          {detecting ? "Detecting…" : "Detect from Sling"}
+        </button>
       </div>
+      {detectMsg && <div className="muted" style={{ marginTop: 8 }}>{detectMsg}</div>}
       {status && <div className="ok">{status}</div>}
       {error && <div className="error">{error}</div>}
     </div>
