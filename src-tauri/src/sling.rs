@@ -96,6 +96,38 @@ pub struct ProposalShiftInput {
     pub is_dropped: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredLocation { pub id: i64, pub name: String }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredStudio {
+    pub org_id: i64,
+    pub acting_user_id: i64,
+    pub acting_user_name: String,
+    pub locations: Vec<DiscoveredLocation>,
+}
+
+/// Read a number-or-string JSON value as i64.
+fn json_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Extract (acting_user_id, name, org_id_if_present) from an account/session
+/// response. Sling's exact shape is undocumented, so org-id lookup is tolerant;
+/// callers fall back to the login-URL org hint when it's absent.
+pub fn parse_session(v: &serde_json::Value) -> Result<(i64, String, Option<i64>)> {
+    let user = v.get("user").ok_or_else(|| anyhow!("session response has no user"))?;
+    let uid = user.get("id").and_then(json_i64)
+        .ok_or_else(|| anyhow!("session user has no id"))?;
+    let name = user.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let org = ["org", "organization"].iter()
+        .find_map(|k| v.get(*k).and_then(|o| o.get("id")).and_then(json_i64))
+        .or_else(|| v.get("orgId").and_then(json_i64))
+        .or_else(|| user.get("orgId").and_then(json_i64))
+        .or_else(|| user.get("org").and_then(|o| o.get("id")).and_then(json_i64));
+    Ok((uid, name, org))
+}
+
 /// A single shift to be created or verified against Sling.
 /// Produced by push_to_sling (commands.rs) from the `proposal_shifts` table.
 #[derive(Debug, Clone)]
@@ -767,6 +799,26 @@ mod tests {
             class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Ghost".into()), is_dropped: false }];
         let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
         assert!(e.contains("Ghost"), "got: {e}");
+    }
+
+    #[test]
+    fn parse_session_reads_user_and_optional_org() {
+        let v = serde_json::json!({ "user": { "id": 29470393, "name": "Lead Teacher" } });
+        let (uid, name, org) = parse_session(&v).unwrap();
+        assert_eq!(uid, 29470393);
+        assert_eq!(name, "Lead Teacher");
+        assert_eq!(org, None);
+
+        let v2 = serde_json::json!({ "org": { "id": "1193381" }, "user": { "id": "42", "name": "X" } });
+        let (uid2, _n2, org2) = parse_session(&v2).unwrap();
+        assert_eq!(uid2, 42);
+        assert_eq!(org2, Some(1193381));
+    }
+
+    #[test]
+    fn parse_session_errors_without_user() {
+        let v = serde_json::json!({ "nope": true });
+        assert!(parse_session(&v).is_err());
     }
 
     #[test]
