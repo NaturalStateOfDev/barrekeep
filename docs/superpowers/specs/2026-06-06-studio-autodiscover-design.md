@@ -103,7 +103,10 @@ User reviews → Save → existing set_studio_config command (the only writer).
 
 ## Error handling (best-effort, never blocks, never silently overwrites)
 
-- **401** during discovery → surface the existing `SlingTokenModal` (reason "expired"); discovery is abandoned, manual entry still works.
+- **401** during discovery → the card shows an inline message pointing at the
+  adjacent "Log in to Sling" card to refresh, then re-Detect (no cross-component
+  modal plumbing — the login card is right there in Settings). Manual entry still
+  works regardless.
 - **Partial detection** (session shape unexpected, no locations, etc.) → prefill whatever resolved, leave the rest blank/manual, and show a muted "couldn't auto-detect everything — fill in manually" note.
 - Discovery **never** calls `set_studio_config`; the user always clicks Save.
 - An existing saved config is prefilled-over in the *form* only; the stored row changes only on Save.
