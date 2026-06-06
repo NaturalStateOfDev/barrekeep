@@ -80,6 +80,20 @@ pub struct SlingEventLocationRef {
     pub id: i64,
 }
 
+/// A single shift to be created or verified against Sling.
+/// Produced by push_to_sling (commands.rs) from the `proposal_shifts` table.
+#[derive(Debug, Clone)]
+pub struct PushSpec {
+    pub proposal_shift_id: i64,
+    pub date: String,         // "2026-06-01"
+    pub start: String,        // "05:45"
+    pub end: String,          // "06:45"
+    pub position_id: i64,
+    pub user_id: i64,
+    pub class_name: String,   // display only
+    pub teacher_name: String, // display only
+}
+
 // Sling returns some id fields as JSON strings (notably the top-level event
 // `id` — stringified to preserve precision beyond JS's 53-bit limit), others
 // as JSON numbers. Accept both shapes.
@@ -273,6 +287,46 @@ pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
     ))
 }
 
+/// Split a Sling dtstart ("2026-06-01T05:45:00-05:00") into (date, "HH:MM").
+pub fn split_dt(dt: &str) -> (String, String) {
+    if let Some((date, time)) = dt.split_once('T') {
+        (date.to_string(), time.chars().take(5).collect())
+    } else {
+        (dt.chars().take(10).collect(), "00:00".to_string())
+    }
+}
+
+/// Stable dedupe key: "date|HH:MM|user_id|position_id|location_id".
+pub fn spec_fingerprint(s: &PushSpec, home_location_id: i64) -> String {
+    format!("{}|{}|{}|{}|{}", s.date, s.start, s.user_id, s.position_id, home_location_id)
+}
+
+/// Build the set of fingerprints already present at the home location.
+/// Only planning + published shifts count (matches push_to_sling.py).
+pub fn existing_fingerprints(events: &[CalendarEvent], home_location_id: i64) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for ev in events {
+        if ev.kind != "shift" { continue; }
+        // Unlike filter_events (which lets location-less events through), we
+        // require an explicit home-location match here — matches
+        // push_to_sling.py's existing_shifts_at_home. A shift returned without
+        // a location can't be confirmed as home, so it's conservatively not
+        // counted as a duplicate; the push would re-attempt it, and re-push is
+        // idempotent. Our own created shifts always echo back their location.
+        let Some(loc) = ev.location.as_ref() else { continue; };
+        if loc.id != home_location_id { continue; }
+        match ev.status.as_deref() {
+            Some("planning") | Some("published") => {}
+            _ => continue,
+        }
+        let Some(user) = ev.user.as_ref() else { continue; };
+        let Some(pos) = ev.position.as_ref() else { continue; };
+        let (date, hhmm) = split_dt(&ev.dtstart);
+        out.insert(format!("{}|{}|{}|{}|{}", date, hhmm, user.id, pos.id, home_location_id));
+    }
+    out
+}
+
 pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result<PullPayload> {
     let _ = month_range(target_month)?;
     let org_id = cfg.org_id;
@@ -453,5 +507,69 @@ mod tests {
         let (view, cache) = view_cache_dates("2026-12").unwrap();
         assert_eq!(view, "2026-11-30T00:00:00-0500/2027-01-05T00:00:00-0500");
         assert_eq!(cache, "2026-11-29T00:00:00-0500/2027-01-06T00:00:00-0500");
+    }
+
+    #[test]
+    fn split_dt_extracts_date_and_hhmm() {
+        assert_eq!(split_dt("2026-06-01T05:45:00-05:00"), ("2026-06-01".into(), "05:45".into()));
+        assert_eq!(split_dt("2026-06-01"), ("2026-06-01".into(), "00:00".into()));
+    }
+
+    #[test]
+    fn existing_fingerprints_filters_and_keys_correctly() {
+        let events = vec![
+            // home shift, planning -> included
+            CalendarEvent {
+                id: Some(1),
+                kind: "shift".into(),
+                dtstart: "2026-06-01T05:45:00-05:00".into(),
+                dtend: "2026-06-01T06:45:00-05:00".into(),
+                user: Some(SlingEventUserRef { id: 1001 }),
+                users: None,
+                position: Some(SlingEventPositionRef { id: 29470407 }),
+                location: Some(SlingEventLocationRef { id: 5 }),
+                status: Some("planning".into()),
+            },
+            // wrong location -> excluded
+            CalendarEvent {
+                id: Some(2),
+                kind: "shift".into(),
+                dtstart: "2026-06-01T05:45:00-05:00".into(),
+                dtend: "2026-06-01T06:45:00-05:00".into(),
+                user: Some(SlingEventUserRef { id: 1002 }),
+                users: None,
+                position: Some(SlingEventPositionRef { id: 29470407 }),
+                location: Some(SlingEventLocationRef { id: 999 }),
+                status: Some("planning".into()),
+            },
+            // leave event -> excluded
+            CalendarEvent {
+                id: Some(3),
+                kind: "leave".into(),
+                dtstart: "2026-06-02T00:00:00-05:00".into(),
+                dtend: "".into(),
+                user: Some(SlingEventUserRef { id: 1001 }),
+                users: None,
+                position: None,
+                location: Some(SlingEventLocationRef { id: 5 }),
+                status: None,
+            },
+            // published home shift -> included (published counts as present)
+            CalendarEvent {
+                id: Some(4),
+                kind: "shift".into(),
+                dtstart: "2026-06-03T09:00:00-05:00".into(),
+                dtend: "2026-06-03T10:00:00-05:00".into(),
+                user: Some(SlingEventUserRef { id: 1003 }),
+                users: None,
+                position: Some(SlingEventPositionRef { id: 29303965 }),
+                location: Some(SlingEventLocationRef { id: 5 }),
+                status: Some("published".into()),
+            },
+        ];
+        let fp = existing_fingerprints(&events, 5);
+        assert_eq!(fp.len(), 2);
+        assert!(fp.contains("2026-06-01|05:45|1001|29470407|5"));
+        assert!(fp.contains("2026-06-03|09:00|1003|29303965|5"));
     }
 }
