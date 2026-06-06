@@ -190,6 +190,18 @@ export interface PushProgress {
   last_outcome: string;
 }
 
+export interface DiscoveredLocation {
+  id: number;
+  name: string;
+}
+
+export interface DiscoveredStudio {
+  org_id: number;
+  acting_user_id: number;
+  acting_user_name: string;
+  locations: DiscoveredLocation[];
+}
+
 export interface ExternalShiftRow {
   sling_shift_id: number;
   shift_date: string;

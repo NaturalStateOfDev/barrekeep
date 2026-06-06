@@ -19,6 +19,7 @@ import type {
   ExternalShiftRow,
   PushPreview,
   PushSummary,
+  DiscoveredStudio,
 } from "../types";
 
 export const api = {
@@ -57,6 +58,7 @@ export const api = {
   getStudioConfig: () => invoke<StudioConfig>("get_studio_config"),
   setStudioConfig: (orgId: number, actingUserId: number, homeLocationId: number) =>
     invoke<void>("set_studio_config", { orgId, actingUserId, homeLocationId }),
+  discoverStudioConfig: () => invoke<DiscoveredStudio>("discover_studio_config"),
   openSlingLoginWindow: () => invoke<void>("open_sling_login_window"),
   reviewProposal: (proposalId: number) =>
     invoke<ReviewResult>("review_proposal", { proposalId }),
