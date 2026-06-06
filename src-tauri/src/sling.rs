@@ -80,6 +80,22 @@ pub struct SlingEventLocationRef {
     pub id: i64,
 }
 
+/// Input row from the `proposal_shifts` table, passed to build_push_specs.
+#[derive(Debug, Clone)]
+pub struct ProposalShiftInput {
+    pub proposal_shift_id: i64,
+    pub date: String,
+    pub start: String,
+    pub end: String,
+    pub position_id: i64,
+    pub user_id: Option<i64>,
+    pub teacher_name: Option<String>,
+    pub class_name: String,
+    pub is_coteach: bool,
+    pub coteach_label: Option<String>,
+    pub is_dropped: bool,
+}
+
 /// A single shift to be created or verified against Sling.
 /// Produced by push_to_sling (commands.rs) from the `proposal_shifts` table.
 #[derive(Debug, Clone)]
@@ -327,6 +343,47 @@ pub fn existing_fingerprints(events: &[CalendarEvent], home_location_id: i64) ->
     out
 }
 
+/// Build POST specs from proposal rows. Dropped shifts are skipped. A
+/// non-dropped shift with no teacher is a hard error (it can't become a
+/// valid Sling shift). Co-teach rows expand into one spec per teacher named
+/// in `coteach_label`, resolved through `name_to_id` (display_name -> id).
+pub fn build_push_specs(
+    inputs: &[ProposalShiftInput],
+    name_to_id: &std::collections::HashMap<String, i64>,
+) -> Result<Vec<PushSpec>, String> {
+    let mut specs = Vec::new();
+    for inp in inputs {
+        if inp.is_dropped { continue; }
+        if inp.is_coteach {
+            let label = inp.coteach_label.as_deref().unwrap_or("");
+            let names: Vec<&str> = label.split(" + ").map(str::trim).filter(|n| !n.is_empty()).collect();
+            if names.is_empty() {
+                return Err(format!("co-teach shift on {} {} has no teacher names", inp.date, inp.start));
+            }
+            for name in names {
+                let uid = name_to_id.get(name).ok_or_else(|| format!(
+                    "co-teach shift on {} {} references unknown teacher '{}'", inp.date, inp.start, name))?;
+                specs.push(PushSpec {
+                    proposal_shift_id: inp.proposal_shift_id, date: inp.date.clone(), start: inp.start.clone(),
+                    end: inp.end.clone(), position_id: inp.position_id, user_id: *uid,
+                    class_name: inp.class_name.clone(), teacher_name: name.to_string(),
+                });
+            }
+        } else {
+            let uid = inp.user_id.ok_or_else(|| format!(
+                "shift on {} {} ({}) has no teacher assigned — resolve it before pushing",
+                inp.date, inp.start, inp.class_name))?;
+            specs.push(PushSpec {
+                proposal_shift_id: inp.proposal_shift_id, date: inp.date.clone(), start: inp.start.clone(),
+                end: inp.end.clone(), position_id: inp.position_id, user_id: uid,
+                class_name: inp.class_name.clone(),
+                teacher_name: inp.teacher_name.clone().unwrap_or_default(),
+            });
+        }
+    }
+    Ok(specs)
+}
+
 pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result<PullPayload> {
     let _ = month_range(target_month)?;
     let org_id = cfg.org_id;
@@ -571,5 +628,48 @@ mod tests {
         assert_eq!(fp.len(), 2);
         assert!(fp.contains("2026-06-01|05:45|1001|29470407|5"));
         assert!(fp.contains("2026-06-03|09:00|1003|29303965|5"));
+    }
+
+    #[test]
+    fn build_push_specs_expands_coteach_and_skips_dropped() {
+        let mut name_to_id = std::collections::HashMap::new();
+        name_to_id.insert("Teacher A".to_string(), 1001i64);
+        name_to_id.insert("Teacher E".to_string(), 1005i64);
+        let inputs = vec![
+            ProposalShiftInput { proposal_shift_id: 10, date: "2026-06-01".into(), start: "05:45".into(),
+                end: "06:45".into(), position_id: 29470407, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+                class_name: "Empower".into(), is_coteach: false, coteach_label: None, is_dropped: false },
+            ProposalShiftInput { proposal_shift_id: 11, date: "2026-06-02".into(), start: "09:00".into(),
+                end: "10:00".into(), position_id: 29303965, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+                class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Teacher E".into()), is_dropped: false },
+            ProposalShiftInput { proposal_shift_id: 12, date: "2026-06-03".into(), start: "09:00".into(),
+                end: "10:00".into(), position_id: 29303965, user_id: None, teacher_name: None,
+                class_name: "Classic".into(), is_coteach: false, coteach_label: None, is_dropped: true },
+        ];
+        let specs = build_push_specs(&inputs, &name_to_id).unwrap();
+        assert_eq!(specs.len(), 3); // 1 normal + 2 from co-teach + 0 dropped
+        let coteach_ids: Vec<i64> = specs.iter().filter(|s| s.proposal_shift_id == 11).map(|s| s.user_id).collect();
+        assert_eq!(coteach_ids, vec![1001, 1005]);
+    }
+
+    #[test]
+    fn build_push_specs_errors_on_unassigned() {
+        let name_to_id = std::collections::HashMap::new();
+        let inputs = vec![ProposalShiftInput { proposal_shift_id: 20, date: "2026-06-01".into(), start: "05:45".into(),
+            end: "06:45".into(), position_id: 29470407, user_id: None, teacher_name: None,
+            class_name: "Empower".into(), is_coteach: false, coteach_label: None, is_dropped: false }];
+        let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
+        assert!(e.contains("no teacher"), "got: {e}");
+    }
+
+    #[test]
+    fn build_push_specs_errors_on_unknown_coteach_name() {
+        let mut name_to_id = std::collections::HashMap::new();
+        name_to_id.insert("Teacher A".to_string(), 1001i64);
+        let inputs = vec![ProposalShiftInput { proposal_shift_id: 30, date: "2026-06-02".into(), start: "09:00".into(),
+            end: "10:00".into(), position_id: 29303965, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+            class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Ghost".into()), is_dropped: false }];
+        let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
+        assert!(e.contains("Ghost"), "got: {e}");
     }
 }
