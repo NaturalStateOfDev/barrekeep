@@ -242,6 +242,37 @@ pub fn month_range(target_month: &str) -> Result<(String, String)> {
     Ok((format!("{start}T00:00:00-05:00"), format!("{end}T23:59:59-05:00")))
 }
 
+/// POST viewdates/cachedates windows for the target month. These are
+/// cache-invalidation hints Sling's server uses; we reproduce the web
+/// client's padding (prev day .. first-of-next-month + 4 days, cachedates
+/// one day wider each side). NB: offset is "-0500" (no colon) here, unlike
+/// the calendar `dates=` param which uses "-05:00". Matches
+/// scripts/push_to_sling.py VIEWDATES/CACHEDATES for June 2026.
+pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
+    let parts: Vec<&str> = month.split('-').collect();
+    if parts.len() != 2 { return Err(anyhow!("bad month: {month}")); }
+    let year: i32 = parts[0].parse()?;
+    let mon: u32 = parts[1].parse()?;
+    let first = chrono::NaiveDate::from_ymd_opt(year, mon, 1)
+        .ok_or_else(|| anyhow!("invalid date"))?;
+    let next_first = if mon == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, mon + 1, 1)
+    }.ok_or_else(|| anyhow!("invalid date"))?;
+    // NB: "-0500" (no colon) — Sling's viewdates/cachedates format. Do NOT
+    // change to "-05:00"; that colon-form is only for the calendar dates= param.
+    let fmt = |d: chrono::NaiveDate| format!("{d}T00:00:00-0500");
+    let view_start = first - chrono::Duration::days(1);
+    let view_end = next_first + chrono::Duration::days(4);
+    let cache_start = view_start - chrono::Duration::days(1);
+    let cache_end = view_end + chrono::Duration::days(1);
+    Ok((
+        format!("{}/{}", fmt(view_start), fmt(view_end)),
+        format!("{}/{}", fmt(cache_start), fmt(cache_end)),
+    ))
+}
+
 pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result<PullPayload> {
     let _ = month_range(target_month)?;
     let org_id = cfg.org_id;
@@ -407,5 +438,20 @@ mod tests {
         let pos_ids = position_group_ids(&groups);
         assert!(pos_ids.contains(&29470407), "Empower position group present");
         assert!(pos_ids.contains(&29303965), "Classic position group present");
+    }
+
+    #[test]
+    fn view_cache_dates_reproduce_june_window() {
+        let (view, cache) = view_cache_dates("2026-06").unwrap();
+        // Matches the constants the working push_to_sling.py used for June 2026.
+        assert_eq!(view, "2026-05-31T00:00:00-0500/2026-07-05T00:00:00-0500");
+        assert_eq!(cache, "2026-05-30T00:00:00-0500/2026-07-06T00:00:00-0500");
+    }
+
+    #[test]
+    fn view_cache_dates_handles_december_year_rollover() {
+        let (view, cache) = view_cache_dates("2026-12").unwrap();
+        assert_eq!(view, "2026-11-30T00:00:00-0500/2027-01-05T00:00:00-0500");
+        assert_eq!(cache, "2026-11-29T00:00:00-0500/2027-01-06T00:00:00-0500");
     }
 }
