@@ -498,6 +498,22 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
     })
 }
 
+/// The create-shift POST body. `users` is an array on POST (PUT uses
+/// singular `user`); `status` is always the literal "planning" — this app
+/// never publishes. dtstart/dtend are naive local strings; Sling applies the
+/// timezone on echo. See docs/sling-api.md.
+pub fn build_shift_body(s: &PushSpec, home_location_id: i64) -> serde_json::Value {
+    serde_json::json!({
+        "location": { "id": home_location_id },
+        "dtstart": format!("{}T{}", s.date, s.start),
+        "dtend": format!("{}T{}", s.date, s.end),
+        "users": [{ "id": s.user_id }],
+        "slots": 1,
+        "position": { "id": s.position_id },
+        "status": "planning",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +687,22 @@ mod tests {
             class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Ghost".into()), is_dropped: false }];
         let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
         assert!(e.contains("Ghost"), "got: {e}");
+    }
+
+    #[test]
+    fn build_shift_body_matches_sling_contract() {
+        let s = PushSpec { proposal_shift_id: 1, date: "2026-06-01".into(), start: "05:45".into(),
+            end: "06:45".into(), position_id: 29470407, user_id: 1001,
+            class_name: "Empower".into(), teacher_name: "Teacher A".into() };
+        let body = build_shift_body(&s, 5);
+        assert_eq!(body["dtstart"], "2026-06-01T05:45");
+        assert_eq!(body["dtend"], "2026-06-01T06:45");
+        assert_eq!(body["status"], "planning");
+        assert_eq!(body["slots"], 1);
+        assert_eq!(body["location"]["id"], 5);
+        assert_eq!(body["position"]["id"], 29470407);
+        // users is an ARRAY on POST (not singular `user`)
+        assert_eq!(body["users"][0]["id"], 1001);
+        assert!(body.get("user").is_none());
     }
 }
