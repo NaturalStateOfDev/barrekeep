@@ -658,7 +658,6 @@ function TeacherRow({
         />
       </td>
       <td>{teacher.is_lead ? "yes" : ""}</td>
-      <td>{teacher.active ? "yes" : "no"}</td>
     </tr>
   );
 }
