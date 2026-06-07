@@ -1937,6 +1937,36 @@ pub fn discover_studio_config(
 }
 
 // ============================================================
+// Standalone roster refresh — sync roster without pulling a month
+// ============================================================
+
+#[tauri::command]
+pub fn refresh_roster_from_sling(
+    db: State<'_, Db>,
+    token: State<'_, SlingToken>,
+) -> Result<RosterSyncSummary, String> {
+    let token_str = {
+        let t = token.0.lock().map_err(err)?;
+        t.clone().ok_or_else(|| "no Sling token — log in to Sling first".to_string())?
+    };
+    let cfg = {
+        let conn = db.0.lock().map_err(err)?;
+        load_studio_config(&conn)?
+    };
+    if cfg.org_id == 0 || cfg.home_location_id == 0 {
+        return Err("Studio not configured — set your Sling org, acting-user, and location IDs in \
+                    Settings → Studio configuration before refreshing the roster.".to_string());
+    }
+    let users = crate::sling::fetch_users(&token_str).map_err(err)?;
+    let groups = crate::sling::fetch_groups(&token_str).map_err(err)?;
+    let mut conn = db.0.lock().map_err(err)?;
+    let tx = conn.transaction().map_err(err)?;
+    let summary = sync_roster(&tx, &users, &groups, &cfg)?;
+    tx.commit().map_err(err)?;
+    Ok(summary)
+}
+
+// ============================================================
 // helpers
 // ============================================================
 

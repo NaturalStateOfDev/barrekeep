@@ -101,6 +101,7 @@ pub fn run() {
             commands::review_proposal,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
+            commands::refresh_roster_from_sling,
             commands::import_external_shift,
             commands::list_availability_blocks,
             commands::list_external_shifts_for_month,
