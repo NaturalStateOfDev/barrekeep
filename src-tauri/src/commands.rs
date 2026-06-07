@@ -53,14 +53,6 @@ pub struct Teacher {
 }
 
 #[derive(Serialize)]
-pub struct SlingCandidate {
-    pub sling_user_id: i32,
-    pub display_name: String,
-    pub active: bool,
-    pub locations: Option<String>,
-}
-
-#[derive(Serialize)]
 pub struct Position {
     pub sling_position_id: i32,
     pub class_name: String,
@@ -78,14 +70,6 @@ pub struct PullResult {
     pub availability_count: i64,
     pub external_shift_count: i64,
     pub history_shift_count: i64,
-}
-
-#[derive(Serialize)]
-pub struct NewUserSummary {
-    pub sling_user_id: i32,
-    pub display_name: String,
-    pub active: bool,
-    pub locations: Option<String>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -219,29 +203,6 @@ pub fn update_teacher_settings(
 }
 
 #[tauri::command]
-pub fn list_sling_candidates(db: State<'_, Db>) -> Result<Vec<SlingCandidate>, String> {
-    let conn = db.0.lock().map_err(err)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT sling_user_id, display_name, active, locations
-             FROM sling_candidates
-             ORDER BY display_name",
-        )
-        .map_err(err)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(SlingCandidate {
-                sling_user_id: r.get(0)?,
-                display_name: r.get(1)?,
-                active: r.get(2)?,
-                locations: r.get(3)?,
-            })
-        })
-        .map_err(err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(err)
-}
-
-#[tauri::command]
 pub fn list_positions(db: State<'_, Db>) -> Result<Vec<Position>, String> {
     let conn = db.0.lock().map_err(err)?;
     let mut stmt = conn
@@ -263,6 +224,14 @@ pub fn list_positions(db: State<'_, Db>) -> Result<Vec<Position>, String> {
         })
         .map_err(err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
+}
+
+#[tauri::command]
+pub fn set_position_active(db: State<'_, Db>, sling_position_id: i32, active: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(err)?;
+    conn.execute("UPDATE positions SET active = ? WHERE sling_position_id = ?",
+        duckdb::params![active, sling_position_id]).map_err(err)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1880,38 +1849,6 @@ pub fn list_external_shifts_for_month(
         status: r.get(6)?,
     })).map_err(err)?;
     rows.collect::<Result<_, _>>().map_err(err)
-}
-
-// ============================================================
-// Add teacher discovered during Sling pull
-// ============================================================
-
-#[derive(Deserialize)]
-pub struct AddTeacherInput {
-    pub sling_user_id: i32,
-    pub display_name: String,
-    pub weekly_target: i32,
-    pub weekly_max: i32,
-    pub is_lead: bool,
-}
-
-#[tauri::command]
-pub fn add_teacher_from_pull(
-    db: State<'_, Db>,
-    input: AddTeacherInput,
-) -> Result<(), String> {
-    let conn = db.0.lock().map_err(err)?;
-    conn.execute(
-        "INSERT INTO teachers
-            (sling_user_id, display_name, weekly_target, weekly_max, is_lead, variety_multiplier)
-         VALUES (?, ?, ?, ?, ?, 1.0)
-         ON CONFLICT (sling_user_id) DO UPDATE SET display_name = EXCLUDED.display_name",
-        duckdb::params![
-            input.sling_user_id, input.display_name,
-            input.weekly_target, input.weekly_max, input.is_lead
-        ],
-    ).map_err(err)?;
-    Ok(())
 }
 
 // ============================================================
