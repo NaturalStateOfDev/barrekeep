@@ -14,13 +14,6 @@ export interface Teacher {
   locations: string | null;
 }
 
-export interface SlingCandidate {
-  sling_user_id: number;
-  display_name: string;
-  active: boolean;
-  locations: string | null;
-}
-
 export interface StudioConfig {
   org_id: number;
   acting_user_id: number;
@@ -134,13 +127,6 @@ export interface ProposalDetail {
   last_pulled_at: string | null;
 }
 
-export interface NewUserSummary {
-  sling_user_id: number;
-  display_name: string;
-  active: boolean;
-  locations: string | null;
-}
-
 export interface PullResult {
   target_month: string;
   pulled_at: string;
@@ -149,7 +135,6 @@ export interface PullResult {
   availability_count: number;
   external_shift_count: number;
   history_shift_count: number;
-  new_users: NewUserSummary[];
 }
 
 export interface AvailabilityBlock {
@@ -188,6 +173,14 @@ export interface PushProgress {
   skipped: number;
   last_label: string;
   last_outcome: string;
+}
+
+export interface RosterSyncSummary {
+  teachers_active: number;
+  teachers_deactivated: number;
+  positions_active: number;
+  positions_deactivated: number;
+  qualifications: number;
 }
 
 export interface DiscoveredLocation {

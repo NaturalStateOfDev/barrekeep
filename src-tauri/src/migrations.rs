@@ -48,6 +48,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "studio_config singleton (runtime Sling ids)",
         sql: include_str!("../migrations/0007_studio_config.sql"),
     },
+    Migration {
+        version: 8,
+        label: "purge demo roster + drop sling_candidates",
+        sql: include_str!("../migrations/0008_drop_demo_roster.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.

@@ -348,6 +348,24 @@ pub fn push_shift(token: &str, cfg: &StudioConfig, s: &PushSpec, viewdates: &str
     Err(anyhow!("create failed after {PUSH_MAX_RETRIES} retries: {last_err}"))
 }
 
+/// GET /v1/users/concise → roster (with group memberships).
+pub fn fetch_users(token: &str) -> Result<Vec<SlingUser>> {
+    let doc = http_get(token, &format!("{BASE_URL}/users/concise"))?;
+    // Hard-error on a missing/malformed users array rather than returning an
+    // empty roster — an empty list would make sync_roster deactivate every
+    // teacher. Matches pull_month's guard.
+    let arr = doc.get("users").and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("users array missing"))?;
+    Ok(arr.iter().filter_map(|u| serde_json::from_value(u.clone()).ok()).collect())
+}
+
+/// GET /v1/groups → position + location groups.
+pub fn fetch_groups(token: &str) -> Result<Vec<SlingGroup>> {
+    let doc = http_get(token, &format!("{BASE_URL}/groups"))?;
+    Ok(doc.as_array().ok_or_else(|| anyhow!("groups not array"))?
+        .iter().filter_map(|g| serde_json::from_value(g.clone()).ok()).collect())
+}
+
 /// Fetch the target month's calendar events (for push dedupe). Mirrors the
 /// pull's calendar GET: -05:00 offset, percent-encoded dates, nonce.
 pub fn fetch_calendar(token: &str, cfg: &StudioConfig, month: &str) -> Result<Vec<CalendarEvent>> {
@@ -680,6 +698,18 @@ pub fn build_shift_body(s: &PushSpec, home_location_id: i64) -> serde_json::Valu
     })
 }
 
+/// A Sling user belongs in the roster iff they are active, a member of the
+/// home-location group, and qualified for at least one schedulable position.
+pub fn is_schedulable_teacher(
+    user: &SlingUser,
+    home_location_id: i64,
+    schedulable_position_ids: &std::collections::HashSet<i64>,
+) -> bool {
+    user.active
+        && user.group_ids.contains(&home_location_id)
+        && user.group_ids.iter().any(|g| schedulable_position_ids.contains(g))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,6 +918,20 @@ mod tests {
         let none = select_locations(&[100, 200], &names);
         assert_eq!(none.len(), 3);
         assert_eq!(none[0].name, "Downtown");
+    }
+
+    #[test]
+    fn is_schedulable_teacher_requires_active_home_and_qualified() {
+        let mut schedulable = std::collections::HashSet::new();
+        schedulable.insert(900i64);
+        let home = 5i64;
+        let mk = |active: bool, groups: Vec<i64>| SlingUser {
+            id: 1, name: "T".into(), lastname: "X".into(), active, group_ids: groups,
+        };
+        assert!(is_schedulable_teacher(&mk(true, vec![5, 900]), home, &schedulable));
+        assert!(!is_schedulable_teacher(&mk(false, vec![5, 900]), home, &schedulable));
+        assert!(!is_schedulable_teacher(&mk(true, vec![900]), home, &schedulable));
+        assert!(!is_schedulable_teacher(&mk(true, vec![5, 777]), home, &schedulable));
     }
 
     #[test]

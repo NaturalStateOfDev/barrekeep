@@ -4,7 +4,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Teacher,
-  SlingCandidate,
   StudioConfig,
   Position,
   DbInfo,
@@ -20,15 +19,18 @@ import type {
   PushPreview,
   PushSummary,
   DiscoveredStudio,
+  RosterSyncSummary,
 } from "../types";
 
 export const api = {
   dbInfo: () => invoke<DbInfo>("db_info"),
   listTeachers: () => invoke<Teacher[]>("list_teachers"),
-  listSlingCandidates: () => invoke<SlingCandidate[]>("list_sling_candidates"),
   updateTeacherSettings: (slingUserId: number, weeklyTarget: number, weeklyMax: number) =>
     invoke<void>("update_teacher_settings", { slingUserId, weeklyTarget, weeklyMax }),
   listPositions: () => invoke<Position[]>("list_positions"),
+  setPositionActive: (slingPositionId: number, active: boolean) =>
+    invoke<void>("set_position_active", { slingPositionId, active }),
+  refreshRosterFromSling: () => invoke<RosterSyncSummary>("refresh_roster_from_sling"),
   listQualifiedPairs: () => invoke<string[]>("list_qualified_pairs"),
   generateProposal: (targetMonth: string) =>
     invoke<GenerateResult>("generate_proposal", { targetMonth }),
@@ -72,9 +74,6 @@ export const api = {
     invoke<AvailabilityBlock[]>("list_availability_blocks", { targetMonth }),
   listExternalShiftsForMonth: (targetMonth: string) =>
     invoke<ExternalShiftRow[]>("list_external_shifts_for_month", { targetMonth }),
-  addTeacherFromPull: (input: { sling_user_id: number; display_name: string;
-    weekly_target: number; weekly_max: number; is_lead: boolean; }) =>
-    invoke<void>("add_teacher_from_pull", { input }),
   pushProposalDryRun: (proposalId: number) =>
     invoke<PushPreview>("push_proposal_dry_run", { proposalId }),
   pushProposalExecute: (proposalId: number) =>

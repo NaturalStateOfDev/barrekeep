@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./lib/api";
 import { CalendarView } from "./components/calendar/CalendarView";
@@ -20,7 +20,6 @@ function todayIso(): string {
 }
 import type {
   Teacher,
-  SlingCandidate,
   Position,
   DbInfo,
   ProposalSummary,
@@ -28,7 +27,6 @@ import type {
   EditRow,
   ReviewSuggestion,
   ReviewRunSummary,
-  NewUserSummary,
   DiscoveredLocation,
 } from "./types";
 
@@ -149,7 +147,6 @@ function ProposalsView() {
   });
   const [pulling, setPulling] = useState(false);
   const [pullResult, setPullResult] = useState<string | null>(null);
-  const [newUsersFromPull, setNewUsersFromPull] = useState<NewUserSummary[]>([]);
 
   const refreshProposals = async () => {
     const list = await api.listProposals();
@@ -178,7 +175,6 @@ function ProposalsView() {
   }, [selectedId]);
 
   useEffect(() => {
-    setNewUsersFromPull([]);
     setPullResult(null);
   }, [selectedMonth]);
 
@@ -206,10 +202,8 @@ function ProposalsView() {
       setPullResult(
         `Pulled ${selectedMonth}: ${r.user_count} users, ${r.qual_count} qualifications, ` +
           `${r.availability_count} availability blocks, ${r.external_shift_count} external shifts, ` +
-          `${r.history_shift_count} trailing-history shifts.` +
-          (r.new_users.length ? ` ${r.new_users.length} new teacher(s) detected.` : ""),
+          `${r.history_shift_count} trailing-history shifts.`,
       );
-      setNewUsersFromPull(r.new_users);
       await refreshProposals();
     } catch (e) {
       const msg = String(e);
@@ -348,7 +342,6 @@ function ProposalsView() {
           {tab === "calendar" && (
             <CalendarView
               proposal={detail}
-              newUsersFromPull={newUsersFromPull}
               onProposalChanged={onProposalChanged}
               onRegenerate={onGenerate}
               readonly={isReadOnlyMonth(detail.summary.target_month, today)}
@@ -491,44 +484,45 @@ function EditHistory({ proposalId }: { proposalId: number }) {
 
 function TeachersView() {
   const [teachers, setTeachers] = useState<Teacher[] | null>(null);
-  const [candidates, setCandidates] = useState<SlingCandidate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
-  const refresh = () => {
+  const refresh = () =>
     api.listTeachers().then(setTeachers).catch((e) => setError(String(e)));
-    api.listSlingCandidates().then(setCandidates).catch((e) => setError(String(e)));
-  };
 
   useEffect(() => { refresh(); }, []);
 
-  // Candidates that aren't already in the teachers roster.
-  const addable = useMemo(() => {
-    if (!candidates || !teachers) return [];
-    const have = new Set(teachers.map((t) => t.sling_user_id));
-    return candidates.filter((c) => !have.has(c.sling_user_id));
-  }, [candidates, teachers]);
+  const onRefreshRoster = async () => {
+    setSyncing(true); setSyncMsg(null); setError(null);
+    try {
+      const s = await api.refreshRosterFromSling();
+      setSyncMsg(`Synced from Sling: ${s.teachers_active} teachers, ${s.positions_active} class types` +
+        (s.teachers_deactivated ? `, ${s.teachers_deactivated} deactivated` : "") + ".");
+      await refresh();
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("sling-401")) setSyncMsg("Sling token expired — log in again (Settings), then Refresh.");
+      else if (msg.includes("not configured")) setSyncMsg("Set Studio configuration in Settings first, then Refresh.");
+      else setSyncMsg(`Refresh failed: ${msg}`);
+    } finally { setSyncing(false); }
+  };
+
+  const activeTeachers = teachers ? teachers.filter((t) => t.active) : null;
 
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <h2 style={{ margin: 0 }}>Teachers</h2>
-        <span
-          title="Studio managed by this app (read-only for now)"
-          style={{
-            background: "hsl(210 50% 94%)",
-            color: "hsl(210 60% 32%)",
-            border: "1px solid hsl(210 40% 80%)",
-            borderRadius: 999,
-            padding: "2px 10px",
-            fontSize: 13,
-            fontWeight: 600,
-          }}
-        >
-          Studio: the studio
-        </span>
+        <button className="btn-primary" onClick={onRefreshRoster} disabled={syncing}>
+          {syncing ? "Refreshing…" : "Refresh from Sling"}
+        </button>
       </div>
+      {syncMsg && <div className="muted">{syncMsg}</div>}
       {error && <div className="card error">{error}</div>}
-      {teachers && (
+      {activeTeachers !== null && activeTeachers.length === 0 ? (
+        <p className="muted">No teachers yet — log in to Sling, set Studio configuration in Settings, then click "Refresh from Sling".</p>
+      ) : activeTeachers && activeTeachers.length > 0 && (
         <div className="card">
           <table>
             <thead>
@@ -539,11 +533,10 @@ function TeachersView() {
                 <th>Target/wk</th>
                 <th>Max/wk</th>
                 <th>Lead</th>
-                <th>Active</th>
               </tr>
             </thead>
             <tbody>
-              {teachers.map((t) => (
+              {activeTeachers.map((t) => (
                 <TeacherRow
                   key={t.sling_user_id}
                   teacher={t}
@@ -555,7 +548,6 @@ function TeachersView() {
           </table>
         </div>
       )}
-      <AddTeacherCard candidates={addable} onAdded={refresh} />
     </>
   );
 }
@@ -666,121 +658,7 @@ function TeacherRow({
         />
       </td>
       <td>{teacher.is_lead ? "yes" : ""}</td>
-      <td>{teacher.active ? "yes" : "no"}</td>
     </tr>
-  );
-}
-
-function AddTeacherCard({
-  candidates,
-  onAdded,
-}: {
-  candidates: SlingCandidate[];
-  onAdded: () => void;
-}) {
-  const [selected, setSelected] = useState<number | "">("");
-  const [weeklyTarget, setWeeklyTarget] = useState(4);
-  const [weeklyMax, setWeeklyMax] = useState(5);
-  const [isLead, setIsLead] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const onAdd = async () => {
-    setStatus(null);
-    setError(null);
-    if (selected === "") {
-      setError("Pick a teacher from the list.");
-      return;
-    }
-    const cand = candidates.find((c) => c.sling_user_id === selected);
-    if (!cand) {
-      setError("Selected teacher no longer in candidates list.");
-      return;
-    }
-    try {
-      await api.addTeacherFromPull({
-        sling_user_id: cand.sling_user_id,
-        display_name: cand.display_name,
-        weekly_target: weeklyTarget,
-        weekly_max: weeklyMax,
-        is_lead: isLead,
-      });
-      setStatus(`Added ${cand.display_name}.`);
-      setSelected("");
-      onAdded();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <strong>Add a teacher from Sling</strong>
-      <p className="muted" style={{ marginTop: 4 }}>
-        Adds them to this app's scheduling roster only. Doesn't touch Sling.
-        The list refreshes when you pull from Sling.
-      </p>
-      {candidates.length === 0 ? (
-        <div className="muted" style={{ marginTop: 8 }}>
-          No add-able candidates. Pull from Sling on the Proposals page to refresh.
-        </div>
-      ) : (
-        <>
-          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8, maxWidth: 480 }}>
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value === "" ? "" : Number(e.target.value))}
-              style={{ padding: "6px 8px" }}
-            >
-              <option value="">— pick a teacher —</option>
-              {candidates.map((c) => (
-                <option key={c.sling_user_id} value={c.sling_user_id}>
-                  {c.display_name}
-                  {c.locations ? ` (${c.locations})` : ""}
-                </option>
-              ))}
-            </select>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <label style={{ display: "flex", flexDirection: "column", fontSize: 12 }}>
-                <span className="muted">Target/wk</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={20}
-                  value={weeklyTarget}
-                  onChange={(e) => setWeeklyTarget(Number(e.target.value))}
-                  style={{ padding: "6px 8px", width: 80 }}
-                />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column", fontSize: 12 }}>
-                <span className="muted">Max/wk</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={20}
-                  value={weeklyMax}
-                  onChange={(e) => setWeeklyMax(Number(e.target.value))}
-                  style={{ padding: "6px 8px", width: 80 }}
-                />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={isLead}
-                  onChange={(e) => setIsLead(e.target.checked)}
-                />
-                <span>Lead</span>
-              </label>
-            </div>
-          </div>
-          <div className="row" style={{ marginTop: 12 }}>
-            <button className="btn-primary" onClick={onAdd}>Add to roster</button>
-          </div>
-        </>
-      )}
-      {status && <div className="ok" style={{ marginTop: 8 }}>{status}</div>}
-      {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
-    </div>
   );
 }
 
@@ -788,13 +666,16 @@ function PositionsView() {
   const [positions, setPositions] = useState<Position[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const refresh = () => api.listPositions().then(setPositions).catch((e) => setError(String(e)));
+
   useEffect(() => {
-    api.listPositions().then(setPositions).catch((e) => setError(String(e)));
+    refresh();
   }, []);
 
   return (
     <>
       <h2>Class types</h2>
+      <p className="muted">Uncheck non-class positions (e.g. Sales Rep) so they're excluded from the roster and scheduling.</p>
       {error && <div className="card error">{error}</div>}
       {positions && (
         <div className="card">
@@ -805,6 +686,7 @@ function PositionsView() {
                 <th>Sling position ID</th>
                 <th>Duration (min)</th>
                 <th>Special</th>
+                <th>Schedulable</th>
               </tr>
             </thead>
             <tbody>
@@ -816,6 +698,17 @@ function PositionsView() {
                   </td>
                   <td>{p.duration_minutes}</td>
                   <td>{p.is_special ? "yes" : ""}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={p.active}
+                      onChange={async (e) => {
+                        setError(null);
+                        try { await api.setPositionActive(p.sling_position_id, e.target.checked); await refresh(); }
+                        catch (err) { setError(String(err)); }
+                      }}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
