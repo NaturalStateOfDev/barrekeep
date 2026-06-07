@@ -667,13 +667,16 @@ function PositionsView() {
   const [positions, setPositions] = useState<Position[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const refresh = () => api.listPositions().then(setPositions).catch((e) => setError(String(e)));
+
   useEffect(() => {
-    api.listPositions().then(setPositions).catch((e) => setError(String(e)));
+    refresh();
   }, []);
 
   return (
     <>
       <h2>Class types</h2>
+      <p className="muted">Uncheck non-class positions (e.g. Sales Rep) so they're excluded from the roster and scheduling.</p>
       {error && <div className="card error">{error}</div>}
       {positions && (
         <div className="card">
@@ -684,6 +687,7 @@ function PositionsView() {
                 <th>Sling position ID</th>
                 <th>Duration (min)</th>
                 <th>Special</th>
+                <th>Schedulable</th>
               </tr>
             </thead>
             <tbody>
@@ -695,6 +699,17 @@ function PositionsView() {
                   </td>
                   <td>{p.duration_minutes}</td>
                   <td>{p.is_special ? "yes" : ""}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={p.active}
+                      onChange={async (e) => {
+                        setError(null);
+                        try { await api.setPositionActive(p.sling_position_id, e.target.checked); await refresh(); }
+                        catch (err) { setError(String(err)); }
+                      }}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
