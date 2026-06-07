@@ -1857,7 +1857,20 @@ pub fn list_external_shifts_for_month(
 
 #[tauri::command]
 pub fn open_sling_login_window(app: tauri::AppHandle) -> Result<(), String> {
-    crate::sling_login::open_login_window(app).map_err(err)
+    // Build the login webview on the MAIN thread. Tauri runs sync commands on a
+    // worker thread; creating a WebView2 window off the main thread deadlocks the
+    // event-loop message pump on Windows — the window frame appears but its
+    // content never initializes and the whole app freezes (the window won't even
+    // close). WebKitGTK tolerates off-thread creation, so this only bit on
+    // Windows. run_on_main_thread queues the build onto the event loop, where
+    // webview creation is valid; the command returns immediately.
+    let app_for_build = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(e) = crate::sling_login::open_login_window(app_for_build) {
+            eprintln!("[sling_login] failed to open login window: {e}");
+        }
+    })
+    .map_err(err)
 }
 
 #[tauri::command]

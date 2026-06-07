@@ -1,6 +1,6 @@
 [package]
 name = "barrekeep"
-version = "0.1.3"
+version = "0.1.4"
 description = "Example Barre Studio monthly schedule planner"
 authors = ["Barrekeep contributors"]
 edition = "2021"
