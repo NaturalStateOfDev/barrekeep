@@ -757,6 +757,8 @@ function SettingsView() {
     <>
       <h2>Settings</h2>
 
+      <SlingTokenCard />
+
       <StudioConfigCard />
 
       <div className="card">
@@ -805,8 +807,6 @@ function SettingsView() {
         {status && <div className="ok">{status}</div>}
         {error && <div className="error">{error}</div>}
       </div>
-
-      <SlingTokenCard />
 
       <SlingCredentialsCard />
 
@@ -929,20 +929,48 @@ function StudioConfigCard() {
       setLoaded(true);
     }).catch((e) => setError(String(e)));
 
+  // Persist the studio config. Shared by Save, auto-detect, and location pick.
+  const persist = async (o: number, a: number, h: number): Promise<boolean> => {
+    if (![o, a, h].every((n) => Number.isInteger(n) && n >= 0)) {
+      setError("All three IDs must be non-negative whole numbers.");
+      return false;
+    }
+    await api.setStudioConfig(o, a, h);
+    await refresh();
+    return true;
+  };
+
   const detect = async () => {
     setDetecting(true);
     setDetectMsg(null);
     setError(null);
     try {
       const d = await api.discoverStudioConfig();
+      const o = Number(d.org_id);
+      const a = Number(d.acting_user_id);
       setOrgId(String(d.org_id));
       setActingUserId(String(d.acting_user_id));
       setLocations(d.locations);
-      if (d.locations.length === 1) setHomeLocationId(String(d.locations[0].id));
-      setDetectMsg(
-        `Detected ${d.acting_user_name || "your"} studio (org ${d.org_id}). ` +
-        `Pick the home location and click Save.`,
-      );
+      // A single discovered location (or an already-saved one) is unambiguous;
+      // multiple need the user to pick from the dropdown below.
+      let h = Number(homeLocationId);
+      if (d.locations.length === 1) {
+        h = Number(d.locations[0].id);
+        setHomeLocationId(String(h));
+      }
+      // Auto-save the moment we have a complete config — no manual Save step.
+      // If the home location is still ambiguous, onPickLocation saves on pick.
+      if (o > 0 && h > 0) {
+        await persist(o, a, h);
+        setDetectMsg(`Detected and saved ${d.acting_user_name || "your"} studio (org ${o}).`);
+      } else if (d.locations.length > 1) {
+        setDetectMsg(
+          `Detected ${d.acting_user_name || "your"} studio (org ${o}). ` +
+          `Pick your home location to finish — it saves automatically.`,
+        );
+      } else {
+        setDetectMsg(`Detected org ${o}. Enter your home location id to finish.`);
+      }
     } catch (e) {
       const msg = String(e);
       if (msg.includes("sling-401")) {
@@ -969,17 +997,27 @@ function StudioConfigCard() {
   const onSave = async () => {
     setError(null);
     setStatus(null);
-    const o = Number(orgId), a = Number(actingUserId), h = Number(homeLocationId);
-    if (![o, a, h].every((n) => Number.isInteger(n) && n >= 0)) {
-      setError("All three IDs must be non-negative whole numbers.");
-      return;
-    }
     try {
-      await api.setStudioConfig(o, a, h);
-      setStatus("Saved. Pulls will now target this studio.");
-      await refresh();
+      if (await persist(Number(orgId), Number(actingUserId), Number(homeLocationId))) {
+        setStatus("Saved. Pulls will now target this studio.");
+      }
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  // Picking a home location from the dropdown completes the config — save it
+  // immediately rather than making the user click Save.
+  const onPickLocation = async (val: string) => {
+    setHomeLocationId(val);
+    const o = Number(orgId), a = Number(actingUserId), h = Number(val);
+    if (o > 0 && h > 0) {
+      setError(null);
+      try {
+        if (await persist(o, a, h)) setStatus("Saved.");
+      } catch (e) {
+        setError(String(e));
+      }
     }
   };
 
@@ -1016,7 +1054,7 @@ function StudioConfigCard() {
       <label className="field" style={{ marginTop: 8 }}>
         <span>Home location{locations.length > 0 ? "" : " id"}</span>
         {locations.length > 0 ? (
-          <select value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} style={fieldStyle}>
+          <select value={homeLocationId} onChange={(e) => onPickLocation(e.target.value)} style={fieldStyle}>
             <option value="">— pick your studio —</option>
             {locations.map((l) => (
               <option key={l.id} value={String(l.id)}>{l.name} ({l.id})</option>
