@@ -96,6 +96,38 @@ pub struct ProposalShiftInput {
     pub is_dropped: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredLocation { pub id: i64, pub name: String }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredStudio {
+    pub org_id: i64,
+    pub acting_user_id: i64,
+    pub acting_user_name: String,
+    pub locations: Vec<DiscoveredLocation>,
+}
+
+/// Read a number-or-string JSON value as i64.
+fn json_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Extract (acting_user_id, name, org_id_if_present) from an account/session
+/// response. Sling's exact shape is undocumented, so org-id lookup is tolerant;
+/// callers fall back to the login-URL org hint when it's absent.
+pub fn parse_session(v: &serde_json::Value) -> Result<(i64, String, Option<i64>)> {
+    let user = v.get("user").ok_or_else(|| anyhow!("session response has no user"))?;
+    let uid = user.get("id").and_then(json_i64)
+        .ok_or_else(|| anyhow!("session user has no id"))?;
+    let name = user.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let org = ["org", "organization"].iter()
+        .find_map(|k| v.get(*k).and_then(|o| o.get("id")).and_then(json_i64))
+        .or_else(|| v.get("orgId").and_then(json_i64))
+        .or_else(|| user.get("orgId").and_then(json_i64))
+        .or_else(|| user.get("org").and_then(|o| o.get("id")).and_then(json_i64));
+    Ok((uid, name, org))
+}
+
 /// A single shift to be created or verified against Sling.
 /// Produced by push_to_sling (commands.rs) from the `proposal_shifts` table.
 #[derive(Debug, Clone)]
@@ -578,6 +610,60 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
     })
 }
 
+/// The location options to offer for "home location": the location groups the
+/// user belongs to, sorted by name. If the user belongs to none, fall back to
+/// every location group in the org so the dropdown is never empty.
+pub fn select_locations(
+    group_ids: &[i64],
+    loc_names: &std::collections::HashMap<i64, String>,
+) -> Vec<DiscoveredLocation> {
+    let mut mine: Vec<DiscoveredLocation> = group_ids.iter()
+        .filter_map(|g| loc_names.get(g).map(|n| DiscoveredLocation { id: *g, name: n.clone() }))
+        .collect();
+    if mine.is_empty() {
+        mine = loc_names.iter().map(|(id, n)| DiscoveredLocation { id: *id, name: n.clone() }).collect();
+    }
+    mine.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    mine
+}
+
+/// Discover the studio's org / acting-user / location options from Sling using
+/// a freshly captured token. `org_hint` is the org id parsed from the login
+/// request URL (guaranteed when present). Best-effort: returns an error only if
+/// it can't determine the org at all.
+pub fn discover_studio(token: &str, org_hint: Option<i64>) -> Result<DiscoveredStudio> {
+    // account/session may be org-scoped; use the hint's org when we have it.
+    let session = if let Some(org) = org_hint {
+        http_get(token, &format!("{BASE_URL}/{org}/account/session"))?
+    } else {
+        http_get(token, &format!("{BASE_URL}/account/session"))?
+    };
+    let (acting_user_id, acting_user_name, org_from_session) = parse_session(&session)?;
+    let org_id = org_hint.or(org_from_session)
+        .ok_or_else(|| anyhow!("couldn't determine Sling org — enter it manually"))?;
+
+    // The acting user's location memberships come from their group_ids.
+    let users_doc = http_get(token, &format!("{BASE_URL}/users/concise"))?;
+    let group_ids: Vec<i64> = users_doc.get("users")
+        .and_then(|v| v.as_array())
+        .into_iter().flatten()
+        .filter_map(|u| serde_json::from_value::<SlingUser>(u.clone()).ok())
+        .find(|u| u.id == acting_user_id)
+        .map(|u| u.group_ids)
+        .unwrap_or_default();
+
+    let groups_doc = http_get(token, &format!("{BASE_URL}/groups"))?;
+    let groups: Vec<SlingGroup> = groups_doc.as_array()
+        .ok_or_else(|| anyhow!("groups not array"))?
+        .iter().filter_map(|g| serde_json::from_value(g.clone()).ok()).collect();
+    let loc_names = location_name_by_id(&groups);
+
+    Ok(DiscoveredStudio {
+        org_id, acting_user_id, acting_user_name,
+        locations: select_locations(&group_ids, &loc_names),
+    })
+}
+
 /// The create-shift POST body. `users` is an array on POST (PUT uses
 /// singular `user`); `status` is always the literal "planning" — this app
 /// never publishes. dtstart/dtend are naive local strings; Sling applies the
@@ -767,6 +853,41 @@ mod tests {
             class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Ghost".into()), is_dropped: false }];
         let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
         assert!(e.contains("Ghost"), "got: {e}");
+    }
+
+    #[test]
+    fn parse_session_reads_user_and_optional_org() {
+        let v = serde_json::json!({ "user": { "id": 29470393, "name": "Lead Teacher" } });
+        let (uid, name, org) = parse_session(&v).unwrap();
+        assert_eq!(uid, 29470393);
+        assert_eq!(name, "Lead Teacher");
+        assert_eq!(org, None);
+
+        let v2 = serde_json::json!({ "org": { "id": "1193381" }, "user": { "id": "42", "name": "X" } });
+        let (uid2, _n2, org2) = parse_session(&v2).unwrap();
+        assert_eq!(uid2, 42);
+        assert_eq!(org2, Some(1193381));
+    }
+
+    #[test]
+    fn parse_session_errors_without_user() {
+        let v = serde_json::json!({ "nope": true });
+        assert!(parse_session(&v).is_err());
+    }
+
+    #[test]
+    fn select_locations_intersects_then_falls_back_to_all() {
+        let mut names = std::collections::HashMap::new();
+        names.insert(5i64, "Pinnacle".to_string());
+        names.insert(7i64, "Downtown".to_string());
+        names.insert(9i64, "Westside".to_string());
+        // user belongs to 5 and 7 (and a non-location group 100)
+        let got = select_locations(&[5, 100, 7], &names);
+        assert_eq!(got.iter().map(|l| l.id).collect::<Vec<_>>(), vec![7, 5]); // sorted by name: Downtown, Pinnacle
+        // user belongs to no location group -> fall back to ALL locations, sorted by name
+        let none = select_locations(&[100, 200], &names);
+        assert_eq!(none.len(), 3);
+        assert_eq!(none[0].name, "Downtown");
     }
 
     #[test]

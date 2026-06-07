@@ -19,7 +19,7 @@ mod sling_login;
 
 use std::sync::Mutex;
 
-use commands::{AnthropicKey, SlingToken};
+use commands::{AnthropicKey, SlingOrgHint, SlingToken};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,6 +73,7 @@ pub fn run() {
             }
             app.manage(AnthropicKey(Mutex::new(None)));
             app.manage(SlingToken(Mutex::new(initial_token)));
+            app.manage(SlingOrgHint(Mutex::new(None)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -96,6 +97,7 @@ pub fn run() {
             commands::get_studio_config,
             commands::set_studio_config,
             commands::open_sling_login_window,
+            commands::discover_studio_config,
             commands::review_proposal,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,

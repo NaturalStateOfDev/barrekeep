@@ -26,6 +26,10 @@ pub struct AnthropicKey(pub Mutex<Option<String>>);
 /// the in-memory cache to avoid keychain reads on every request.
 pub struct SlingToken(pub Mutex<Option<String>>);
 
+/// Org id opportunistically parsed from the Sling login request URL, used as a
+/// fallback when account/session doesn't expose it. See sling_login.rs.
+pub struct SlingOrgHint(pub Mutex<Option<i64>>);
+
 #[derive(Serialize)]
 pub struct DbInfo {
     pub path: String,
@@ -1889,6 +1893,19 @@ pub fn add_teacher_from_pull(
 #[tauri::command]
 pub fn open_sling_login_window(app: tauri::AppHandle) -> Result<(), String> {
     crate::sling_login::open_login_window(app).map_err(err)
+}
+
+#[tauri::command]
+pub fn discover_studio_config(
+    token: State<'_, SlingToken>,
+    org_hint: State<'_, SlingOrgHint>,
+) -> Result<crate::sling::DiscoveredStudio, String> {
+    let token_str = {
+        let t = token.0.lock().map_err(err)?;
+        t.clone().ok_or_else(|| "no Sling token — log in to Sling first".to_string())?
+    };
+    let hint = { *org_hint.0.lock().map_err(err)? };
+    crate::sling::discover_studio(&token_str, hint).map_err(err)
 }
 
 // ============================================================
