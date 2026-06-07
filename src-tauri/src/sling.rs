@@ -680,6 +680,18 @@ pub fn build_shift_body(s: &PushSpec, home_location_id: i64) -> serde_json::Valu
     })
 }
 
+/// A Sling user belongs in the roster iff they are active, a member of the
+/// home-location group, and qualified for at least one schedulable position.
+pub fn is_schedulable_teacher(
+    user: &SlingUser,
+    home_location_id: i64,
+    schedulable_position_ids: &std::collections::HashSet<i64>,
+) -> bool {
+    user.active
+        && user.group_ids.contains(&home_location_id)
+        && user.group_ids.iter().any(|g| schedulable_position_ids.contains(g))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,6 +900,20 @@ mod tests {
         let none = select_locations(&[100, 200], &names);
         assert_eq!(none.len(), 3);
         assert_eq!(none[0].name, "Downtown");
+    }
+
+    #[test]
+    fn is_schedulable_teacher_requires_active_home_and_qualified() {
+        let mut schedulable = std::collections::HashSet::new();
+        schedulable.insert(900i64);
+        let home = 5i64;
+        let mk = |active: bool, groups: Vec<i64>| SlingUser {
+            id: 1, name: "T".into(), lastname: "X".into(), active, group_ids: groups,
+        };
+        assert!(is_schedulable_teacher(&mk(true, vec![5, 900]), home, &schedulable));
+        assert!(!is_schedulable_teacher(&mk(false, vec![5, 900]), home, &schedulable));
+        assert!(!is_schedulable_teacher(&mk(true, vec![900]), home, &schedulable));
+        assert!(!is_schedulable_teacher(&mk(true, vec![5, 777]), home, &schedulable));
     }
 
     #[test]
