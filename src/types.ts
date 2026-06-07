@@ -190,6 +190,14 @@ export interface PushProgress {
   last_outcome: string;
 }
 
+export interface RosterSyncSummary {
+  teachers_active: number;
+  teachers_deactivated: number;
+  positions_active: number;
+  positions_deactivated: number;
+  qualifications: number;
+}
+
 export interface DiscoveredLocation {
   id: number;
   name: string;

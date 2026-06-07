@@ -20,6 +20,7 @@ import type {
   PushPreview,
   PushSummary,
   DiscoveredStudio,
+  RosterSyncSummary,
 } from "../types";
 
 export const api = {
@@ -29,6 +30,9 @@ export const api = {
   updateTeacherSettings: (slingUserId: number, weeklyTarget: number, weeklyMax: number) =>
     invoke<void>("update_teacher_settings", { slingUserId, weeklyTarget, weeklyMax }),
   listPositions: () => invoke<Position[]>("list_positions"),
+  setPositionActive: (slingPositionId: number, active: boolean) =>
+    invoke<void>("set_position_active", { slingPositionId, active }),
+  refreshRosterFromSling: () => invoke<RosterSyncSummary>("refresh_roster_from_sling"),
   listQualifiedPairs: () => invoke<string[]>("list_qualified_pairs"),
   generateProposal: (targetMonth: string) =>
     invoke<GenerateResult>("generate_proposal", { targetMonth }),
