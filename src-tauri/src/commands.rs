@@ -78,7 +78,6 @@ pub struct PullResult {
     pub availability_count: i64,
     pub external_shift_count: i64,
     pub history_shift_count: i64,
-    pub new_users: Vec<NewUserSummary>,
 }
 
 #[derive(Serialize)]
@@ -1279,6 +1278,147 @@ pub fn has_sling_credentials(
 // Sling pull — fetch + write to DuckDB transactionally
 // ============================================================
 
+#[derive(serde::Serialize, Clone)]
+pub struct RosterSyncSummary {
+    pub teachers_active: i64,
+    pub teachers_deactivated: i64,
+    pub positions_active: i64,
+    pub positions_deactivated: i64,
+    pub qualifications: i64,
+}
+
+/// Reconcile the roster + positions + qualifications against Sling (source of
+/// truth). Active home-location users qualified for a schedulable position are
+/// imported; departed teachers and removed positions are deactivated (never
+/// deleted — schedule history references them). App-only fields (teacher
+/// caps/variety/ranking/notes; position duration/is_special/active) are
+/// preserved. Must run inside a transaction.
+fn sync_roster(
+    conn: &duckdb::Connection,
+    users: &[crate::sling::SlingUser],
+    groups: &[crate::sling::SlingGroup],
+    cfg: &crate::sling::StudioConfig,
+) -> Result<RosterSyncSummary, String> {
+    use std::collections::HashSet;
+
+    // 1. Positions from Sling position-type groups.
+    let pos_groups: Vec<(i64, String)> = groups.iter()
+        .filter(|g| g.kind == "position")
+        .map(|g| (g.id, g.name.clone()))
+        .collect();
+    let sling_pos_ids: HashSet<i64> = pos_groups.iter().map(|(id, _)| *id).collect();
+    for (id, name) in &pos_groups {
+        let pid = *id as i32;
+        let exists: i64 = conn.query_row(
+            "SELECT count(*) FROM positions WHERE sling_position_id = ?",
+            duckdb::params![pid], |r| r.get(0)).map_err(err)?;
+        if exists > 0 {
+            conn.execute("UPDATE positions SET class_name = ? WHERE sling_position_id = ?",
+                duckdb::params![name, pid]).map_err(err)?;
+        } else {
+            conn.execute(
+                "INSERT INTO positions (sling_position_id, class_name, duration_minutes, is_special, active)
+                 VALUES (?, ?, 60, FALSE, TRUE)",
+                duckdb::params![pid, name]).map_err(err)?;
+        }
+    }
+    let all_pos: Vec<i32> = {
+        let mut s = conn.prepare("SELECT sling_position_id FROM positions").map_err(err)?;
+        s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
+    };
+    let mut positions_deactivated = 0i64;
+    for pid in &all_pos {
+        if !sling_pos_ids.contains(&(*pid as i64)) {
+            conn.execute("UPDATE positions SET active = FALSE WHERE sling_position_id = ?",
+                duckdb::params![pid]).map_err(err)?;
+            positions_deactivated += 1;
+        }
+    }
+
+    // 2. Schedulable position set (active positions).
+    let schedulable: HashSet<i64> = {
+        let mut s = conn.prepare("SELECT sling_position_id FROM positions WHERE active = TRUE").map_err(err)?;
+        s.query_map([], |r| r.get::<_, i32>(0)).map_err(err)?
+            .collect::<Result<Vec<_>, _>>().map_err(err)?
+            .into_iter().map(|p| p as i64).collect()
+    };
+    let positions_active = schedulable.len() as i64;
+
+    // 3. Teachers.
+    let location_names = crate::sling::location_name_by_id(groups);
+    let mut imported: HashSet<i32> = HashSet::new();
+    let mut teachers_active = 0i64;
+    for u in users {
+        if !crate::sling::is_schedulable_teacher(u, cfg.home_location_id, &schedulable) { continue; }
+        let uid = u.id as i32;
+        imported.insert(uid);
+        teachers_active += 1;
+        let display = format!("{} {}", u.name, u.lastname).trim().to_string();
+        let locations = crate::sling::compute_locations(&u.group_ids, &location_names);
+        let is_lead = u.id == cfg.acting_user_id;
+        let exists: i64 = conn.query_row(
+            "SELECT count(*) FROM teachers WHERE sling_user_id = ?",
+            duckdb::params![uid], |r| r.get(0)).map_err(err)?;
+        if exists > 0 {
+            conn.execute(
+                "UPDATE teachers SET display_name = ?, locations = ?, active = TRUE, is_lead = ?
+                 WHERE sling_user_id = ?",
+                duckdb::params![display, locations, is_lead, uid]).map_err(err)?;
+        } else {
+            conn.execute(
+                "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max,
+                    is_lead, ranking_weight, variety_multiplier, active, locations)
+                 VALUES (?, ?, 4, 5, ?, 1.0, 1.0, TRUE, ?)",
+                duckdb::params![uid, display, is_lead, locations]).map_err(err)?;
+        }
+    }
+    let all_teachers: Vec<i32> = {
+        let mut s = conn.prepare("SELECT sling_user_id FROM teachers").map_err(err)?;
+        s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
+    };
+    let mut teachers_deactivated = 0i64;
+    for tid in &all_teachers {
+        if !imported.contains(tid) {
+            conn.execute("UPDATE teachers SET active = FALSE WHERE sling_user_id = ?",
+                duckdb::params![tid]).map_err(err)?;
+            teachers_deactivated += 1;
+        }
+    }
+
+    // 4. Qualifications (imported teachers × schedulable positions).
+    let mut sling_pairs: HashSet<(i32, i32)> = HashSet::new();
+    for u in users {
+        let uid = u.id as i32;
+        if !imported.contains(&uid) { continue; }
+        for g in &u.group_ids {
+            if schedulable.contains(g) { sling_pairs.insert((uid, *g as i32)); }
+        }
+    }
+    let existing: Vec<(i32, i32, bool)> = {
+        let mut s = conn.prepare(
+            "SELECT sling_user_id, sling_position_id, is_blocklisted FROM teacher_qualifications").map_err(err)?;
+        s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(err)?
+            .collect::<Result<_, _>>().map_err(err)?
+    };
+    for (uid, pid, blocked) in &existing {
+        if *blocked { continue; }
+        if !sling_pairs.contains(&(*uid, *pid)) {
+            conn.execute("DELETE FROM teacher_qualifications WHERE sling_user_id = ? AND sling_position_id = ?",
+                duckdb::params![uid, pid]).map_err(err)?;
+        }
+    }
+    let mut qualifications = 0i64;
+    for (uid, pid) in &sling_pairs {
+        conn.execute(
+            "INSERT INTO teacher_qualifications (sling_user_id, sling_position_id)
+             VALUES (?, ?) ON CONFLICT DO NOTHING",
+            duckdb::params![uid, pid]).map_err(err)?;
+        qualifications += 1;
+    }
+
+    Ok(RosterSyncSummary { teachers_active, teachers_deactivated, positions_active, positions_deactivated, qualifications })
+}
+
 #[tauri::command]
 pub fn pull_month_from_sling(
     db: State<'_, Db>,
@@ -1307,127 +1447,16 @@ pub fn pull_month_from_sling(
     let mut conn = db.0.lock().map_err(err)?;
     let tx = conn.transaction().map_err(err)?;
 
-    let position_group_ids = sling::position_group_ids(&payload.groups);
-    let location_name_by_id = sling::location_name_by_id(&payload.groups);
+    // Roster + positions + qualifications are reconciled from Sling here.
+    let _roster = sync_roster(&tx, &payload.users, &payload.groups, &cfg)?;
 
-    // User IDs that show up as the assignee on at least one home location shift in
-    // the trailing 3 months. A user being tagged with home location + a teaching
-    // position is not enough — GMs and sister-studio managers sometimes hold
-    // both tags. Requiring actual recent home location shifts cuts those out.
-    let home_teacher_uids: std::collections::HashSet<i32> = payload
-        .history_shifts
-        .iter()
-        .filter_map(|s| {
-            s.user
-                .as_ref()
-                .or_else(|| s.users.as_ref().and_then(|v| v.first()))
-                .map(|u| u.id as i32)
-        })
-        .collect();
-
-    let known_user_ids: std::collections::HashSet<i32> = {
-        let mut stmt = tx.prepare("SELECT sling_user_id FROM teachers").map_err(err)?;
-        stmt.query_map([], |r| r.get::<_, i32>(0))
-            .map_err(err)?
-            .collect::<Result<_, _>>()
-            .map_err(err)?
-    };
-    let known_position_ids: std::collections::HashSet<i32> = {
-        let mut stmt = tx.prepare("SELECT sling_position_id FROM positions").map_err(err)?;
-        stmt.query_map([], |r| r.get::<_, i32>(0))
-            .map_err(err)?
-            .collect::<Result<_, _>>()
-            .map_err(err)?
+    let roster_ids: std::collections::HashSet<i32> = {
+        let mut s = tx.prepare("SELECT sling_user_id FROM teachers WHERE active = TRUE").map_err(err)?;
+        s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
     };
 
-    // Wipe the candidates table; we refill it below with the filtered
-    // delta of "could be added to our roster" home location teachers.
-    tx.execute("DELETE FROM sling_candidates", []).map_err(err)?;
-
-    let mut user_count: i64 = 0;
-    let mut new_users: Vec<NewUserSummary> = Vec::new();
-    for u in &payload.users {
-        let display = format!("{} {}", u.name, u.lastname).trim().to_string();
-        let uid = u.id as i32;
-        let user_locations = sling::compute_locations(&u.group_ids, &location_name_by_id);
-        if known_user_ids.contains(&uid) {
-            tx.execute(
-                "UPDATE teachers SET display_name = ?, active = ?, locations = ? \
-                 WHERE sling_user_id = ?",
-                duckdb::params![display, u.active, user_locations, uid],
-            ).map_err(err)?;
-            user_count += 1;
-        } else {
-            // Only flag (and persist as a candidate) when the user (a) holds
-            // a teaching position, (b) is active, and (c) is tagged to the
-            // home location location. Drops GM/sales/front-desk and sister-studio
-            // staff that share the same Sling org.
-            let teaches = u.group_ids.iter().any(|g| position_group_ids.contains(g));
-            let at_home = u.group_ids.contains(&cfg.home_location_id);
-            if teaches && u.active && at_home {
-                // Persist to the Teachers-page picker regardless — that view
-                // is for browsing, occasional adds, and includes brand-new
-                // hires who haven't taught yet.
-                tx.execute(
-                    "INSERT INTO sling_candidates (sling_user_id, display_name, active, locations) \
-                     VALUES (?, ?, ?, ?)",
-                    duckdb::params![uid, display.clone(), u.active, user_locations.clone()],
-                ).map_err(err)?;
-                // Top-of-mind alert only if they've actually taught at
-                // home location in the trailing 3 months. Drops admins and
-                // cross-studio managers who hold the tags but don't teach.
-                if home_teacher_uids.contains(&uid) {
-                    new_users.push(NewUserSummary {
-                        sling_user_id: uid,
-                        display_name: display,
-                        active: u.active,
-                        locations: user_locations,
-                    });
-                }
-            }
-        }
-    }
-
-    let mut sling_pairs: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
-    for u in &payload.users {
-        let uid = u.id as i32;
-        if !known_user_ids.contains(&uid) { continue; }
-        for gid in &u.group_ids {
-            if position_group_ids.contains(gid) {
-                let pid = *gid as i32;
-                if known_position_ids.contains(&pid) {
-                    sling_pairs.insert((uid, pid));
-                }
-            }
-        }
-    }
-    let existing_pairs: Vec<(i32, i32, bool)> = {
-        let mut stmt = tx.prepare(
-            "SELECT sling_user_id, sling_position_id, is_blocklisted FROM teacher_qualifications"
-        ).map_err(err)?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(err)?
-            .collect::<Result<_, _>>()
-            .map_err(err)?
-    };
-    let mut qual_count: i64 = 0;
-    for (uid, pid, blocked) in &existing_pairs {
-        if *blocked { continue; }
-        if !sling_pairs.contains(&(*uid, *pid)) {
-            tx.execute(
-                "DELETE FROM teacher_qualifications WHERE sling_user_id = ? AND sling_position_id = ?",
-                duckdb::params![uid, pid],
-            ).map_err(err)?;
-        }
-    }
-    for (uid, pid) in &sling_pairs {
-        tx.execute(
-            "INSERT INTO teacher_qualifications (sling_user_id, sling_position_id)
-             VALUES (?, ?) ON CONFLICT DO NOTHING",
-            duckdb::params![uid, pid],
-        ).map_err(err)?;
-        qual_count += 1;
-    }
+    let user_count: i64 = roster_ids.len() as i64;
+    let qual_count: i64 = _roster.qualifications;
 
     let (m_start, m_end) = sling::month_range(&target_month).map_err(err)?;
     tx.execute(
@@ -1442,7 +1471,7 @@ pub fn pull_month_from_sling(
             Some(u) => u.id as i32,
             None => continue,
         };
-        if !known_user_ids.contains(&uid) { continue; }
+        if !roster_ids.contains(&uid) { continue; }
         tx.execute(
             "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at)
              VALUES (?, ?, CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ))",
@@ -1512,7 +1541,6 @@ pub fn pull_month_from_sling(
         availability_count,
         external_shift_count,
         history_shift_count,
-        new_users,
     })
 }
 
