@@ -1,9 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./lib/api";
 import { CalendarView } from "./components/calendar/CalendarView";
 import { SlingTokenModal } from "./components/SlingTokenModal";
+import { PushModal } from "./components/PushModal";
 import { MonthSelector } from "./components/MonthSelector";
+import { UpdateBanner } from "./components/UpdateBanner";
+import {
+  getCurrentVersion,
+  checkForUpdate,
+  installUpdate,
+  type Update,
+  type DownloadProgress,
+} from "./lib/updater";
 import { monthWindow, isReadOnlyMonth } from "./lib/dates";
 
 function todayIso(): string {
@@ -11,7 +20,6 @@ function todayIso(): string {
 }
 import type {
   Teacher,
-  SlingCandidate,
   Position,
   DbInfo,
   ProposalSummary,
@@ -19,7 +27,7 @@ import type {
   EditRow,
   ReviewSuggestion,
   ReviewRunSummary,
-  NewUserSummary,
+  DiscoveredLocation,
 } from "./types";
 
 type View = "dashboard" | "proposals" | "teachers" | "positions" | "settings";
@@ -64,6 +72,7 @@ export function App() {
         </button>
       </aside>
       <main className="main">
+        <UpdateBanner />
         {view === "dashboard" && <Dashboard />}
         {view === "proposals" && <ProposalsView />}
         {view === "teachers" && <TeachersView />}
@@ -126,6 +135,7 @@ function ProposalsView() {
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [tab, setTab] = useState<"calendar" | "list" | "edits" | "review">("calendar");
   const [slingExpiredModal, setSlingExpiredModal] = useState(false);
+  const [pushOpen, setPushOpen] = useState(false);
 
   const today = todayIso();
   const [selectedMonth, setSelectedMonth] = useState<string>(() => {
@@ -137,7 +147,6 @@ function ProposalsView() {
   });
   const [pulling, setPulling] = useState(false);
   const [pullResult, setPullResult] = useState<string | null>(null);
-  const [newUsersFromPull, setNewUsersFromPull] = useState<NewUserSummary[]>([]);
 
   const refreshProposals = async () => {
     const list = await api.listProposals();
@@ -166,7 +175,6 @@ function ProposalsView() {
   }, [selectedId]);
 
   useEffect(() => {
-    setNewUsersFromPull([]);
     setPullResult(null);
   }, [selectedMonth]);
 
@@ -194,10 +202,8 @@ function ProposalsView() {
       setPullResult(
         `Pulled ${selectedMonth}: ${r.user_count} users, ${r.qual_count} qualifications, ` +
           `${r.availability_count} availability blocks, ${r.external_shift_count} external shifts, ` +
-          `${r.history_shift_count} trailing-history shifts.` +
-          (r.new_users.length ? ` ${r.new_users.length} new teacher(s) detected.` : ""),
+          `${r.history_shift_count} trailing-history shifts.`,
       );
-      setNewUsersFromPull(r.new_users);
       await refreshProposals();
     } catch (e) {
       const msg = String(e);
@@ -317,6 +323,16 @@ function ProposalsView() {
 
       {detail && (
         <>
+          <div className="row" style={{ justifyContent: "flex-end", marginBottom: 8 }}>
+            <button
+              className="btn-primary"
+              onClick={() => setPushOpen(true)}
+              disabled={isReadOnlyMonth(detail.summary.target_month, today)}
+              title={isReadOnlyMonth(detail.summary.target_month, today) ? "Past month — read only" : "Push these shifts to Sling as planning shifts"}
+            >
+              Push to Sling
+            </button>
+          </div>
           <div className="bk-tabs">
             <button onClick={() => setTab("calendar")} className={tab === "calendar" ? "active" : ""}>Calendar</button>
             <button onClick={() => setTab("list")} className={tab === "list" ? "active" : ""}>List</button>
@@ -326,7 +342,6 @@ function ProposalsView() {
           {tab === "calendar" && (
             <CalendarView
               proposal={detail}
-              newUsersFromPull={newUsersFromPull}
               onProposalChanged={onProposalChanged}
               onRegenerate={onGenerate}
               readonly={isReadOnlyMonth(detail.summary.target_month, today)}
@@ -342,6 +357,14 @@ function ProposalsView() {
           reason="expired"
           onSaved={() => setSlingExpiredModal(false)}
           onCancel={() => setSlingExpiredModal(false)}
+        />
+      )}
+      {pushOpen && detail && (
+        <PushModal
+          proposalId={detail.summary.id}
+          monthLabel={detail.summary.target_month}
+          onClose={() => { setPushOpen(false); onProposalChanged(); }}
+          onTokenExpired={() => { setPushOpen(false); setSlingExpiredModal(true); }}
         />
       )}
     </>
@@ -461,44 +484,45 @@ function EditHistory({ proposalId }: { proposalId: number }) {
 
 function TeachersView() {
   const [teachers, setTeachers] = useState<Teacher[] | null>(null);
-  const [candidates, setCandidates] = useState<SlingCandidate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
-  const refresh = () => {
+  const refresh = () =>
     api.listTeachers().then(setTeachers).catch((e) => setError(String(e)));
-    api.listSlingCandidates().then(setCandidates).catch((e) => setError(String(e)));
-  };
 
   useEffect(() => { refresh(); }, []);
 
-  // Candidates that aren't already in the teachers roster.
-  const addable = useMemo(() => {
-    if (!candidates || !teachers) return [];
-    const have = new Set(teachers.map((t) => t.sling_user_id));
-    return candidates.filter((c) => !have.has(c.sling_user_id));
-  }, [candidates, teachers]);
+  const onRefreshRoster = async () => {
+    setSyncing(true); setSyncMsg(null); setError(null);
+    try {
+      const s = await api.refreshRosterFromSling();
+      setSyncMsg(`Synced from Sling: ${s.teachers_active} teachers, ${s.positions_active} class types` +
+        (s.teachers_deactivated ? `, ${s.teachers_deactivated} deactivated` : "") + ".");
+      await refresh();
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("sling-401")) setSyncMsg("Sling token expired — log in again (Settings), then Refresh.");
+      else if (msg.includes("not configured")) setSyncMsg("Set Studio configuration in Settings first, then Refresh.");
+      else setSyncMsg(`Refresh failed: ${msg}`);
+    } finally { setSyncing(false); }
+  };
+
+  const activeTeachers = teachers ? teachers.filter((t) => t.active) : null;
 
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <h2 style={{ margin: 0 }}>Teachers</h2>
-        <span
-          title="Studio managed by this app (read-only for now)"
-          style={{
-            background: "hsl(210 50% 94%)",
-            color: "hsl(210 60% 32%)",
-            border: "1px solid hsl(210 40% 80%)",
-            borderRadius: 999,
-            padding: "2px 10px",
-            fontSize: 13,
-            fontWeight: 600,
-          }}
-        >
-          Studio: the studio
-        </span>
+        <button className="btn-primary" onClick={onRefreshRoster} disabled={syncing}>
+          {syncing ? "Refreshing…" : "Refresh from Sling"}
+        </button>
       </div>
+      {syncMsg && <div className="muted">{syncMsg}</div>}
       {error && <div className="card error">{error}</div>}
-      {teachers && (
+      {activeTeachers !== null && activeTeachers.length === 0 ? (
+        <p className="muted">No teachers yet — log in to Sling, set Studio configuration in Settings, then click "Refresh from Sling".</p>
+      ) : activeTeachers && activeTeachers.length > 0 && (
         <div className="card">
           <table>
             <thead>
@@ -509,11 +533,10 @@ function TeachersView() {
                 <th>Target/wk</th>
                 <th>Max/wk</th>
                 <th>Lead</th>
-                <th>Active</th>
               </tr>
             </thead>
             <tbody>
-              {teachers.map((t) => (
+              {activeTeachers.map((t) => (
                 <TeacherRow
                   key={t.sling_user_id}
                   teacher={t}
@@ -525,7 +548,6 @@ function TeachersView() {
           </table>
         </div>
       )}
-      <AddTeacherCard candidates={addable} onAdded={refresh} />
     </>
   );
 }
@@ -636,121 +658,7 @@ function TeacherRow({
         />
       </td>
       <td>{teacher.is_lead ? "yes" : ""}</td>
-      <td>{teacher.active ? "yes" : "no"}</td>
     </tr>
-  );
-}
-
-function AddTeacherCard({
-  candidates,
-  onAdded,
-}: {
-  candidates: SlingCandidate[];
-  onAdded: () => void;
-}) {
-  const [selected, setSelected] = useState<number | "">("");
-  const [weeklyTarget, setWeeklyTarget] = useState(4);
-  const [weeklyMax, setWeeklyMax] = useState(5);
-  const [isLead, setIsLead] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const onAdd = async () => {
-    setStatus(null);
-    setError(null);
-    if (selected === "") {
-      setError("Pick a teacher from the list.");
-      return;
-    }
-    const cand = candidates.find((c) => c.sling_user_id === selected);
-    if (!cand) {
-      setError("Selected teacher no longer in candidates list.");
-      return;
-    }
-    try {
-      await api.addTeacherFromPull({
-        sling_user_id: cand.sling_user_id,
-        display_name: cand.display_name,
-        weekly_target: weeklyTarget,
-        weekly_max: weeklyMax,
-        is_lead: isLead,
-      });
-      setStatus(`Added ${cand.display_name}.`);
-      setSelected("");
-      onAdded();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <strong>Add a teacher from Sling</strong>
-      <p className="muted" style={{ marginTop: 4 }}>
-        Adds them to this app's scheduling roster only. Doesn't touch Sling.
-        The list refreshes when you pull from Sling.
-      </p>
-      {candidates.length === 0 ? (
-        <div className="muted" style={{ marginTop: 8 }}>
-          No add-able candidates. Pull from Sling on the Proposals page to refresh.
-        </div>
-      ) : (
-        <>
-          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8, maxWidth: 480 }}>
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value === "" ? "" : Number(e.target.value))}
-              style={{ padding: "6px 8px" }}
-            >
-              <option value="">— pick a teacher —</option>
-              {candidates.map((c) => (
-                <option key={c.sling_user_id} value={c.sling_user_id}>
-                  {c.display_name}
-                  {c.locations ? ` (${c.locations})` : ""}
-                </option>
-              ))}
-            </select>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <label style={{ display: "flex", flexDirection: "column", fontSize: 12 }}>
-                <span className="muted">Target/wk</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={20}
-                  value={weeklyTarget}
-                  onChange={(e) => setWeeklyTarget(Number(e.target.value))}
-                  style={{ padding: "6px 8px", width: 80 }}
-                />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column", fontSize: 12 }}>
-                <span className="muted">Max/wk</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={20}
-                  value={weeklyMax}
-                  onChange={(e) => setWeeklyMax(Number(e.target.value))}
-                  style={{ padding: "6px 8px", width: 80 }}
-                />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={isLead}
-                  onChange={(e) => setIsLead(e.target.checked)}
-                />
-                <span>Lead</span>
-              </label>
-            </div>
-          </div>
-          <div className="row" style={{ marginTop: 12 }}>
-            <button className="btn-primary" onClick={onAdd}>Add to roster</button>
-          </div>
-        </>
-      )}
-      {status && <div className="ok" style={{ marginTop: 8 }}>{status}</div>}
-      {error && <div className="error" style={{ marginTop: 8 }}>{error}</div>}
-    </div>
   );
 }
 
@@ -758,13 +666,16 @@ function PositionsView() {
   const [positions, setPositions] = useState<Position[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const refresh = () => api.listPositions().then(setPositions).catch((e) => setError(String(e)));
+
   useEffect(() => {
-    api.listPositions().then(setPositions).catch((e) => setError(String(e)));
+    refresh();
   }, []);
 
   return (
     <>
       <h2>Class types</h2>
+      <p className="muted">Uncheck non-class positions (e.g. Sales Rep) so they're excluded from the roster and scheduling.</p>
       {error && <div className="card error">{error}</div>}
       {positions && (
         <div className="card">
@@ -775,6 +686,7 @@ function PositionsView() {
                 <th>Sling position ID</th>
                 <th>Duration (min)</th>
                 <th>Special</th>
+                <th>Schedulable</th>
               </tr>
             </thead>
             <tbody>
@@ -786,6 +698,17 @@ function PositionsView() {
                   </td>
                   <td>{p.duration_minutes}</td>
                   <td>{p.is_special ? "yes" : ""}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={p.active}
+                      onChange={async (e) => {
+                        setError(null);
+                        try { await api.setPositionActive(p.sling_position_id, e.target.checked); await refresh(); }
+                        catch (err) { setError(String(err)); }
+                      }}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -833,6 +756,8 @@ function SettingsView() {
   return (
     <>
       <h2>Settings</h2>
+
+      <SlingTokenCard />
 
       <StudioConfigCard />
 
@@ -883,10 +808,105 @@ function SettingsView() {
         {error && <div className="error">{error}</div>}
       </div>
 
-      <SlingTokenCard />
-
       <SlingCredentialsCard />
+
+      <UpdatesCard />
     </>
+  );
+}
+
+function UpdatesCard() {
+  const [version, setVersion] = useState<string>("");
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [state, setState] = useState<
+    "idle" | "checking" | "current" | "available" | "installing" | "error"
+  >("idle");
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCurrentVersion().then(setVersion).catch(() => {});
+  }, []);
+
+  const onCheck = async () => {
+    setState("checking");
+    setError(null);
+    try {
+      const u = await checkForUpdate();
+      if (u) {
+        setUpdate(u);
+        setState("available");
+      } else {
+        setState("current");
+      }
+    } catch (e) {
+      setState("error");
+      setError(String(e));
+    }
+  };
+
+  const onInstall = async () => {
+    if (!update) return;
+    setState("installing");
+    setError(null);
+    try {
+      await installUpdate(update, setProgress);
+      // relaunches on success
+    } catch (e) {
+      setState("error");
+      setError(String(e));
+    }
+  };
+
+  const pct = progress?.percent;
+
+  return (
+    <div className="card">
+      <strong>Updates</strong>
+      <p className="muted" style={{ marginTop: 4 }}>
+        Barrekeep checks for a newer signed release on startup and installs it
+        with your approval. You can also check on demand here.
+      </p>
+      <div style={{ marginTop: 12 }}>
+        Current version:{" "}
+        {version ? <code>v{version}</code> : <span className="muted">…</span>}
+      </div>
+
+      <div className="row" style={{ marginTop: 12 }}>
+        {state === "available" ? (
+          <button className="btn-primary" onClick={onInstall}>
+            Install v{update?.version} &amp; restart
+          </button>
+        ) : (
+          <button
+            className="btn-primary"
+            onClick={onCheck}
+            disabled={state === "checking" || state === "installing"}
+          >
+            {state === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        )}
+      </div>
+
+      {state === "current" && (
+        <div className="ok" style={{ marginTop: 8 }}>You're on the latest version.</div>
+      )}
+      {state === "available" && (
+        <div className="ok" style={{ marginTop: 8 }}>
+          v{update?.version} is ready to install.
+        </div>
+      )}
+      {state === "installing" && (
+        <div className="muted" style={{ marginTop: 8 }}>
+          Downloading{pct != null ? ` ${pct}%` : "…"} — the app will restart when done.
+        </div>
+      )}
+      {state === "error" && (
+        <div className="error" style={{ marginTop: 8 }}>
+          Couldn't check for updates: {error}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -897,6 +917,9 @@ function StudioConfigCard() {
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [locations, setLocations] = useState<DiscoveredLocation[]>([]);
+  const [detecting, setDetecting] = useState(false);
+  const [detectMsg, setDetectMsg] = useState<string | null>(null);
 
   const refresh = () =>
     api.getStudioConfig().then((c) => {
@@ -906,24 +929,95 @@ function StudioConfigCard() {
       setLoaded(true);
     }).catch((e) => setError(String(e)));
 
+  // Persist the studio config. Shared by Save, auto-detect, and location pick.
+  const persist = async (o: number, a: number, h: number): Promise<boolean> => {
+    if (![o, a, h].every((n) => Number.isInteger(n) && n >= 0)) {
+      setError("All three IDs must be non-negative whole numbers.");
+      return false;
+    }
+    await api.setStudioConfig(o, a, h);
+    await refresh();
+    return true;
+  };
+
+  const detect = async () => {
+    setDetecting(true);
+    setDetectMsg(null);
+    setError(null);
+    try {
+      const d = await api.discoverStudioConfig();
+      const o = Number(d.org_id);
+      const a = Number(d.acting_user_id);
+      setOrgId(String(d.org_id));
+      setActingUserId(String(d.acting_user_id));
+      setLocations(d.locations);
+      // A single discovered location (or an already-saved one) is unambiguous;
+      // multiple need the user to pick from the dropdown below.
+      let h = Number(homeLocationId);
+      if (d.locations.length === 1) {
+        h = Number(d.locations[0].id);
+        setHomeLocationId(String(h));
+      }
+      // Auto-save the moment we have a complete config — no manual Save step.
+      // If the home location is still ambiguous, onPickLocation saves on pick.
+      if (o > 0 && h > 0) {
+        await persist(o, a, h);
+        setDetectMsg(`Detected and saved ${d.acting_user_name || "your"} studio (org ${o}).`);
+      } else if (d.locations.length > 1) {
+        setDetectMsg(
+          `Detected ${d.acting_user_name || "your"} studio (org ${o}). ` +
+          `Pick your home location to finish — it saves automatically.`,
+        );
+      } else {
+        setDetectMsg(`Detected org ${o}. Enter your home location id to finish.`);
+      }
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("sling-401")) {
+        setDetectMsg("Sling token expired — use “Log in to Sling” above to refresh, then Detect again.");
+      } else if (msg.includes("no Sling token")) {
+        setDetectMsg("Log in to Sling first (card above), then Detect.");
+      } else {
+        setDetectMsg("Couldn't auto-detect everything — enter the IDs manually below.");
+      }
+    } finally {
+      setDetecting(false);
+    }
+  };
+
   useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    const p = listen<void>("sling-token-saved", () => { detect(); });
+    return () => { p.then((un) => un()); };
+  }, []);
 
   const configured = loaded && Number(orgId) > 0 && Number(homeLocationId) > 0;
 
   const onSave = async () => {
     setError(null);
     setStatus(null);
-    const o = Number(orgId), a = Number(actingUserId), h = Number(homeLocationId);
-    if (![o, a, h].every((n) => Number.isInteger(n) && n >= 0)) {
-      setError("All three IDs must be non-negative whole numbers.");
-      return;
-    }
     try {
-      await api.setStudioConfig(o, a, h);
-      setStatus("Saved. Pulls will now target this studio.");
-      await refresh();
+      if (await persist(Number(orgId), Number(actingUserId), Number(homeLocationId))) {
+        setStatus("Saved. Pulls will now target this studio.");
+      }
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  // Picking a home location from the dropdown completes the config — save it
+  // immediately rather than making the user click Save.
+  const onPickLocation = async (val: string) => {
+    setHomeLocationId(val);
+    const o = Number(orgId), a = Number(actingUserId), h = Number(val);
+    if (o > 0 && h > 0) {
+      setError(null);
+      try {
+        if (await persist(o, a, h)) setStatus("Saved.");
+      } catch (e) {
+        setError(String(e));
+      }
     }
   };
 
@@ -958,12 +1052,25 @@ function StudioConfigCard() {
         <input type="number" min={0} value={actingUserId} onChange={(e) => setActingUserId(e.target.value)} placeholder="0" style={fieldStyle} />
       </label>
       <label className="field" style={{ marginTop: 8 }}>
-        <span>Home location id</span>
-        <input type="number" min={0} value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} placeholder="0" style={fieldStyle} />
+        <span>Home location{locations.length > 0 ? "" : " id"}</span>
+        {locations.length > 0 ? (
+          <select value={homeLocationId} onChange={(e) => onPickLocation(e.target.value)} style={fieldStyle}>
+            <option value="">— pick your studio —</option>
+            {locations.map((l) => (
+              <option key={l.id} value={String(l.id)}>{l.name} ({l.id})</option>
+            ))}
+          </select>
+        ) : (
+          <input type="number" min={0} value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} placeholder="0" style={fieldStyle} />
+        )}
       </label>
-      <div className="row" style={{ marginTop: 12 }}>
+      <div className="row" style={{ marginTop: 12, gap: 8 }}>
         <button className="btn-primary" onClick={onSave}>Save</button>
+        <button className="btn-ghost" onClick={detect} disabled={detecting}>
+          {detecting ? "Detecting…" : "Detect from Sling"}
+        </button>
       </div>
+      {detectMsg && <div className="muted" style={{ marginTop: 8 }}>{detectMsg}</div>}
       {status && <div className="ok">{status}</div>}
       {error && <div className="error">{error}</div>}
     </div>

@@ -19,7 +19,7 @@ mod sling_login;
 
 use std::sync::Mutex;
 
-use commands::{AnthropicKey, SlingToken};
+use commands::{AnthropicKey, SlingOrgHint, SlingToken};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -73,14 +73,15 @@ pub fn run() {
             }
             app.manage(AnthropicKey(Mutex::new(None)));
             app.manage(SlingToken(Mutex::new(initial_token)));
+            app.manage(SlingOrgHint(Mutex::new(None)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::db_info,
             commands::list_teachers,
-            commands::list_sling_candidates,
             commands::update_teacher_settings,
             commands::list_positions,
+            commands::set_position_active,
             commands::list_qualified_pairs,
             commands::generate_proposal,
             commands::list_proposals,
@@ -96,13 +97,16 @@ pub fn run() {
             commands::get_studio_config,
             commands::set_studio_config,
             commands::open_sling_login_window,
+            commands::discover_studio_config,
             commands::review_proposal,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
+            commands::refresh_roster_from_sling,
             commands::import_external_shift,
             commands::list_availability_blocks,
             commands::list_external_shifts_for_month,
-            commands::add_teacher_from_pull,
+            commands::push_proposal_dry_run,
+            commands::push_proposal_execute,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

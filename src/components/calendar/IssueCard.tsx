@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { Issue } from "../../lib/issues";
 import type { Teacher, ProposalShiftRow } from "../../types";
 
@@ -10,7 +9,6 @@ interface Props {
   onApply: () => void;
   onDismiss: () => void;
   onOpenDay: () => void;
-  onApplyForm?: (params: { target: number; max: number; lead: boolean }) => void;
 }
 
 const SEVERITY: Record<Issue["kind"], string> = {
@@ -23,43 +21,9 @@ const SEVERITY: Record<Issue["kind"], string> = {
   new_teacher: "info",
 };
 
-export function IssueCard({ issue, slot, suggestedTeacher, readonly, onApply, onDismiss, onOpenDay, onApplyForm }: Props) {
+export function IssueCard({ issue, slot, suggestedTeacher, readonly, onApply, onDismiss, onOpenDay }: Props) {
   const severity = SEVERITY[issue.kind];
-  const [formOpen, setFormOpen] = useState(false);
-  const [target, setTarget] = useState(4);
-  const [max, setMax] = useState(5);
-  const [lead, setLead] = useState(false);
 
-  if (issue.kind === "new_teacher") {
-    return (
-      <div className="bk-issue-card bk-issue-info">
-        <div className="bk-issue-header">
-          <span className="bk-issue-kind">New teacher</span>
-        </div>
-        <div className="bk-issue-msg">{issue.message}</div>
-        {!readonly && (
-          !formOpen ? (
-            <div className="bk-issue-actions">
-              <button className="btn-primary" onClick={() => setFormOpen(true)}>Add to roster</button>
-              <button className="btn-ghost" onClick={onDismiss}>Dismiss</button>
-            </div>
-          ) : (
-            <div className="bk-add-teacher-form">
-              <label>Weekly target <input type="number" value={target} min={0} max={10} onChange={(e) => setTarget(Number(e.target.value))} /></label>
-              <label>Weekly max <input type="number" value={max} min={0} max={10} onChange={(e) => setMax(Number(e.target.value))} /></label>
-              <label><input type="checkbox" checked={lead} onChange={(e) => setLead(e.target.checked)} /> Lead</label>
-              <div className="bk-issue-actions">
-                <button className="btn-primary" onClick={() => onApplyForm?.({ target, max, lead })}>Save</button>
-                <button className="btn-ghost" onClick={() => setFormOpen(false)}>Cancel</button>
-              </div>
-            </div>
-          )
-        )}
-      </div>
-    );
-  }
-
-  // Existing rendering for all other kinds:
   return (
     <div className={`bk-issue-card bk-issue-${severity}`}>
       <div className="bk-issue-header">

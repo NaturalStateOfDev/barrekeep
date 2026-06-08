@@ -1,30 +1,72 @@
-// Auto-update check on app startup.
+// Self-update helpers over tauri-plugin-updater + tauri-plugin-process.
 //
-// Flow:
-//   1. Hit the endpoint in tauri.conf.json (GitHub Releases /latest/download/latest.json)
-//   2. If a newer signed version exists, ask the user
-//   3. Download, install, relaunch
+// Flow: check() hits the GitHub Releases endpoint in tauri.conf.json
+// (latest.json), compares the installed version against the latest signed
+// release, and returns an Update handle if a newer one exists. installUpdate()
+// downloads (signature-verified against the pubkey in tauri.conf.json),
+// installs, and relaunches.
 //
-// In dev mode the check fails silently (no signed artifacts to fetch).
+// Until a signing keypair is configured (pubkey in tauri.conf.json + a signed
+// release published by .github/workflows/release.yml), and in dev, check()
+// will return null or throw — callers treat that as "no update / can't check".
 
-import { check } from "@tauri-apps/plugin-updater";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 
-export async function checkForUpdatesOnStartup(): Promise<void> {
-  try {
-    const update = await check();
-    if (!update) return;
+export type { Update };
 
-    const accept = window.confirm(
-      `Update available: ${update.version}\n\n${update.body ?? ""}\n\nInstall now? The app will restart.`,
-    );
-    if (!accept) return;
+/** The installed app version (from tauri.conf.json). */
+export function getCurrentVersion(): Promise<string> {
+  return getVersion();
+}
 
-    await update.downloadAndInstall();
-    await relaunch();
-  } catch (err) {
-    // Network errors, missing endpoint in dev, malformed manifest — all
-    // non-fatal. Log and move on; the user can still use the app.
-    console.warn("Update check failed:", err);
-  }
+/**
+ * Returns an Update handle if a newer signed release is available, else null.
+ * May throw on network/endpoint/signature errors — callers decide how loud to
+ * be (startup is silent; the manual check surfaces the error).
+ */
+export function checkForUpdate(): Promise<Update | null> {
+  return check();
+}
+
+export interface DownloadProgress {
+  downloaded: number;
+  total: number | null;
+  /** 0–100, or null when the server didn't send a content length. */
+  percent: number | null;
+}
+
+/**
+ * Download + install the given update (reporting progress), then relaunch into
+ * the new version. If this resolves without throwing, the app is restarting.
+ */
+export async function installUpdate(
+  update: Update,
+  onProgress?: (p: DownloadProgress) => void,
+): Promise<void> {
+  let downloaded = 0;
+  let total: number | null = null;
+
+  await update.downloadAndInstall((event) => {
+    switch (event.event) {
+      case "Started":
+        total = event.data.contentLength ?? null;
+        onProgress?.({ downloaded: 0, total, percent: total ? 0 : null });
+        break;
+      case "Progress":
+        downloaded += event.data.chunkLength;
+        onProgress?.({
+          downloaded,
+          total,
+          percent: total ? Math.min(100, Math.round((downloaded / total) * 100)) : null,
+        });
+        break;
+      case "Finished":
+        onProgress?.({ downloaded, total, percent: 100 });
+        break;
+    }
+  });
+
+  await relaunch();
 }
