@@ -26,7 +26,7 @@ anyhow = "1"
 # HTTP client for the Anthropic API. Sync (blocking) is fine — Tauri commands
 # run on a worker thread pool so blocking calls don't stall the main thread.
 # Using ureq instead of reqwest to keep compile time and binary size down.
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 # Persistent secret storage (OS keychain on macOS/Windows, in-process vault on Linux).
 # Holds the Sling auth token between sessions. CLAUDE.md: never plaintext, always keychain.
 tauri-plugin-stronghold = "2"
