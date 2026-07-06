@@ -43,12 +43,7 @@ export function SlingTokenModal({ reason, onSaved, onCancel }: Props) {
             onChange={(e) => setValue(e.target.value)}
             placeholder="eyJ... or opaque bearer string"
             autoFocus
-            style={{
-              width: "100%", padding: "8px",
-              border: "1px solid var(--color-border)",
-              borderRadius: "var(--radius)",
-              fontFamily: "var(--font-mono)",
-            }}
+            style={{ fontFamily: "var(--font-mono)" }}
           />
         </label>
         {error && <div className="error">{error}</div>}

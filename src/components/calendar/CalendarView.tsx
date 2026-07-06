@@ -1,45 +1,39 @@
-import { useEffect, useMemo, useState } from "react";
-import type { ProposalDetail, Teacher, ProposalShiftRow, AvailabilityBlock, ExternalShiftRow } from "../../types";
+import { useState } from "react";
+import type { ProposalDetail, Teacher, ProposalShiftRow, AvailabilityBlock } from "../../types";
 import { api } from "../../lib/api";
-import { computeIssues, type Issue } from "../../lib/issues";
-import { CalendarHeader } from "./CalendarHeader";
+import type { Issue } from "../../lib/issues";
 import { StaleBanner } from "./StaleBanner";
 import { IssueQueue } from "./IssueQueue";
 import { MonthGrid } from "./MonthGrid";
-import { DayPanel } from "./DayPanel";
+import { DayEditorPanel } from "./DayEditorPanel";
 
 interface Props {
   proposal: ProposalDetail;
+  teachers: Teacher[];
+  qualifiedPairs: Set<string>;
+  blocks: AvailabilityBlock[];
+  issues: Issue[];
   onProposalChanged: () => void;
   onRegenerate: () => void;
+  onImportExternal: (slingShiftId: number) => Promise<void>;
   readonly?: boolean;
 }
 
-export function CalendarView({ proposal, onProposalChanged, onRegenerate, readonly }: Props) {
-  const [teachers, setTeachers] = useState<Teacher[]>([]);
-  const [qualifiedPairs, setQualifiedPairs] = useState<Set<string>>(new Set());
+export function CalendarView({
+  proposal,
+  teachers,
+  qualifiedPairs,
+  blocks,
+  issues,
+  onProposalChanged,
+  onRegenerate,
+  onImportExternal,
+  readonly,
+}: Props) {
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  const [blocks, setBlocks] = useState<AvailabilityBlock[]>([]);
-  const [externalShifts, setExternalShifts] = useState<ExternalShiftRow[]>([]);
 
-  useEffect(() => {
-    const month = proposal.summary.target_month;
-    api.listTeachers().then(setTeachers);
-    api.listQualifiedPairs().then((list) => setQualifiedPairs(new Set(list)));
-    api.listAvailabilityBlocks(month).then(setBlocks);
-    api.listExternalShiftsForMonth(month).then(setExternalShifts);
-  }, [proposal.summary.target_month, proposal.summary.id]);
-
-  const issues: Issue[] = useMemo(
-    () => computeIssues(
-      proposal.shifts, teachers, qualifiedPairs, blocks, externalShifts, []
-    ),
-    [proposal.shifts, teachers, qualifiedPairs, blocks, externalShifts],
-  );
-
-  const issueShiftIds = useMemo(
-    () => new Set(issues.map((w) => w.shift_id).filter((id): id is number => id != null)),
-    [issues],
+  const issueShiftIds = new Set(
+    issues.map((w) => w.shift_id).filter((id): id is number => id != null),
   );
 
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -52,7 +46,7 @@ export function CalendarView({ proposal, onProposalChanged, onRegenerate, readon
     ? issues.filter((w) => w.shift_date === selectedDay)
     : [];
 
-  const handleSave = async (proposalShiftId: number, newUserId: number | null) => {
+  const handleAssign = async (proposalShiftId: number, newUserId: number | null) => {
     if (readonly) return;
     await api.editProposalShiftTeacher(proposalShiftId, newUserId, null);
     onProposalChanged();
@@ -68,8 +62,8 @@ export function CalendarView({ proposal, onProposalChanged, onRegenerate, readon
   };
 
   return (
-    <div style={{ display: "flex", gap: "0.5rem" }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 316px", gap: 16, alignItems: "start" }}>
+      <div style={{ minWidth: 0 }}>
         {proposal.is_stale && proposal.last_pulled_at && (
           <StaleBanner
             lastPulledAt={proposal.last_pulled_at}
@@ -77,7 +71,6 @@ export function CalendarView({ proposal, onProposalChanged, onRegenerate, readon
             onRegenerate={onRegenerate}
           />
         )}
-        <CalendarHeader targetMonth={targetMonth} />
         <MonthGrid
           targetMonth={targetMonth}
           shifts={proposal.shifts}
@@ -87,17 +80,6 @@ export function CalendarView({ proposal, onProposalChanged, onRegenerate, readon
           onDayClick={handleDayClick}
           onSlotClick={handleSlotClick}
         />
-        {selectedDay && (
-          <DayPanel
-            iso={selectedDay}
-            shifts={dayShifts}
-            teachers={teachers}
-            qualifiedPairs={qualifiedPairs}
-            warnings={dayWarnings}
-            onClose={() => setSelectedDay(null)}
-            onSave={handleSave}
-          />
-        )}
       </div>
       <IssueQueue
         issues={issues}
@@ -107,17 +89,25 @@ export function CalendarView({ proposal, onProposalChanged, onRegenerate, readon
         blocks={blocks}
         readonly={!!readonly}
         onApplySwap={async (shiftId, userId) => {
-          await api.editProposalShiftTeacher(shiftId, userId, null);
-          onProposalChanged();
+          await handleAssign(shiftId, userId);
         }}
-        onImportExternal={async (slingShiftId) => {
-          await api.importExternalShift(slingShiftId, proposal.summary.id);
-          onProposalChanged();
-          // Also refresh external_shifts so the imported one isn't flagged again
-          api.listExternalShiftsForMonth(proposal.summary.target_month).then(setExternalShifts);
-        }}
+        onImportExternal={onImportExternal}
         onOpenDay={(iso) => setSelectedDay(iso)}
       />
+      {selectedDay && (
+        <DayEditorPanel
+          iso={selectedDay}
+          shifts={dayShifts}
+          allShifts={proposal.shifts}
+          teachers={teachers}
+          qualifiedPairs={qualifiedPairs}
+          blocks={blocks}
+          warnings={dayWarnings}
+          readonly={!!readonly}
+          onClose={() => setSelectedDay(null)}
+          onAssign={handleAssign}
+        />
+      )}
     </div>
   );
 }

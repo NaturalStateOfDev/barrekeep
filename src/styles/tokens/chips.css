@@ -1,0 +1,24 @@
+/* ============================================================
+   Barrekeep — Class-format chip tokens  ·  Barre & Bloom set
+   Each barre format keeps a soft background + saturated foreground,
+   retuned to the warm-plum palette.
+     Classic → mauve   Empower → berry   Define → sage
+     Reform  → ochre    Foundations → plum   Focus → teal
+   ============================================================ */
+
+:root {
+  --chip-slate:         #e9e3ea;  /* Classic */
+  --chip-slate-fg:      #5a4b62;
+  --chip-terracotta:    #f2e0e6;  /* Empower */
+  --chip-terracotta-fg: #a24d6e;
+  --chip-sage:          #e4ece2;  /* Define */
+  --chip-sage-fg:       #4f6b50;
+  --chip-ochre:         #f3e7d3;  /* Reform */
+  --chip-ochre-fg:      #8a6320;
+  --chip-plum:          #ece1ef;  /* Foundations */
+  --chip-plum-fg:       #6d4a80;
+  --chip-accent:        #dcebec;  /* Focus */
+  --chip-accent-fg:     #3f7278;
+  --chip-default:       #ece4dd;
+  --chip-default-fg:    #6f6560;
+}

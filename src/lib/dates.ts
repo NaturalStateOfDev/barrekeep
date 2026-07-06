@@ -68,3 +68,43 @@ export function monthWindow(today: string): string[] {
 export function isReadOnlyMonth(targetMonth: string, today: string): boolean {
   return targetMonth < today.slice(0, 7);
 }
+
+export const WEEKDAYS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+export const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+// "2026-08" → "August 2026"
+export function monthLabel(ym: string): string {
+  const [y, m] = ym.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${y}`;
+}
+
+// "05:45" → "5:45a"; "13:00" → "1:00p"
+export function formatTimeShort(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const period = h >= 12 ? "p" : "a";
+  const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  return `${hour12}:${String(m).padStart(2, "0")}${period}`;
+}
+
+// "2026-06-09" → "Tue Jun 9"
+export function formatDayShort(iso: string): string {
+  const d = new Date(iso + "T00:00:00Z");
+  const month = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+  return `${WEEKDAYS_SHORT[d.getUTCDay()]} ${month} ${d.getUTCDate()}`;
+}
+
+// "2026-08-12" → "Wednesday, August 12"
+export function prettyDayLong(iso: string): string {
+  const d = new Date(iso + "T12:00:00Z");
+  const days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  return `${days[d.getUTCDay()]}, ${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+// DuckDB returns 'YYYY-MM-DD HH:MM:SS+TZ'. Trim to local-ish display.
+export function formatTimestamp(iso: string): string {
+  return iso.replace("T", " ").replace(/\.\d+/, "").slice(0, 19);
+}

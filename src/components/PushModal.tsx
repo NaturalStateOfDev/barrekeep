@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Check, Upload } from "lucide-react";
 import { api } from "../lib/api";
+import { ProgressBar } from "./ui/ProgressBar";
 import type { PushPreview, PushProgress, PushSummary } from "../types";
 
 interface Props {
@@ -59,15 +61,25 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
   return (
     <div className="modal-backdrop" onClick={phase === "pushing" ? undefined : onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>Push {monthLabel} to Sling</h3>
-
-        {phase === "loading" && <p className="muted">Checking what's already in Sling…</p>}
+        {phase === "loading" && (
+          <>
+            <h3>Push to Sling</h3>
+            <p className="muted">Checking what's already in Sling…</p>
+          </>
+        )}
 
         {phase === "preview" && preview && (
           <>
-            <p>
-              <strong>{preview.to_create.length}</strong> shift(s) will be created as planning shifts.
-              {preview.skipped_count > 0 && <> <span className="muted">{preview.skipped_count} already in Sling (skipped).</span></>}
+            <h3>Push to Sling</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              This creates{" "}
+              <strong style={{ color: "var(--text-body)" }}>
+                {preview.to_create.length} unpublished shift{preview.to_create.length === 1 ? "" : "s"}
+              </strong>{" "}
+              in Sling for {monthLabel}. Nothing goes live until you publish them in Sling.
+              {preview.skipped_count > 0 && (
+                <> <span className="muted">{preview.skipped_count} already in Sling (skipped).</span></>
+              )}
             </p>
             {preview.to_create.length === 0 ? (
               <p className="ok">Everything is already in Sling — nothing to push.</p>
@@ -82,10 +94,10 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
                 ))}
               </div>
             )}
-            <div className="row" style={{ justifyContent: "space-between", marginTop: 12 }}>
+            <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
               <button className="btn-ghost" onClick={onClose}>Cancel</button>
               <button className="btn-primary" onClick={onConfirm} disabled={preview.to_create.length === 0}>
-                Confirm push ({preview.to_create.length})
+                <Upload size={15} /> Push {preview.to_create.length} shift{preview.to_create.length === 1 ? "" : "s"}
               </button>
             </div>
           </>
@@ -93,10 +105,14 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
 
         {phase === "pushing" && (
           <>
-            <p className="muted">Pushing in batches of 10 with pauses (Sling rate-limits). Keep this window open.</p>
-            <div className="bk-progress"><div className="bk-progress-fill" style={{ width: `${pct}%` }} /></div>
+            <h3>Pushing to Sling…</h3>
+            <p className="muted">
+              Creating planning shifts for {monthLabel} in batches of 10 with pauses
+              (Sling rate-limits). Don't close this window.
+            </p>
+            <ProgressBar value={pct} />
             {progress && (
-              <p className="muted">
+              <p className="muted" style={{ fontVariantNumeric: "tabular-nums" }}>
                 {progress.done}/{progress.total} — {progress.created} created
                 {progress.failed > 0 && <>, {progress.failed} failed</>}
                 {progress.last_label && <><br /><code>{progress.last_outcome}: {progress.last_label}</code></>}
@@ -107,16 +123,29 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
 
         {phase === "done" && summary && (
           <>
-            <p className="ok"><strong>Done.</strong> {summary.created} created, {summary.failed} failed, {summary.skipped} already present.</p>
-            {summary.failed > 0 && <p className="muted">Some shifts failed — click Push again to retry; the ones already created are skipped automatically.</p>}
-            <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
-              <button className="btn-primary" onClick={onClose}>Close</button>
+            <span className="bk-done-icon">
+              <Check size={24} />
+            </span>
+            <h3 style={{ marginTop: 12 }}>Pushed to Sling</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              {summary.created} planning shift{summary.created === 1 ? "" : "s"} created for {monthLabel}
+              {summary.skipped > 0 && <>, {summary.skipped} already present</>}
+              {summary.failed > 0 && <>, {summary.failed} failed</>}. Open Sling to review and publish them.
+            </p>
+            {summary.failed > 0 && (
+              <p className="muted">
+                Some shifts failed — click Push again to retry; the ones already created are skipped automatically.
+              </p>
+            )}
+            <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
+              <button className="btn-primary" onClick={onClose}>Done</button>
             </div>
           </>
         )}
 
         {phase === "error" && (
           <>
+            <h3>Push to Sling</h3>
             <div className="error">{error}</div>
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
               <button className="btn-ghost" onClick={onClose}>Close</button>

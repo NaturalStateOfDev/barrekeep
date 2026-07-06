@@ -24,7 +24,6 @@ export function MonthSelector({ today, value, onChange, labelFor }: Props) {
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      style={{ padding: "0.3rem 0.5rem" }}
     >
       {months.map((m) => (
         <option key={m} value={m}>

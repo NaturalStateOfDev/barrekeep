@@ -49,18 +49,7 @@ export function UpdateBanner() {
   const pct = progress?.percent;
 
   return (
-    <div
-      role="status"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "8px 16px",
-        background: "hsl(210 60% 96%)",
-        borderBottom: "1px solid hsl(210 40% 80%)",
-        fontSize: 14,
-      }}
-    >
+    <div role="status" className="bk-update-banner">
       <span style={{ flex: 1 }}>
         {installing ? (
           <>
@@ -68,7 +57,7 @@ export function UpdateBanner() {
             {pct != null ? ` — ${pct}%` : "…"} The app will restart.
           </>
         ) : error ? (
-          <span style={{ color: "hsl(0 65% 38%)" }}>Update failed: {error}</span>
+          <span style={{ color: "var(--color-danger)" }}>Update failed: {error}</span>
         ) : (
           <>
             <strong>Barrekeep v{update.version}</strong> is available.
@@ -83,7 +72,7 @@ export function UpdateBanner() {
             width: 120,
             height: 6,
             borderRadius: 3,
-            background: "hsl(210 30% 85%)",
+            background: "var(--surface-sunken)",
             overflow: "hidden",
           }}
         >
@@ -91,7 +80,7 @@ export function UpdateBanner() {
             style={{
               width: `${pct}%`,
               height: "100%",
-              background: "hsl(210 70% 50%)",
+              background: "var(--color-info)",
               transition: "width 0.2s",
             }}
           />
@@ -100,10 +89,10 @@ export function UpdateBanner() {
 
       {!installing && (
         <>
-          <button className="btn-primary" onClick={onInstall}>
+          <button className="btn-primary btn-sm" onClick={onInstall}>
             Install &amp; restart
           </button>
-          <button className="btn-ghost" onClick={() => setDismissed(true)}>
+          <button className="btn-ghost btn-sm" onClick={() => setDismissed(true)}>
             Later
           </button>
         </>

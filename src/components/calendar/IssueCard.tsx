@@ -1,5 +1,6 @@
 import type { Issue } from "../../lib/issues";
 import type { Teacher, ProposalShiftRow } from "../../types";
+import { formatDayShort, formatTimeShort } from "../../lib/dates";
 
 interface Props {
   issue: Issue;
@@ -23,16 +24,17 @@ const SEVERITY: Record<Issue["kind"], string> = {
 
 export function IssueCard({ issue, slot, suggestedTeacher, readonly, onApply, onDismiss, onOpenDay }: Props) {
   const severity = SEVERITY[issue.kind];
+  const canApply = suggestedTeacher != null || issue.kind === "external_shift";
 
   return (
     <div className={`bk-issue-card bk-issue-${severity}`}>
       <div className="bk-issue-header">
-        <span className="bk-issue-kind">{labelForKind(issue.kind)}</span>
+        <span>{labelForKind(issue.kind)}</span>
       </div>
       {slot && (
         <div className="bk-issue-slot">
-          <span className="bk-issue-day">{formatDay(slot.shift_date)}</span>
-          <span className="bk-issue-time">{formatTime(slot.start_time)}</span>
+          <span className="bk-issue-day">{formatDayShort(slot.shift_date)}</span>
+          <span className="bk-issue-time">{formatTimeShort(slot.start_time)}</span>
           <span className="bk-issue-class">{slot.class_name}</span>
         </div>
       )}
@@ -44,9 +46,15 @@ export function IssueCard({ issue, slot, suggestedTeacher, readonly, onApply, on
       )}
       {!readonly && (
         <div className="bk-issue-actions">
-          {suggestedTeacher && <button className="btn-primary" onClick={onApply}>Apply</button>}
-          <button className="btn-ghost" onClick={onDismiss}>Dismiss</button>
-          {issue.shift_date && <button className="btn-ghost" onClick={onOpenDay}>Open day</button>}
+          {canApply && (
+            <button className="btn-primary btn-sm" onClick={onApply}>
+              {issue.kind === "external_shift" ? "Import" : "Apply"}
+            </button>
+          )}
+          <button className="btn-ghost btn-sm" onClick={onDismiss}>Dismiss</button>
+          {issue.shift_date && (
+            <button className="btn-ghost btn-sm" onClick={onOpenDay}>Open day</button>
+          )}
         </div>
       )}
     </div>
@@ -63,20 +71,4 @@ function labelForKind(k: Issue["kind"]): string {
     case "external_shift": return "External shift";
     case "new_teacher": return "New teacher";
   }
-}
-
-// "2026-06-09" → "Tue Jun 9"
-function formatDay(iso: string): string {
-  const d = new Date(iso + "T00:00:00Z");
-  const weekday = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getUTCDay()];
-  const month = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
-  return `${weekday} ${month} ${d.getUTCDate()}`;
-}
-
-// "05:45" → "5:45a"; "13:00" → "1:00p"
-function formatTime(hhmm: string): string {
-  const [h, m] = hhmm.split(":").map(Number);
-  const period = h >= 12 ? "p" : "a";
-  const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-  return `${hour12}:${String(m).padStart(2, "0")}${period}`;
 }
