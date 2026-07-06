@@ -206,3 +206,64 @@ export interface ExternalShiftRow {
   sling_position_id: number;
   status: string;
 }
+
+// ---- Claude proposal editor (spec 2026-07-06) ----
+
+export type EditAction = "reassign" | "unassign" | "change_format";
+
+export interface ProposedEdit {
+  proposal_shift_id: number;
+  action: EditAction;
+  new_user_id?: number | null;
+  new_class_name?: string | null;
+  rationale: string;
+  valid: boolean;
+  validation_note?: string | null;
+}
+
+export interface RulesetProposal {
+  description: string;
+  rules: Record<string, unknown>;
+}
+
+export interface ClaudeEditResult {
+  run_id: number;
+  summary: string;
+  edits: ProposedEdit[];
+  ruleset_proposal: RulesetProposal | null;
+  needs_code_change: { rationale: string } | null;
+  model: string;
+  cost_usd: number;
+  duration_ms: number;
+}
+
+export interface AlgorithmVersion {
+  version: number;
+  description: string;
+  rules: Record<string, unknown>;
+  script_file: string | null;
+  created_by: string;
+  adopted_at: string;
+  last_used_month: string | null;
+  script_archived: boolean;
+  script_missing: boolean;
+}
+
+export interface CodeDraft {
+  run_id: number;
+  description: string;
+  script: string;
+  model: string;
+  cost_usd: number;
+  duration_ms: number;
+}
+
+export interface DraftValidation {
+  ok: boolean;
+  error: string | null;
+  shift_count: number;
+  changed_assignments: number;
+  added_slots: number;
+  removed_slots: number;
+  month: string;
+}

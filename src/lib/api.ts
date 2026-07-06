@@ -3,6 +3,10 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AlgorithmVersion,
+  ClaudeEditResult,
+  CodeDraft,
+  DraftValidation,
   Teacher,
   StudioConfig,
   Position,
@@ -92,4 +96,34 @@ export const api = {
     invoke<PushPreview>("push_proposal_dry_run", { proposalId }),
   pushProposalExecute: (proposalId: number) =>
     invoke<PushSummary>("push_proposal_execute", { proposalId }),
+  claudeEditProposal: (proposalId: number, instruction: string) =>
+    invoke<ClaudeEditResult>("claude_edit_proposal", { proposalId, instruction }),
+  claudeDraftCodeChange: (
+    proposalId: number,
+    instruction: string,
+    rationale: string,
+  ) =>
+    invoke<CodeDraft>("claude_draft_code_change", {
+      proposalId,
+      instruction,
+      rationale,
+    }),
+  validateCodeDraft: (scriptContent: string) =>
+    invoke<DraftValidation>("validate_code_draft", { scriptContent }),
+  listAlgorithmVersions: () =>
+    invoke<AlgorithmVersion[]>("list_algorithm_versions"),
+  adoptAlgorithmVersion: (
+    description: string,
+    rules: Record<string, unknown>,
+    scriptContent?: string,
+    claudeRunId?: number,
+  ) =>
+    invoke<number>("adopt_algorithm_version", {
+      description,
+      rules,
+      scriptContent: scriptContent ?? null,
+      claudeRunId: claudeRunId ?? null,
+    }),
+  deleteAlgorithmScript: (version: number) =>
+    invoke<void>("delete_algorithm_script", { version }),
 };
