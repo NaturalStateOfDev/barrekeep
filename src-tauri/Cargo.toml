@@ -20,7 +20,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Bundled = compiles DuckDB from C++ source. First build is slow (5-10 min)
 # but produces a self-contained binary with no system DuckDB dependency.
-duckdb = { version = "1.1", features = ["bundled"] }
+#
+# Crate versioning encodes the engine: 1.1MMPP.x = libduckdb 1.MM.PP
+# (1.10504 = engine 1.5.4). Tilde-pinned so engine upgrades — which change
+# the on-disk storage format and are NOT backward-readable — only happen
+# via a deliberate Cargo.toml change (dependabot opens those PRs weekly),
+# while crate-level patch fixes still flow through the lockfile.
+duckdb = { version = "~1.10504", features = ["bundled"] }
 thiserror = "2"
 anyhow = "1"
 # HTTP client for the Anthropic API. Sync (blocking) is fine — Tauri commands
