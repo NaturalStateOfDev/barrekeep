@@ -130,6 +130,8 @@ pub fn run() {
             commands::discover_studio_config,
             commands::review_proposal,
             commands::claude_edit_proposal,
+            commands::claude_draft_code_change,
+            commands::validate_code_draft,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
             commands::refresh_roster_from_sling,

@@ -1713,6 +1713,237 @@ pub fn claude_edit_proposal(
 }
 
 // ============================================================
+// Code drafts (tier 3): draft via Claude, validate against the most
+// recent month before Adopt is possible.
+// ============================================================
+
+#[derive(Serialize)]
+pub struct CodeDraft {
+    pub run_id: i64,
+    pub description: String,
+    pub script: String,
+    pub model: String,
+    pub cost_usd: f64,
+    pub duration_ms: u32,
+}
+
+#[derive(Serialize)]
+pub struct DraftValidation {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub shift_count: i64,
+    pub changed_assignments: i64,
+    pub added_slots: i64,
+    pub removed_slots: i64,
+    pub month: String,
+}
+
+/// Compare two schedules keyed by (date, start, position): how many slots
+/// kept the key but changed teacher, and how many keys were added/removed.
+fn diff_schedules(
+    baseline: &[(String, String, i32, Option<i32>)],
+    candidate: &[(String, String, i32, Option<i32>)],
+) -> (i64, i64, i64) {
+    use std::collections::HashMap;
+    let b: HashMap<(&str, &str, i32), Option<i32>> = baseline
+        .iter()
+        .map(|(d, t, p, u)| ((d.as_str(), t.as_str(), *p), *u))
+        .collect();
+    let c: HashMap<(&str, &str, i32), Option<i32>> = candidate
+        .iter()
+        .map(|(d, t, p, u)| ((d.as_str(), t.as_str(), *p), *u))
+        .collect();
+    let mut changed = 0i64;
+    let mut added = 0i64;
+    for (k, u) in &c {
+        match b.get(k) {
+            Some(bu) if bu != u => changed += 1,
+            Some(_) => {}
+            None => added += 1,
+        }
+    }
+    let removed = b.keys().filter(|k| !c.contains_key(*k)).count() as i64;
+    (changed, added, removed)
+}
+
+#[tauri::command]
+pub fn claude_draft_code_change(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    key: State<'_, AnthropicKey>,
+    proposal_id: i64,
+    instruction: String,
+    rationale: String,
+) -> Result<CodeDraft, String> {
+    let api_key = {
+        let guard = key.0.lock().map_err(err)?;
+        guard
+            .clone()
+            .ok_or_else(|| "Anthropic API key is not set — add it in Settings".to_string())?
+    };
+    let project_root = find_project_root().map_err(err)?;
+
+    let (user_payload, model) = {
+        let conn = db.0.lock().map_err(err)?;
+        let model = claude_model(&conn);
+        let target_month: String = conn
+            .query_row(
+                "SELECT target_month FROM proposals WHERE id = ?",
+                duckdb::params![proposal_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("proposal {proposal_id} not found: {e:#}"))?;
+        let active = crate::algorithm::active_version(&conn)?;
+        let (script_path, active_rules) = match &active {
+            Some(v) => {
+                let dir = crate::algorithm::algorithms_dir(&app)?;
+                (
+                    crate::algorithm::resolve_script(&dir, v, &project_root)?,
+                    v.rules.clone(),
+                )
+            }
+            None => (
+                project_root.join("scripts").join("propose.py"),
+                serde_json::json!({}),
+            ),
+        };
+        let current_script = std::fs::read_to_string(&script_path)
+            .map_err(|e| format!("could not read {}: {e}", script_path.display()))?;
+        (
+            serde_json::json!({
+                "target_month": target_month,
+                "current_script": current_script,
+                "active_rules": active_rules,
+                "instruction": instruction,
+                "rationale": rationale,
+            }),
+            model,
+        )
+    };
+
+    let result = crate::editor::run_code_draft(&api_key, &model, &user_payload).map_err(err)?;
+
+    let conn = db.0.lock().map_err(err)?;
+    let run_id = persist_claude_run(
+        &conn,
+        proposal_id,
+        &result.model,
+        result.input_tokens,
+        result.output_tokens,
+        &result.raw_input,
+        &result.raw_output,
+        result.cost_usd,
+        result.duration_ms,
+    )?;
+    let _ = conn.execute("CHECKPOINT", []);
+
+    Ok(CodeDraft {
+        run_id,
+        description: result.payload.description,
+        script: result.payload.script,
+        model: result.model,
+        cost_usd: result.cost_usd,
+        duration_ms: result.duration_ms,
+    })
+}
+
+/// Run a candidate script against the most recent generated month and diff
+/// its output vs. that month's proposal (the schedule-algorithm skill's
+/// reproduce-last-month rule). Adoption stays disabled until this passes.
+#[tauri::command]
+pub fn validate_code_draft(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    script_content: String,
+) -> Result<DraftValidation, String> {
+    let project_root = find_project_root().map_err(err)?;
+
+    let (month, payload, baseline) = {
+        let conn = db.0.lock().map_err(err)?;
+        let month: String = conn
+            .query_row(
+                "SELECT target_month FROM proposals ORDER BY generated_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| "no proposals yet — generate one first so there is a month to validate against".to_string())?;
+        let baseline_id: i64 = conn
+            .query_row(
+                "SELECT id FROM proposals WHERE target_month = ?
+                 ORDER BY is_current DESC, generated_at DESC LIMIT 1",
+                duckdb::params![&month],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        let mut payload = build_propose_payload(&conn, &month)?;
+        if let Some(v) = crate::algorithm::active_version(&conn)? {
+            payload["rules"] = v.rules;
+        }
+        payload["version_label"] = serde_json::Value::String("candidate".to_string());
+
+        let baseline: Vec<(String, String, i32, Option<i32>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT CAST(shift_date AS VARCHAR), start_time, sling_position_id, sling_user_id
+                     FROM proposal_shifts WHERE proposal_id = ? AND NOT is_dropped",
+                )
+                .map_err(err)?;
+            stmt.query_map(duckdb::params![baseline_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+        };
+        (month, payload, baseline)
+    };
+
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    let candidate_path = dir.join("candidate_draft.py");
+    std::fs::write(&candidate_path, &script_content).map_err(err)?;
+
+    let spawn_result = spawn_propose(&candidate_path, &project_root, &payload, &month);
+    let _ = std::fs::remove_file(&candidate_path);
+
+    match spawn_result {
+        Err(e) => Ok(DraftValidation {
+            ok: false,
+            error: Some(e),
+            shift_count: 0,
+            changed_assignments: 0,
+            added_slots: 0,
+            removed_slots: 0,
+            month,
+        }),
+        Ok((out, _stderr)) => {
+            let candidate: Vec<(String, String, i32, Option<i32>)> = out
+                .shifts
+                .iter()
+                .filter(|s| !s.is_dropped)
+                .map(|s| {
+                    (
+                        s.shift_date.clone(),
+                        s.start_time.clone(),
+                        s.sling_position_id,
+                        s.sling_user_id,
+                    )
+                })
+                .collect();
+            let (changed, added, removed) = diff_schedules(&baseline, &candidate);
+            Ok(DraftValidation {
+                ok: true,
+                error: None,
+                shift_count: candidate.len() as i64,
+                changed_assignments: changed,
+                added_slots: added,
+                removed_slots: removed,
+                month,
+            })
+        }
+    }
+}
+
+// ============================================================
 // Sling token (in-memory cache; Stronghold is the persistence layer)
 // ============================================================
 
@@ -2756,6 +2987,26 @@ mod tests {
         let flags: Vec<bool> = edits.iter().map(|e| e.valid).collect();
         assert_eq!(flags, vec![true, false, false, true, false, true, false, false]);
         assert!(edits[6].validation_note.as_deref().unwrap().contains("not in this proposal"));
+    }
+
+    #[test]
+    fn draft_validation_diff_counts() {
+        let s = |d: &str, t: &str, p: i32, u: Option<i32>| (d.to_string(), t.to_string(), p, u);
+        let base = vec![
+            s("2026-08-03", "09:00", 101, Some(501)),
+            s("2026-08-03", "17:30", 102, Some(502)),
+            s("2026-08-04", "09:00", 101, None),
+        ];
+        assert_eq!(diff_schedules(&base, &base), (0, 0, 0));
+
+        let mut reassigned = base.clone();
+        reassigned[0].3 = Some(502);
+        assert_eq!(diff_schedules(&base, &reassigned), (1, 0, 0));
+
+        let mut shifted = base.clone();
+        shifted.remove(2);
+        shifted.push(s("2026-08-05", "09:00", 101, Some(501)));
+        assert_eq!(diff_schedules(&base, &shifted), (0, 1, 1));
     }
 
     /// The payload builder still fails loudly with no trailing history
