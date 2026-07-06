@@ -8,6 +8,7 @@
 //     plugin's JS bridge)
 //   - IPC commands (exposed to the React frontend)
 
+mod algorithm;
 mod commands;
 mod db;
 mod migrations;
@@ -52,6 +53,19 @@ pub fn run() {
                 }
                 migrations::run(&conn)?;
                 seed::run_if_empty(&conn)?;
+                // Tidy old algorithm script versions (spec: >3 versions
+                // behind AND unused >3 months → algorithms/archive/).
+                match algorithm::algorithms_dir(app.handle()) {
+                    Ok(dir) => match algorithm::archive_sweep(&conn, &dir) {
+                        Ok(moved) => {
+                            for f in moved {
+                                eprintln!("[algorithm] archived old script {f}");
+                            }
+                        }
+                        Err(e) => eprintln!("[algorithm] archive sweep failed: {e}"),
+                    },
+                    Err(e) => eprintln!("[algorithm] no algorithms dir: {e}"),
+                }
             }
             app.manage(db);
 
@@ -102,6 +116,9 @@ pub fn run() {
             commands::has_anthropic_key,
             commands::get_app_setting,
             commands::set_app_setting,
+            commands::list_algorithm_versions,
+            commands::adopt_algorithm_version,
+            commands::delete_algorithm_script,
             commands::set_sling_token,
             commands::set_sling_credentials,
             commands::has_sling_credentials,

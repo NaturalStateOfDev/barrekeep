@@ -2016,6 +2016,84 @@ pub fn refresh_roster_from_sling(
 }
 
 // ============================================================
+// Algorithm versions (rules-as-data + code drafts) — thin wrappers over
+// src-tauri/src/algorithm.rs
+// ============================================================
+
+#[tauri::command]
+pub fn list_algorithm_versions(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+) -> Result<Vec<crate::algorithm::AlgorithmVersion>, String> {
+    let conn = db.0.lock().map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    crate::algorithm::list_versions(&conn, &dir)
+}
+
+#[tauri::command]
+pub fn adopt_algorithm_version(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    description: String,
+    rules: serde_json::Value,
+    script_content: Option<String>,
+    claude_run_id: Option<i64>,
+) -> Result<i32, String> {
+    let conn = db.0.lock().map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    let v = crate::algorithm::adopt_version(
+        &conn,
+        &dir,
+        &description,
+        &rules,
+        script_content.as_deref(),
+        claude_run_id,
+    )?;
+    let _ = conn.execute("CHECKPOINT", []);
+    Ok(v)
+}
+
+/// Delete a non-active version's script file (from algorithms/ and
+/// archive/). Proposal history is untouched — the version just can't be
+/// re-run any more.
+#[tauri::command]
+pub fn delete_algorithm_script(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    version: i32,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(err)?;
+    let active = crate::algorithm::active_version(&conn)?
+        .map(|v| v.version)
+        .unwrap_or(crate::algorithm::BASELINE_VERSION);
+    if version == active {
+        return Err("cannot delete the active version's script".to_string());
+    }
+    let file: Option<String> = conn
+        .query_row(
+            "SELECT script_file FROM algorithm_versions WHERE version = ?",
+            duckdb::params![version],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("version v{version} not found: {e:#}"))?;
+    let Some(file) = file else {
+        return Err("that version runs the baseline script — nothing to delete".to_string());
+    };
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    let mut removed = false;
+    for candidate in [dir.join(&file), dir.join("archive").join(&file)] {
+        if candidate.exists() {
+            std::fs::remove_file(&candidate).map_err(err)?;
+            removed = true;
+        }
+    }
+    if !removed {
+        return Err(format!("script {file} is already gone"));
+    }
+    Ok(())
+}
+
+// ============================================================
 // helpers
 // ============================================================
 
