@@ -117,18 +117,24 @@ CREATE TABLE algorithm_versions (
 {
   "teacher_class_blocklist":  [{"sling_user_id": 0, "class_name": "", "reason": ""}],
   "teacher_slot_blocklist":   [{"sling_user_id": 0, "weekday": "Sat", "time": "08:00", "reason": ""}],
-  "hard_assignments":         [{"weekday": "", "time": "", "class_name": "", "sling_user_id": 0, "reason": ""}],
-  "priority_slots":           [{"weekday": "", "time": "", "sling_user_id": 0}],
-  "slot_class_overrides":     [{"weekday": "", "time": "", "class_name": ""}],
+  "priority_slots":           [{"sling_user_id": 0, "weekday": "Mon", "time": "09:00"}],
+  "slot_class_overrides":     [{"weekday": "Tue", "time": "17:30", "class_name": "Classic"}],
   "variety_penalty_multiplier": {"<sling_user_id>": 1.0},
   "variety_penalty_per_class": 0.3,
-  "sat_time_shifts": {}, "sun_time_shifts": {}
+  "sat_time_shifts": {"08:00": "08:15"}, "sun_time_shifts": {}
 }
 ```
 
 All keys optional; unknown keys are rejected by the Rust-side validator
-before adoption (guards against prompt drift). Exact knob shapes are matched
-to propose.py's consuming code during implementation.
+before adoption (guards against prompt drift). Weekdays are names
+("Mon".."Sun"), mapped to propose.py's Python weekday ints. Each key maps
+to a knob propose.py actually consumes (`TEACHER_CLASS_BLOCKLIST`,
+`TEACHER_SLOT_BLOCKLIST`, `PRIORITY_SLOTS`, `JUNE_SLOT_CLASS_OVERRIDES`,
+`VARIETY_PENALTY_MULTIPLIER`, `VARIETY_PENALTY_PER_CLASS`,
+`SAT/SUN_TIME_SHIFTS`). `HARD_ASSIGNMENTS` was considered and dropped:
+propose.py declares but never consumes it — one-off placements are
+proposal edits, not standing rules. Date-specific blocklists are likewise
+excluded from standing rules.
 
 ## Algorithm script handling
 
