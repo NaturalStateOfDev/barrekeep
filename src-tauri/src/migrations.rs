@@ -53,6 +53,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "purge demo roster + drop sling_candidates",
         sql: include_str!("../migrations/0008_drop_demo_roster.sql"),
     },
+    Migration {
+        version: 9,
+        label: "make positions updatable: drop FKs into positions + UNIQUE(class_name)",
+        sql: include_str!("../migrations/0009_positions_updatable.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.
@@ -102,4 +107,78 @@ pub fn current_version(conn: &Connection) -> anyhow::Result<i32> {
         .ok()
         .flatten();
     Ok(v.unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open");
+        run(&conn).expect("migrations");
+        // Roster + a generated proposal, i.e. the state where pull #2 used
+        // to explode (positions referenced by quals and proposal_shifts).
+        conn.execute_batch(
+            "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+             VALUES (1930001, 'Alex Braun', 4, 5), (1930002, 'Kayla Moore', 4, 5);
+             INSERT INTO positions (sling_position_id, class_name)
+             VALUES (29470407, 'Classic'), (29470408, 'Empower');
+             INSERT INTO teacher_qualifications (sling_user_id, sling_position_id)
+             VALUES (1930001, 29470407), (1930002, 29470407);
+             INSERT INTO proposals (target_month, algorithm_version, parameters, is_current)
+             VALUES ('2026-08', 'v3', '{}', TRUE);
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-08-03', '09:00', '10:00', 29470407, 1930001, 'rotation'
+             FROM proposals;",
+        )
+        .expect("seed");
+        conn
+    }
+
+    /// Regression test for the pull failure: sync_roster's unconditional
+    /// class-name upsert must work while quals + proposal_shifts reference
+    /// the position. Before migration 0009, UNIQUE(class_name) made the
+    /// UPDATE an indexed rewrite, tripping the incoming FKs with
+    /// "still referenced by a foreign key in a different table".
+    #[test]
+    fn positions_updatable_while_referenced() {
+        let conn = fresh_db();
+        conn.execute(
+            "UPDATE positions SET class_name = 'Classic' WHERE sling_position_id = 29470407",
+            [],
+        )
+        .expect("same-name update (every pull)");
+        conn.execute(
+            "UPDATE positions SET class_name = 'Classique' WHERE sling_position_id = 29470407",
+            [],
+        )
+        .expect("rename update");
+        conn.execute(
+            "UPDATE positions SET active = FALSE WHERE sling_position_id = 29470408",
+            [],
+        )
+        .expect("deactivate update");
+    }
+
+    /// The edit-teacher flow (migration 0003's original bug) must keep
+    /// working on the tables rebuilt by 0009.
+    #[test]
+    fn edit_teacher_flow_still_works() {
+        let mut conn = fresh_db();
+        let tx = conn.transaction().expect("tx");
+        tx.execute(
+            "INSERT INTO edits (proposal_shift_id, field, old_value, new_value)
+             SELECT id, 'sling_user_id', '1930001', '1930002' FROM proposal_shifts LIMIT 1",
+            [],
+        )
+        .expect("edit row");
+        tx.execute(
+            "UPDATE proposal_shifts SET sling_user_id = 1930002, is_dropped = FALSE
+             WHERE id = (SELECT min(id) FROM proposal_shifts)",
+            [],
+        )
+        .expect("teacher swap");
+        tx.commit().expect("commit");
+    }
 }
