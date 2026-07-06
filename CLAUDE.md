@@ -8,7 +8,10 @@ Sling as planning-status (unpublished) shifts.
 
 1. **Pull** teacher availability from Sling for the upcoming month
 2. **Propose** a draft schedule using rule-based generation (with Claude as a tunable second opinion via the prompts library)
-3. **Review** the draft in a calendar UI; edit teacher assignments, swap classes, flag conflicts
+3. **Review** the draft in a calendar UI; edit teacher assignments, swap
+   classes and formats, flag conflicts — or ask Claude to edit it (claude tab).
+   Recurring patterns get promoted into versioned algorithm rules
+   (`algorithm_versions`, v9 = baseline; see `src-tauri/src/algorithm.rs`)
 4. **Push** the approved draft to Sling as planning-status shifts (manager publishes from Sling's UI later)
 
 The app is single-user, local-first, and runs on the user's Windows laptop. No
