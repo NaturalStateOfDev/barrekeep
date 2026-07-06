@@ -295,23 +295,15 @@ pub struct GenerateResult {
     pub stderr_tail: String,
 }
 
-#[tauri::command]
-pub fn generate_proposal(
-    db: State<'_, Db>,
-    target_month: String,
-) -> Result<GenerateResult, String> {
-    // Step 1: spawn propose.py with cwd at project root (so its relative
-    // fixture paths resolve correctly). Find the project root by walking up
-    // from the current dir looking for package.json — works in dev mode.
-    let project_root = find_project_root().map_err(err)?;
-    let python_bin = if cfg!(windows) { "python" } else { "python3" };
-
-    // Build the input payload the ported propose.py expects on stdin.
+/// Build the stdin payload propose.py expects, straight from the DB.
+/// Shared by generate_proposal and the code-draft validator.
+fn build_propose_payload(
+    conn: &duckdb::Connection,
+    target_month: &str,
+) -> Result<serde_json::Value, String> {
+    // Studio's home location id — propose.py filters shifts to this.
+    let studio_cfg = load_studio_config(conn)?;
     let payload_json = {
-        let conn = db.0.lock().map_err(err)?;
-
-        // Studio's home location id — propose.py filters shifts to this.
-        let studio_cfg = load_studio_config(&conn)?;
 
         let teachers: Vec<serde_json::Value> = {
             let mut stmt = conn.prepare(
@@ -378,7 +370,7 @@ pub fn generate_proposal(
                  FROM external_sling_shifts
                  WHERE target_month >= ? AND target_month < ?"
             ).map_err(err)?;
-            stmt.query_map(duckdb::params![&cutoff, &target_month], |r| {
+            stmt.query_map(duckdb::params![&cutoff, target_month], |r| {
                 let date: String = r.get(0)?;
                 let start: String = r.get(1)?;
                 let end: String = r.get(2)?;
@@ -413,7 +405,7 @@ pub fn generate_proposal(
                  FROM external_sling_shifts
                  WHERE target_month = ?"
             ).map_err(err)?;
-            for row in stmt2.query_map(duckdb::params![&target_month], |r| {
+            for row in stmt2.query_map(duckdb::params![target_month], |r| {
                 let date: String = r.get(0)?;
                 let start: String = r.get(1)?;
                 let end: String = r.get(2)?;
@@ -452,14 +444,27 @@ pub fn generate_proposal(
             "month_events": month_events,
         })
     };
+    Ok(payload_json)
+}
 
+/// Spawn a propose script (baseline or a versioned copy) with the payload
+/// on stdin; parse its JSON output. Returns (parsed output, stderr tail).
+fn spawn_propose(
+    script_path: &std::path::Path,
+    project_root: &std::path::Path,
+    payload_json: &serde_json::Value,
+    target_month: &str,
+) -> Result<(ProposeOutput, String), String> {
     use std::io::Write;
     use std::process::Stdio;
 
+    let python_bin = if cfg!(windows) { "python" } else { "python3" };
+    let script = script_path
+        .to_str()
+        .ok_or_else(|| "script path is not valid UTF-8".to_string())?;
     let mut child = Command::new(python_bin)
-        .args(["scripts/propose.py", "--json-out", "--from-stdin",
-               "--target-month", &target_month])
-        .current_dir(&project_root)
+        .args([script, "--json-out", "--from-stdin", "--target-month", target_month])
+        .current_dir(project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -472,19 +477,50 @@ pub fn generate_proposal(
             .map_err(|e| format!("failed to write stdin: {e}"))?;
     }
     let output = child.wait_with_output()
-        .map_err(|e| format!("failed to wait on propose.py: {e}"))?;
+        .map_err(|e| format!("failed to wait on the propose script: {e}"))?;
 
+    let stderr_tail = tail(&String::from_utf8_lossy(&output.stderr), 40);
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "propose.py exited {}:\n{}",
-            output.status,
-            tail(&stderr, 40)
+            "propose script exited {}:\n{}",
+            output.status, stderr_tail
         ));
     }
 
-    let payload: ProposeOutput = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("invalid JSON from propose.py: {e}"))?;
+    let parsed: ProposeOutput = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("invalid JSON from the propose script: {e}"))?;
+    Ok((parsed, stderr_tail))
+}
+
+#[tauri::command]
+pub fn generate_proposal(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    target_month: String,
+) -> Result<GenerateResult, String> {
+    // Step 1: build the payload and resolve the active algorithm version
+    // (rules + script). cwd stays at project root so the baseline script's
+    // relative paths keep resolving in dev mode.
+    let project_root = find_project_root().map_err(err)?;
+    let (payload_json, script_path) = {
+        let conn = db.0.lock().map_err(err)?;
+        let mut payload = build_propose_payload(&conn, &target_month)?;
+        let active = crate::algorithm::active_version(&conn)?;
+        let script = match &active {
+            Some(v) => {
+                let dir = crate::algorithm::algorithms_dir(&app)?;
+                payload["rules"] = v.rules.clone();
+                payload["version_label"] =
+                    serde_json::Value::String(format!("v{}", v.version));
+                crate::algorithm::resolve_script(&dir, v, &project_root)?
+            }
+            None => project_root.join("scripts").join("propose.py"),
+        };
+        (payload, script)
+    };
+
+    let (payload, stderr_tail) =
+        spawn_propose(&script_path, &project_root, &payload_json, &target_month)?;
 
     // Step 2: write the proposal + shifts to DuckDB in a single transaction.
     let mut conn = db.0.lock().map_err(err)?;
@@ -554,7 +590,7 @@ pub fn generate_proposal(
         algorithm_version: payload.algorithm_version,
         shift_count: payload.shifts.len(),
         dropped_count,
-        stderr_tail: tail(&String::from_utf8_lossy(&output.stderr), 20),
+        stderr_tail,
     })
 }
 
@@ -2157,6 +2193,15 @@ mod tests {
         assert_eq!(claude_model(&conn), "claude-haiku-4-5");
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-9000')", []).unwrap();
         assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unknown -> default
+    }
+
+    /// The payload builder still fails loudly with no trailing history
+    /// (blank-calendar guard), and stays independent of the version store.
+    #[test]
+    fn build_payload_requires_history() {
+        let conn = conn_with_schema();
+        let e = build_propose_payload(&conn, "2026-09").unwrap_err();
+        assert!(e.contains("Pull from Sling"), "{e}");
     }
 
     /// sync_roster must be a no-op-safe delta sync: repeated runs with the
