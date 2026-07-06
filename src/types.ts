@@ -66,6 +66,8 @@ export interface EditRow {
   new_value: string | null;
   old_teacher_name: string | null;
   new_teacher_name: string | null;
+  old_class_name: string | null;
+  new_class_name: string | null;
   reason: string | null;
   edited_at: string;
   reverted: boolean;

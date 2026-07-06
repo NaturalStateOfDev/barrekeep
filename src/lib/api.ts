@@ -47,6 +47,16 @@ export const api = {
       newUserId,
       reason,
     }),
+  editProposalShiftPosition: (
+    proposalShiftId: number,
+    newPositionId: number,
+    reason: string | null,
+  ) =>
+    invoke<void>("edit_proposal_shift_position", {
+      proposalShiftId,
+      newPositionId,
+      reason,
+    }),
   listEditsForProposal: (proposalId: number) =>
     invoke<EditRow[]>("list_edits_for_proposal", { proposalId }),
   setAnthropicKey: (value: string) =>

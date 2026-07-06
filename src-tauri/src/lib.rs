@@ -110,6 +110,7 @@ pub fn run() {
             commands::list_proposals,
             commands::get_proposal,
             commands::edit_proposal_shift_teacher,
+            commands::edit_proposal_shift_position,
             commands::list_edits_for_proposal,
             commands::has_sling_token,
             commands::set_anthropic_key,

@@ -292,12 +292,45 @@ export function installDevMock() {
             new_value: t ? String(t.sling_user_id) : null,
             old_teacher_name: s.teacher_name,
             new_teacher_name: t?.display_name ?? null,
+            old_class_name: null,
+            new_class_name: null,
             reason: args.reason ?? null,
             edited_at: "2026-07-05 12:00:00",
             reverted: false,
           });
           s.sling_user_id = t?.sling_user_id ?? null;
           s.teacher_name = t?.display_name ?? null;
+          p.summary.edit_count += 1;
+        }
+        return null;
+      }
+      case "edit_proposal_shift_position": {
+        for (const p of PROPOSALS) {
+          const s = p.shifts.find((x) => x.id === args.proposalShiftId);
+          if (!s) continue;
+          const pos = POSITIONS.find((x) => x.sling_position_id === args.newPositionId);
+          if (!pos) throw new Error(`position ${args.newPositionId} not found`);
+          const oldPos = POSITIONS.find((x) => x.sling_position_id === s.sling_position_id);
+          EDITS.push({
+            id: nextEditId++,
+            proposal_shift_id: s.id,
+            shift_date: s.shift_date,
+            start_time: s.start_time,
+            class_name: pos.class_name,
+            field: "sling_position_id",
+            old_value: String(s.sling_position_id),
+            new_value: String(pos.sling_position_id),
+            old_teacher_name: null,
+            new_teacher_name: null,
+            old_class_name: oldPos?.class_name ?? null,
+            new_class_name: pos.class_name,
+            reason: args.reason ?? null,
+            edited_at: "2026-07-06 12:00:00",
+            reverted: false,
+          });
+          s.sling_position_id = pos.sling_position_id;
+          s.class_name = pos.class_name;
+          s.end_time = addMinutes(s.start_time, pos.duration_minutes);
           p.summary.edit_count += 1;
         }
         return null;

@@ -788,6 +788,8 @@ pub struct EditRow {
     pub new_value: Option<String>,
     pub old_teacher_name: Option<String>,
     pub new_teacher_name: Option<String>,
+    pub old_class_name: Option<String>,
+    pub new_class_name: Option<String>,
     pub reason: Option<String>,
     pub edited_at: String,
     pub reverted: bool,
@@ -855,6 +857,95 @@ pub fn edit_proposal_shift_teacher(
     Ok(())
 }
 
+fn add_minutes_hhmm(hhmm: &str, minutes: i64) -> Result<String, String> {
+    let (h, m) = hhmm
+        .split_once(':')
+        .ok_or_else(|| format!("bad time '{hhmm}'"))?;
+    let h: i64 = h.parse().map_err(|_| format!("bad time '{hhmm}'"))?;
+    let m: i64 = m.parse().map_err(|_| format!("bad time '{hhmm}'"))?;
+    let total = (h * 60 + m + minutes).rem_euclid(24 * 60);
+    Ok(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
+/// Change the class format on a single proposal_shift. Records the
+/// before/after position ids in `edits` (field 'sling_position_id') and
+/// recomputes end_time from the new class's duration. Co-teach rows are
+/// blocked, like teacher edits.
+fn edit_position_impl(
+    conn: &mut duckdb::Connection,
+    proposal_shift_id: i64,
+    new_position_id: i32,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(err)?;
+
+    let (old_pid, start_time, is_coteach): (i32, String, bool) = tx
+        .query_row(
+            "SELECT sling_position_id, start_time, is_coteach
+             FROM proposal_shifts WHERE id = ?",
+            duckdb::params![proposal_shift_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| format!("proposal_shift {proposal_shift_id} not found: {e:#}"))?;
+
+    if is_coteach {
+        return Err("co-teach editing is not yet supported".into());
+    }
+    if old_pid == new_position_id {
+        return Err("class type unchanged".into());
+    }
+
+    let (duration, active): (i32, bool) = tx
+        .query_row(
+            "SELECT duration_minutes, active FROM positions WHERE sling_position_id = ?",
+            duckdb::params![new_position_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| format!("position {new_position_id} not found: {e:#}"))?;
+    if !active {
+        return Err("that class type is not schedulable".into());
+    }
+    let end_time = add_minutes_hhmm(&start_time, duration as i64)?;
+
+    let reason_clean = reason.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    });
+
+    tx.execute(
+        "INSERT INTO edits (proposal_shift_id, field, old_value, new_value, reason)
+         VALUES (?, 'sling_position_id', ?, ?, ?)",
+        duckdb::params![
+            proposal_shift_id,
+            old_pid.to_string(),
+            new_position_id.to_string(),
+            reason_clean
+        ],
+    )
+    .map_err(err)?;
+
+    tx.execute(
+        "UPDATE proposal_shifts SET sling_position_id = ?, end_time = ? WHERE id = ?",
+        duckdb::params![new_position_id, end_time, proposal_shift_id],
+    )
+    .map_err(err)?;
+
+    tx.commit().map_err(err)?;
+    let _ = conn.execute("CHECKPOINT", []);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn edit_proposal_shift_position(
+    db: State<'_, Db>,
+    proposal_shift_id: i64,
+    new_position_id: i32,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let mut conn = db.0.lock().map_err(err)?;
+    edit_position_impl(&mut conn, proposal_shift_id, new_position_id, reason)
+}
+
 #[tauri::command]
 pub fn list_edits_for_proposal(
     db: State<'_, Db>,
@@ -874,6 +965,8 @@ pub fn list_edits_for_proposal(
                 e.new_value,
                 t_old.display_name AS old_teacher_name,
                 t_new.display_name AS new_teacher_name,
+                p_old.class_name AS old_class_name,
+                p_new.class_name AS new_class_name,
                 e.reason,
                 CAST(e.edited_at AS VARCHAR),
                 e.reverted
@@ -881,9 +974,17 @@ pub fn list_edits_for_proposal(
              JOIN proposal_shifts ps ON ps.id = e.proposal_shift_id
              JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
              LEFT JOIN teachers t_old
-                ON CAST(t_old.sling_user_id AS VARCHAR) = e.old_value
+                ON e.field = 'sling_user_id'
+               AND CAST(t_old.sling_user_id AS VARCHAR) = e.old_value
              LEFT JOIN teachers t_new
-                ON CAST(t_new.sling_user_id AS VARCHAR) = e.new_value
+                ON e.field = 'sling_user_id'
+               AND CAST(t_new.sling_user_id AS VARCHAR) = e.new_value
+             LEFT JOIN positions p_old
+                ON e.field = 'sling_position_id'
+               AND CAST(p_old.sling_position_id AS VARCHAR) = e.old_value
+             LEFT JOIN positions p_new
+                ON e.field = 'sling_position_id'
+               AND CAST(p_new.sling_position_id AS VARCHAR) = e.new_value
              WHERE ps.proposal_id = ?
              ORDER BY e.edited_at DESC",
         )
@@ -901,9 +1002,11 @@ pub fn list_edits_for_proposal(
                 new_value: r.get(7)?,
                 old_teacher_name: r.get(8)?,
                 new_teacher_name: r.get(9)?,
-                reason: r.get(10)?,
-                edited_at: r.get(11)?,
-                reverted: r.get(12)?,
+                old_class_name: r.get(10)?,
+                new_class_name: r.get(11)?,
+                reason: r.get(12)?,
+                edited_at: r.get(13)?,
+                reverted: r.get(14)?,
             })
         })
         .map_err(err)?;
@@ -2193,6 +2296,54 @@ mod tests {
         assert_eq!(claude_model(&conn), "claude-haiku-4-5");
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-9000')", []).unwrap();
         assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unknown -> default
+    }
+
+    #[test]
+    fn edit_position_recomputes_end_time_and_audits() {
+        let mut conn = conn_with_schema();
+        conn.execute_batch(
+            "INSERT INTO positions (sling_position_id, class_name, duration_minutes) VALUES
+               (29470407, 'Classic', 50), (29470408, 'Empower', 45);
+             INSERT INTO positions (sling_position_id, class_name, duration_minutes, active)
+               VALUES (29470409, 'Retired', 30, FALSE);
+             INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+               VALUES (1930001, 'Alex', 4, 5);
+             INSERT INTO proposals (target_month, algorithm_version, parameters)
+               VALUES ('2026-08', 'v9', '{}');
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-08-03', '09:00', '09:50', 29470407, 1930001, 'test'
+             FROM proposals;",
+        )
+        .unwrap();
+        let sid: i64 = conn
+            .query_row("SELECT min(id) FROM proposal_shifts", [], |r| r.get(0))
+            .unwrap();
+
+        edit_position_impl(&mut conn, sid, 29470408, Some("format swap".into())).expect("edit ok");
+        let (pid, end): (i32, String) = conn
+            .query_row(
+                "SELECT sling_position_id, end_time FROM proposal_shifts WHERE id = ?",
+                duckdb::params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pid, 29470408);
+        assert_eq!(end, "09:45"); // 09:00 + 45min
+        let (field, old_v, new_v): (String, String, String) = conn
+            .query_row(
+                "SELECT field, old_value, new_value FROM edits
+                 WHERE proposal_shift_id = ? ORDER BY id DESC LIMIT 1",
+                duckdb::params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(field, "sling_position_id");
+        assert_eq!((old_v.as_str(), new_v.as_str()), ("29470407", "29470408"));
+
+        // Guards: unchanged position, inactive position.
+        assert!(edit_position_impl(&mut conn, sid, 29470408, None).is_err());
+        assert!(edit_position_impl(&mut conn, sid, 29470409, None).is_err());
     }
 
     /// The payload builder still fails loudly with no trailing history
