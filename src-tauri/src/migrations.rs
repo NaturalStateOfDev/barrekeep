@@ -58,6 +58,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "make positions updatable: drop FKs into positions + UNIQUE(class_name)",
         sql: include_str!("../migrations/0009_positions_updatable.sql"),
     },
+    Migration {
+        version: 10,
+        label: "claude editor: app_settings + algorithm_versions",
+        sql: include_str!("../migrations/0010_algorithm_versions.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.
@@ -203,6 +208,35 @@ mod tests {
         )
         .expect("teacher swap");
         tx.commit().expect("commit");
+    }
+
+    /// Migration 0010 tables exist with the append-only/upsert shapes the
+    /// commands rely on.
+    #[test]
+    fn migration_0010_tables() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-opus-4-8')",
+            [],
+        ).expect("app_settings upsert");
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-haiku-4-5')",
+            [],
+        ).expect("app_settings re-upsert");
+        let v: String = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = 'claude_model'", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "claude-haiku-4-5");
+
+        conn.execute(
+            "INSERT INTO algorithm_versions (version, description, rules, created_by)
+             VALUES (10, 'v10 — test', '{}', 'user')",
+            [],
+        ).expect("insert version row");
+        let (ver, script): (i32, Option<String>) = conn.query_row(
+            "SELECT version, script_file FROM algorithm_versions ORDER BY version DESC LIMIT 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(ver, 10);
+        assert!(script.is_none());
     }
 
     /// backup_if_pending: no-op when up to date or fresh; copies the file
