@@ -13,17 +13,18 @@ use serde_json::{json, Value};
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Sonnet 4.6 — good quality, fast, cheap. Right tradeoff for schedule
-/// review (the input is structured, the task is bounded).
-pub const REVIEW_MODEL: &str = "claude-sonnet-4-6";
 const MAX_TOKENS: u32 = 4096;
 
-// Sonnet 4.6 list pricing (USD per 1M tokens). Cache-write is +25%,
-// cache-read is -90%. We compute cost from the usage object the API returns.
-const PRICE_INPUT_PER_MTOK: f64 = 3.0;
-const PRICE_OUTPUT_PER_MTOK: f64 = 15.0;
-const PRICE_CACHE_WRITE_PER_MTOK: f64 = 3.75;
-const PRICE_CACHE_READ_PER_MTOK: f64 = 0.30;
+/// List pricing per model (USD per 1M tokens): (input, output, cache_write,
+/// cache_read). Cache-write is +25%, cache-read is -90% of input. Unknown
+/// models price as Opus 4.8 (the default) so costs are never understated.
+pub fn model_prices(model: &str) -> (f64, f64, f64, f64) {
+    match model {
+        "claude-sonnet-4-6" => (3.0, 15.0, 3.75, 0.30),
+        "claude-haiku-4-5" => (1.0, 5.0, 1.25, 0.10),
+        _ => (5.0, 25.0, 6.25, 0.50), // claude-opus-4-8 + fallback
+    }
+}
 
 /// System prompt: kept compact and JSON-output-strict. Lives inline here
 /// rather than in prompts/proposer-reviewer.md until we wire up the prompts
@@ -84,46 +85,55 @@ pub struct ApiCall {
 }
 
 #[derive(Deserialize)]
-struct ApiResponse {
-    content: Vec<ApiContentBlock>,
-    model: String,
-    usage: ApiUsage,
+pub(crate) struct ApiResponse {
+    pub(crate) content: Vec<ApiContentBlock>,
+    pub(crate) model: String,
+    pub(crate) usage: ApiUsage,
 }
 
 #[derive(Deserialize)]
-struct ApiContentBlock {
+pub(crate) struct ApiContentBlock {
     #[serde(rename = "type")]
-    kind: String,
+    pub(crate) kind: String,
     #[serde(default)]
-    text: String,
+    pub(crate) text: String,
 }
 
 #[derive(Deserialize)]
-struct ApiUsage {
-    input_tokens: u32,
-    output_tokens: u32,
+pub(crate) struct ApiUsage {
+    pub(crate) input_tokens: u32,
+    pub(crate) output_tokens: u32,
     #[serde(default)]
-    cache_creation_input_tokens: u32,
+    pub(crate) cache_creation_input_tokens: u32,
     #[serde(default)]
-    cache_read_input_tokens: u32,
+    pub(crate) cache_read_input_tokens: u32,
 }
 
-/// Make one Anthropic Messages call. `user_payload` is a JSON value the
-/// frontend caller composed (proposal + edits + roster). Returns the parsed
-/// suggestion structure plus accounting fields for the audit log.
-pub fn run_review(api_key: &str, user_payload: &Value) -> anyhow::Result<ApiCall> {
-    let user_text = format!(
-        "Here is the proposal, the user's edits, and the roster as JSON. Review it per your instructions.\n\n{}",
-        serde_json::to_string_pretty(user_payload)?
-    );
+/// One raw Anthropic Messages call: the shared plumbing under the review
+/// and editor features. The system prompt is cached (ephemeral) so repeat
+/// interactions within ~5 minutes pay 10% of input price.
+pub(crate) struct RawCall {
+    pub raw_input: String,
+    pub raw_output: String,
+    pub model: String,
+    pub usage: ApiUsage,
+    pub duration_ms: u32,
+}
 
+pub(crate) fn call_anthropic(
+    api_key: &str,
+    model: &str,
+    system: &str,
+    user_text: &str,
+    max_tokens: u32,
+) -> anyhow::Result<RawCall> {
     let body = json!({
-        "model": REVIEW_MODEL,
-        "max_tokens": MAX_TOKENS,
+        "model": model,
+        "max_tokens": max_tokens,
         "system": [
             {
                 "type": "text",
-                "text": SYSTEM_PROMPT,
+                "text": system,
                 "cache_control": { "type": "ephemeral" }
             }
         ],
@@ -162,41 +172,63 @@ pub fn run_review(api_key: &str, user_payload: &Value) -> anyhow::Result<ApiCall
         .collect::<Vec<_>>()
         .join("");
 
-    let payload: ReviewPayload = serde_json::from_str(extract_json(&raw_output))
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Claude did not return valid JSON in the expected shape: {e}\n---\n{raw_output}"
-            )
-        })?;
-
-    let cost_usd = compute_cost(&api_response.usage);
-
-    Ok(ApiCall {
-        payload,
+    Ok(RawCall {
         raw_input: serde_json::to_string(&body).unwrap_or_default(),
         raw_output,
         model: api_response.model,
-        input_tokens: api_response.usage.input_tokens,
-        output_tokens: api_response.usage.output_tokens,
-        cache_creation_input_tokens: api_response.usage.cache_creation_input_tokens,
-        cache_read_input_tokens: api_response.usage.cache_read_input_tokens,
-        cost_usd,
+        usage: api_response.usage,
         duration_ms,
     })
 }
 
-fn compute_cost(u: &ApiUsage) -> f64 {
+/// Make one review call. `user_payload` is a JSON value the caller composed
+/// (proposal + edits + roster). Returns the parsed suggestion structure plus
+/// accounting fields for the audit log.
+pub fn run_review(api_key: &str, model: &str, user_payload: &Value) -> anyhow::Result<ApiCall> {
+    let user_text = format!(
+        "Here is the proposal, the user's edits, and the roster as JSON. Review it per your instructions.\n\n{}",
+        serde_json::to_string_pretty(user_payload)?
+    );
+
+    let call = call_anthropic(api_key, model, SYSTEM_PROMPT, &user_text, MAX_TOKENS)?;
+
+    let payload: ReviewPayload = serde_json::from_str(extract_json(&call.raw_output))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Claude did not return valid JSON in the expected shape: {e}\n---\n{}",
+                call.raw_output
+            )
+        })?;
+
+    let cost_usd = compute_cost(&call.model, &call.usage);
+
+    Ok(ApiCall {
+        payload,
+        raw_input: call.raw_input,
+        raw_output: call.raw_output,
+        input_tokens: call.usage.input_tokens,
+        output_tokens: call.usage.output_tokens,
+        cache_creation_input_tokens: call.usage.cache_creation_input_tokens,
+        cache_read_input_tokens: call.usage.cache_read_input_tokens,
+        model: call.model,
+        cost_usd,
+        duration_ms: call.duration_ms,
+    })
+}
+
+pub(crate) fn compute_cost(model: &str, u: &ApiUsage) -> f64 {
+    let (input, output, cache_write, cache_read) = model_prices(model);
     let m = 1_000_000.0;
-    (u.input_tokens as f64 * PRICE_INPUT_PER_MTOK
-        + u.cache_creation_input_tokens as f64 * PRICE_CACHE_WRITE_PER_MTOK
-        + u.cache_read_input_tokens as f64 * PRICE_CACHE_READ_PER_MTOK
-        + u.output_tokens as f64 * PRICE_OUTPUT_PER_MTOK)
+    (u.input_tokens as f64 * input
+        + u.cache_creation_input_tokens as f64 * cache_write
+        + u.cache_read_input_tokens as f64 * cache_read
+        + u.output_tokens as f64 * output)
         / m
 }
 
 /// If Claude wraps the JSON in ```json ... ``` despite our instructions,
 /// peel that off. Otherwise return as-is.
-fn extract_json(text: &str) -> &str {
+pub(crate) fn extract_json(text: &str) -> &str {
     let trimmed = text.trim();
     if let Some(rest) = trimmed.strip_prefix("```json") {
         return rest.trim().trim_end_matches("```").trim();
@@ -205,4 +237,29 @@ fn extract_json(text: &str) -> &str {
         return rest.trim().trim_end_matches("```").trim();
     }
     trimmed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_prices_known_and_fallback() {
+        assert_eq!(model_prices("claude-sonnet-4-6").0, 3.0);
+        assert_eq!(model_prices("claude-haiku-4-5").1, 5.0);
+        // Default and unknown both price as Opus.
+        assert_eq!(model_prices("claude-opus-4-8"), model_prices("claude-9000"));
+    }
+
+    #[test]
+    fn cost_uses_the_models_prices() {
+        let usage = ApiUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        assert!((compute_cost("claude-haiku-4-5", &usage) - 1.0).abs() < 1e-9);
+        assert!((compute_cost("claude-opus-4-8", &usage) - 5.0).abs() < 1e-9);
+    }
 }

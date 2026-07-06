@@ -1140,8 +1140,9 @@ pub fn review_proposal(
     };
 
     // 2. Build the user payload from DB. Same pattern: lock, query, drop.
-    let user_payload = {
+    let (user_payload, model) = {
         let conn = db.0.lock().map_err(err)?;
+        let model = claude_model(&conn);
 
         let (target_month, algorithm_version): (String, String) = conn
             .query_row(
@@ -1248,7 +1249,7 @@ pub fn review_proposal(
             .collect::<Result<Vec<_>, _>>()
             .map_err(err)?;
 
-        json!({
+        (json!({
             "proposal": {
                 "id": proposal_id,
                 "target_month": target_month,
@@ -1257,11 +1258,11 @@ pub fn review_proposal(
             "shifts": shifts,
             "edits": edits,
             "roster": roster,
-        })
+        }), model)
     };
 
     // 3. Call Anthropic. This is the slow step (~5–30s).
-    let result = review::run_review(&api_key, &user_payload).map_err(err)?;
+    let result = review::run_review(&api_key, &model, &user_payload).map_err(err)?;
 
     // 4. Persist run for audit + cost tracking.
     let suggestions_json = serde_json::to_string(&result.payload).map_err(err)?;
@@ -1318,12 +1319,13 @@ pub fn list_reviews_for_proposal(
     let rows = stmt
         .query_map(duckdb::params![proposal_id], |r| {
             let output_text: String = r.get(7)?;
-            // Re-parse the stored payload. If parsing fails, return an empty
-            // suggestion list rather than failing the whole query.
+            // Re-parse the stored payload. claude_runs also holds editor
+            // runs (different JSON shape) — mark those to be filtered out
+            // below instead of failing the whole query.
             let parsed: review::ReviewPayload = serde_json::from_str(&output_text)
                 .unwrap_or(review::ReviewPayload {
                     suggestions: vec![],
-                    overall_assessment: "(could not parse stored review)".into(),
+                    overall_assessment: "__not_a_review__".into(),
                 });
             // duckdb-rs returns DECIMAL as a string; parse to f64 so the
             // frontend can display it cleanly.
@@ -1342,7 +1344,372 @@ pub fn list_reviews_for_proposal(
             })
         })
         .map_err(err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?
+        .into_iter()
+        .filter(|r| r.overall_assessment != "__not_a_review__")
+        .collect())
+}
+
+// ============================================================
+// Claude proposal editor (spec: 2026-07-06-claude-proposal-editor-design)
+// ============================================================
+
+#[derive(Serialize)]
+pub struct ClaudeEditResult {
+    pub run_id: i64,
+    pub summary: String,
+    pub edits: Vec<crate::editor::ProposedEdit>,
+    pub ruleset_proposal: Option<crate::editor::RulesetProposal>,
+    pub needs_code_change: Option<crate::editor::NeedsCodeChange>,
+    pub model: String,
+    pub cost_usd: f64,
+    pub duration_ms: u32,
+}
+
+/// Everything the editor prompt needs about a proposal, in one JSON value.
+/// Shared by the editor and code-draft calls.
+fn build_editor_payload(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+    instruction: &str,
+) -> Result<serde_json::Value, String> {
+    let target_month: String = conn
+        .query_row(
+            "SELECT target_month FROM proposals WHERE id = ?",
+            duckdb::params![proposal_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("proposal {proposal_id} not found: {e:#}"))?;
+
+    let shifts: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ps.id, CAST(ps.shift_date AS VARCHAR), ps.start_time, ps.end_time,
+                        pos.class_name, t.display_name, ps.sling_user_id, ps.is_coteach,
+                        ps.is_dropped
+                 FROM proposal_shifts ps
+                 JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
+                 LEFT JOIN teachers t ON t.sling_user_id = ps.sling_user_id
+                 WHERE ps.proposal_id = ?
+                 ORDER BY ps.shift_date, ps.start_time",
+            )
+            .map_err(err)?;
+        stmt.query_map(duckdb::params![proposal_id], |r| {
+            Ok(json!({
+                "proposal_shift_id": r.get::<_, i64>(0)?,
+                "date": r.get::<_, String>(1)?,
+                "start": r.get::<_, String>(2)?,
+                "end": r.get::<_, String>(3)?,
+                "class_name": r.get::<_, String>(4)?,
+                "teacher": r.get::<_, Option<String>>(5)?,
+                "sling_user_id": r.get::<_, Option<i32>>(6)?,
+                "is_coteach": r.get::<_, bool>(7)?,
+                "is_dropped": r.get::<_, bool>(8)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let roster: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT sling_user_id, display_name, weekly_target, weekly_max
+                 FROM teachers WHERE active ORDER BY display_name",
+            )
+            .map_err(err)?;
+        stmt.query_map([], |r| {
+            Ok(json!({
+                "sling_user_id": r.get::<_, i32>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "weekly_target": r.get::<_, i32>(2)?,
+                "weekly_max": r.get::<_, i32>(3)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let qualifications: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT tq.sling_user_id, p.class_name
+                 FROM teacher_qualifications tq
+                 JOIN positions p ON p.sling_position_id = tq.sling_position_id
+                 WHERE NOT tq.is_blocklisted",
+            )
+            .map_err(err)?;
+        stmt.query_map([], |r| {
+            Ok(json!({
+                "sling_user_id": r.get::<_, i32>(0)?,
+                "class_name": r.get::<_, String>(1)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let blocks: Vec<serde_json::Value> = query_availability_blocks(conn, &target_month)?
+        .into_iter()
+        .map(|b| {
+            json!({
+                "sling_user_id": b.sling_user_id,
+                "source": b.source,
+                "starts_at": b.starts_at,
+                "ends_at": b.ends_at,
+            })
+        })
+        .collect();
+
+    let edit_history: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT CAST(ps.shift_date AS VARCHAR), ps.start_time, pos.class_name,
+                        e.field, e.old_value, e.new_value, e.reason
+                 FROM edits e
+                 JOIN proposal_shifts ps ON ps.id = e.proposal_shift_id
+                 JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
+                 WHERE ps.proposal_id = ? AND NOT e.reverted
+                 ORDER BY e.edited_at",
+            )
+            .map_err(err)?;
+        stmt.query_map(duckdb::params![proposal_id], |r| {
+            Ok(json!({
+                "date": r.get::<_, String>(0)?,
+                "start": r.get::<_, String>(1)?,
+                "class_name": r.get::<_, String>(2)?,
+                "field": r.get::<_, String>(3)?,
+                "from": r.get::<_, Option<String>>(4)?,
+                "to": r.get::<_, Option<String>>(5)?,
+                "reason": r.get::<_, Option<String>>(6)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let active_rules = crate::algorithm::active_version(conn)?
+        .map(|v| v.rules)
+        .unwrap_or_else(|| json!({}));
+
+    Ok(json!({
+        "proposal": { "id": proposal_id, "target_month": target_month, "shifts": shifts },
+        "roster": roster,
+        "qualifications": qualifications,
+        "availability_blocks": blocks,
+        "edit_history": edit_history,
+        "active_rules": active_rules,
+        "instruction": instruction,
+    }))
+}
+
+/// Check Claude's proposed edits against the database. Invalid edits are
+/// kept (so the user sees what was attempted) but marked un-appliable.
+fn validate_claude_edits(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+    edits: &mut [crate::editor::ProposedEdit],
+) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut shift_info: HashMap<i64, (bool, Option<i32>, i32)> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, is_coteach, sling_user_id, sling_position_id
+                 FROM proposal_shifts WHERE proposal_id = ?",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map(duckdb::params![proposal_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get::<_, bool>(1)?, r.get::<_, Option<i32>>(2)?, r.get::<_, i32>(3)?),
+                ))
+            })
+            .map_err(err)?;
+        for row in rows {
+            let (k, v) = row.map_err(err)?;
+            shift_info.insert(k, v);
+        }
+    }
+
+    let active_teachers: HashSet<i32> = {
+        let mut stmt = conn
+            .prepare("SELECT sling_user_id FROM teachers WHERE active")
+            .map_err(err)?;
+        stmt.query_map([], |r| r.get(0))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+    };
+
+    let class_to_pid: HashMap<String, i32> = {
+        let mut stmt = conn
+            .prepare("SELECT class_name, sling_position_id FROM positions WHERE active")
+            .map_err(err)?;
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+    };
+
+    for e in edits.iter_mut() {
+        let mut fail = |note: String| (false, Some(note));
+        let (valid, note) = match shift_info.get(&e.proposal_shift_id) {
+            None => fail("that slot is not in this proposal".to_string()),
+            Some((is_coteach, current_uid, current_pid)) => {
+                if *is_coteach {
+                    fail("co-teach slots can't be edited here".to_string())
+                } else {
+                    match e.action.as_str() {
+                        "reassign" => match e.new_user_id {
+                            None => fail("reassign needs new_user_id".to_string()),
+                            Some(uid) if !active_teachers.contains(&uid) => {
+                                fail(format!("teacher {uid} is unknown or inactive"))
+                            }
+                            Some(uid) if Some(uid) == *current_uid => {
+                                fail("already assigned to that teacher".to_string())
+                            }
+                            Some(_) => (true, None),
+                        },
+                        "unassign" => {
+                            if current_uid.is_none() {
+                                fail("already unassigned".to_string())
+                            } else {
+                                (true, None)
+                            }
+                        }
+                        "change_format" => match &e.new_class_name {
+                            None => fail("change_format needs new_class_name".to_string()),
+                            Some(name) => match class_to_pid.get(name) {
+                                None => fail(format!("'{name}' is not a schedulable class")),
+                                Some(pid) if pid == current_pid => {
+                                    fail("already that format".to_string())
+                                }
+                                Some(_) => (true, None),
+                            },
+                        },
+                        other => fail(format!("unknown action '{other}'")),
+                    }
+                }
+            }
+        };
+        e.valid = valid;
+        e.validation_note = note;
+    }
+    Ok(())
+}
+
+fn persist_claude_run(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    raw_input: &str,
+    raw_output: &str,
+    cost_usd: f64,
+    duration_ms: u32,
+) -> Result<i64, String> {
+    conn.query_row(
+        "INSERT INTO claude_runs (
+            proposal_id, model, input_tokens, output_tokens,
+            input_text, output_text, cost_usd, duration_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        duckdb::params![
+            proposal_id,
+            model,
+            input_tokens as i32,
+            output_tokens as i32,
+            raw_input,
+            raw_output,
+            cost_usd,
+            duration_ms as i32,
+        ],
+        |r| r.get(0),
+    )
+    .map_err(err)
+}
+
+#[tauri::command]
+pub fn claude_edit_proposal(
+    db: State<'_, Db>,
+    key: State<'_, AnthropicKey>,
+    proposal_id: i64,
+    instruction: String,
+) -> Result<ClaudeEditResult, String> {
+    if instruction.trim().is_empty() {
+        return Err("instruction is empty".to_string());
+    }
+    let api_key = {
+        let guard = key.0.lock().map_err(err)?;
+        guard
+            .clone()
+            .ok_or_else(|| "Anthropic API key is not set — add it in Settings".to_string())?
+    };
+
+    // Lock, build payload, drop — never hold the DB across the HTTP call.
+    let (user_payload, model) = {
+        let conn = db.0.lock().map_err(err)?;
+        (
+            build_editor_payload(&conn, proposal_id, instruction.trim())?,
+            claude_model(&conn),
+        )
+    };
+
+    let system = crate::editor::editor_system_prompt(find_project_root().ok().as_deref());
+    let result = crate::editor::run_editor(&api_key, &model, &system, &user_payload).map_err(err)?;
+
+    let conn = db.0.lock().map_err(err)?;
+    let mut payload = result.payload;
+    validate_claude_edits(&conn, proposal_id, &mut payload.edits)?;
+
+    // A rule proposal that doesn't validate is downgraded to a summary note
+    // rather than shown with a broken Adopt button.
+    let mut summary = payload.summary.clone();
+    let ruleset_proposal = match payload.ruleset_proposal {
+        Some(rp) => match crate::algorithm::validate_rules(&rp.rules) {
+            Ok(_) => Some(rp),
+            Err(e) => {
+                summary.push_str(&format!(
+                    " (A rule change was proposed but failed validation and was dropped: {e})"
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+
+    let run_id = persist_claude_run(
+        &conn,
+        proposal_id,
+        &result.model,
+        result.input_tokens,
+        result.output_tokens,
+        &result.raw_input,
+        &result.raw_output,
+        result.cost_usd,
+        result.duration_ms,
+    )?;
+    let _ = conn.execute("CHECKPOINT", []);
+
+    Ok(ClaudeEditResult {
+        run_id,
+        summary,
+        edits: payload.edits,
+        ruleset_proposal,
+        needs_code_change: payload.needs_code_change,
+        model: result.model,
+        cost_usd: result.cost_usd,
+        duration_ms: result.duration_ms,
+    })
 }
 
 // ============================================================
@@ -2344,6 +2711,51 @@ mod tests {
         // Guards: unchanged position, inactive position.
         assert!(edit_position_impl(&mut conn, sid, 29470408, None).is_err());
         assert!(edit_position_impl(&mut conn, sid, 29470409, None).is_err());
+    }
+
+    #[test]
+    fn validate_claude_edits_marks_bad_edits() {
+        let conn = conn_with_schema();
+        conn.execute_batch(
+            "INSERT INTO positions (sling_position_id, class_name, duration_minutes) VALUES
+               (101, 'Classic', 50), (102, 'Empower', 45);
+             INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+               VALUES (501, 'Alex', 4, 5), (502, 'Kay', 4, 5);
+             INSERT INTO proposals (target_month, algorithm_version, parameters)
+               VALUES ('2026-08', 'v9', '{}');
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-08-03', '09:00', '09:50', 101, 501, 'test' FROM proposals;",
+        )
+        .unwrap();
+        let pid: i64 = conn.query_row("SELECT min(id) FROM proposals", [], |r| r.get(0)).unwrap();
+        let sid: i64 = conn.query_row("SELECT min(id) FROM proposal_shifts", [], |r| r.get(0)).unwrap();
+
+        let mk = |shift, action: &str, uid: Option<i32>, class: Option<&str>| {
+            crate::editor::ProposedEdit {
+                proposal_shift_id: shift,
+                action: action.to_string(),
+                new_user_id: uid,
+                new_class_name: class.map(String::from),
+                rationale: "t".into(),
+                valid: true,
+                validation_note: None,
+            }
+        };
+        let mut edits = vec![
+            mk(sid, "reassign", Some(502), None),        // ok
+            mk(sid, "reassign", Some(501), None),        // same teacher
+            mk(sid, "reassign", Some(999), None),        // unknown teacher
+            mk(sid, "change_format", None, Some("Empower")), // ok
+            mk(sid, "change_format", None, Some("Yoga")),    // unknown class
+            mk(sid, "unassign", None, None),             // ok
+            mk(9999, "unassign", None, None),            // unknown slot
+            mk(sid, "explode", None, None),              // unknown action
+        ];
+        validate_claude_edits(&conn, pid, &mut edits).unwrap();
+        let flags: Vec<bool> = edits.iter().map(|e| e.valid).collect();
+        assert_eq!(flags, vec![true, false, false, true, false, true, false, false]);
+        assert!(edits[6].validation_note.as_deref().unwrap().contains("not in this proposal"));
     }
 
     /// The payload builder still fails loudly with no trailing history

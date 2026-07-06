@@ -10,6 +10,7 @@
 
 mod algorithm;
 mod commands;
+mod editor;
 mod db;
 mod migrations;
 mod review;
@@ -128,6 +129,7 @@ pub fn run() {
             commands::open_sling_login_window,
             commands::discover_studio_config,
             commands::review_proposal,
+            commands::claude_edit_proposal,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
             commands::refresh_roster_from_sling,
