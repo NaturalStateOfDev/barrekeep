@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { X, UserRoundCog } from "lucide-react";
+import { X, UserRoundCog, AlertTriangle } from "lucide-react";
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../../types";
 import type { Issue } from "../../lib/issues";
 import { candidatesFor } from "../../lib/candidates";
@@ -36,12 +36,16 @@ export function DayEditorPanel({
 }: Props) {
   const [editing, setEditing] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const assign = async (shiftId: number, userId: number | null) => {
     setSaving(true);
+    setError(null);
     try {
       await onAssign(shiftId, userId);
       setEditing(null);
+    } catch (e) {
+      setError(String(e));
     } finally {
       setSaving(false);
     }
@@ -76,7 +80,7 @@ export function DayEditorPanel({
                 <div className="bk-day-slot-head">
                   <span className="bk-day-slot-time">{formatTimeShort(s.start_time)}</span>
                   <ClassChip className={s.class_name} size="md" />
-                  <span className={`bk-day-slot-teacher${unassigned ? " bk-unassigned" : ""}`}>
+                  <span className={`bk-day-slot-teacher${unassigned && !s.is_dropped ? " bk-unassigned" : ""}`}>
                     {s.coteach_label ? (
                       <>
                         {s.coteach_label.split("+").map((part) => (
@@ -84,6 +88,8 @@ export function DayEditorPanel({
                         ))}
                         <span>{s.coteach_label}</span>
                       </>
+                    ) : s.is_dropped ? (
+                      <span className="muted">Dropped</span>
                     ) : unassigned ? (
                       "Unassigned"
                     ) : (
@@ -97,11 +103,18 @@ export function DayEditorPanel({
                 {slotWarnings.length > 0 && (
                   <div className="bk-day-slot-warn">
                     {slotWarnings.map((w, i) => (
-                      <div key={i}>⚠ {w.message}</div>
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <AlertTriangle size={12} /> {w.message}
+                      </div>
                     ))}
                   </div>
                 )}
-                {!readonly && !s.is_dropped && (
+                {!readonly && s.is_coteach && (
+                  <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+                    Co-teach — two separate Sling shifts. Edit in Sling after pushing.
+                  </div>
+                )}
+                {!readonly && !s.is_coteach && (
                   <div style={{ marginTop: 10 }}>
                     {editing === s.id ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -111,7 +124,9 @@ export function DayEditorPanel({
                             key={c.teacher.sling_user_id}
                             className={`bk-candidate${c.current ? " bk-current" : ""}`}
                             disabled={!c.qualified || saving}
-                            onClick={() => assign(s.id, c.teacher.sling_user_id)}
+                            onClick={() =>
+                              c.current ? setEditing(null) : assign(s.id, c.teacher.sling_user_id)
+                            }
                           >
                             <Avatar name={c.teacher.display_name} size={22} />
                             <span>{c.teacher.display_name}</span>
@@ -130,16 +145,17 @@ export function DayEditorPanel({
                             disabled={saving}
                             onClick={() => assign(s.id, null)}
                           >
-                            <span className="muted">Mark unassigned</span>
+                            <span className="muted">Mark unassigned (drops the class)</span>
                           </button>
                         )}
-                        <button className="bk-candidate-cancel" onClick={() => setEditing(null)}>
+                        {error && <div className="error" style={{ marginTop: 4 }}>{error}</div>}
+                        <button className="bk-candidate-cancel" onClick={() => { setEditing(null); setError(null); }}>
                           Cancel
                         </button>
                       </div>
                     ) : (
-                      <button className="btn-ghost btn-sm" onClick={() => setEditing(s.id)}>
-                        <UserRoundCog size={14} /> {unassigned ? "Assign" : "Change teacher"}
+                      <button className="btn-ghost btn-sm" onClick={() => { setEditing(s.id); setError(null); }}>
+                        <UserRoundCog size={14} /> {unassigned || s.is_dropped ? "Assign" : "Change teacher"}
                       </button>
                     )}
                   </div>

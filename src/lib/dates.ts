@@ -108,3 +108,16 @@ export function prettyDayLong(iso: string): string {
 export function formatTimestamp(iso: string): string {
   return iso.replace("T", " ").replace(/\.\d+/, "").slice(0, 19);
 }
+
+// Normalize a timestamp to comparable local wall-clock form 'YYYY-MM-DDTHH:MM:SS'.
+// DuckDB TIMESTAMPTZ casts render as 'YYYY-MM-DD HH:MM:SS[.frac]±TZ' (space
+// separator + offset, in the laptop's local zone = studio time); shift-local
+// strings are built as 'YYYY-MM-DDTHH:MM:SS'. Lexicographic comparison across
+// the two formats breaks at the separator (' ' < 'T'), so both sides must be
+// normalized before comparing.
+export function wallClock(ts: string): string {
+  return ts
+    .replace(" ", "T")
+    .replace(/(\.\d+)?([+-]\d{2}(:?\d{2})?)?$/, "")
+    .slice(0, 19);
+}

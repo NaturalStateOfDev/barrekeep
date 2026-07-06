@@ -74,6 +74,17 @@ describe("candidatesFor", () => {
     expect(kayla.note).toBe("on leave");
   });
 
+  it("detects same-day leave in the backend's TIMESTAMPTZ cast format", () => {
+    // The Rust command returns 'YYYY-MM-DD HH:MM:SS±TZ' (space + offset).
+    const target = shift({});
+    const blocks: AvailabilityBlock[] = [
+      { sling_user_id: 2, source: "leave", starts_at: "2026-08-03 08:00:00-05", ends_at: "2026-08-03 12:00:00-05" },
+    ];
+    const out = candidatesFor(target, [target], TEACHERS, PAIRS, blocks);
+    const kayla = out.find((c) => c.teacher.sling_user_id === 2)!;
+    expect(kayla.note).toBe("on leave");
+  });
+
   it("flags teachers whose week is at cap", () => {
     const target = shift({ sling_user_id: null, teacher_name: null });
     // Kayla already teaches 5 classes (her weekly_max) that week.

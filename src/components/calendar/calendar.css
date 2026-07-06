@@ -63,6 +63,7 @@
   gap: 2px;
   background: var(--surface-card);
   box-shadow: var(--shadow-card);
+  cursor: pointer;
 }
 
 .bk-day-cell.bk-out-of-month {

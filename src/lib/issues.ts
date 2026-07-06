@@ -1,5 +1,5 @@
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
-import { isoWeekKey } from "./dates";
+import { isoWeekKey, wallClock } from "./dates";
 
 export type IssueKind =
   | "unassigned"
@@ -107,7 +107,10 @@ export function computeIssues(
     const tEnd = `${s.shift_date}T${s.end_time}:00`;
     const tStart = `${s.shift_date}T${s.start_time}:00`;
     const conflicts = blocks.some(
-      (b) => b.sling_user_id === s.sling_user_id && b.starts_at < tEnd && b.ends_at > tStart,
+      (b) =>
+        b.sling_user_id === s.sling_user_id &&
+        wallClock(b.starts_at) < tEnd &&
+        wallClock(b.ends_at) > tStart,
     );
     if (conflicts) {
       const t = teacherById.get(s.sling_user_id);

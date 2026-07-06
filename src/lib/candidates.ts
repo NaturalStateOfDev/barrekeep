@@ -4,7 +4,7 @@
 // truth for "who can teach what" (see CLAUDE.md).
 
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
-import { isoWeekKey } from "./dates";
+import { isoWeekKey, wallClock } from "./dates";
 
 export interface Candidate {
   teacher: Teacher;
@@ -16,7 +16,10 @@ export interface Candidate {
 
 function onLeave(blocks: AvailabilityBlock[], userId: number, startIso: string, endIso: string): boolean {
   return blocks.some(
-    (b) => b.sling_user_id === userId && b.starts_at < endIso && b.ends_at > startIso,
+    (b) =>
+      b.sling_user_id === userId &&
+      wallClock(b.starts_at) < endIso &&
+      wallClock(b.ends_at) > startIso,
   );
 }
 

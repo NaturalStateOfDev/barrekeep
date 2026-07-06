@@ -108,13 +108,16 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     setPullResult(null);
   }, [newMonth]);
 
-  useEffect(() => {
-    if (!detail) return;
-    const month = detail.summary.target_month;
+  const loadContext = (month: string) => {
     api.listTeachers().then(setTeachers).catch(() => {});
     api.listQualifiedPairs().then((list) => setQualifiedPairs(new Set(list))).catch(() => {});
     api.listAvailabilityBlocks(month).then(setBlocks).catch(() => {});
     api.listExternalShiftsForMonth(month).then(setExternalShifts).catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!detail) return;
+    loadContext(detail.summary.target_month);
   }, [detail?.summary.target_month, detail?.summary.id]);
 
   // Default new-month per spec: first empty in priority next > next+1 >
@@ -157,6 +160,9 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
       );
       await refreshProposals();
       if (mode === "detail" && selectedId != null) await refreshDetail(selectedId);
+      // A pull rewrites roster, availability and external shifts — reload the
+      // issue/KPI context so the queue reflects the fresh data.
+      loadContext(activeMonth);
     } catch (e) {
       const msg = String(e);
       if (msg.includes("sling-401")) setSlingExpiredModal(true);
@@ -167,6 +173,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   };
 
   const onGenerate = async () => {
+    if (isReadOnlyMonth(activeMonth, today)) return;
     setError(null);
     setLastResult(null);
     setGenerating(true);
@@ -214,7 +221,17 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     );
   }
 
-  if (!proposals) return null;
+  // Initial list load failed (e.g. database locked): show the error instead
+  // of a blank page.
+  if (!proposals) {
+    if (!error) return null;
+    return (
+      <div>
+        <PageHead title="Proposals" />
+        <div className="card error" style={{ marginTop: 0 }}>{error}</div>
+      </div>
+    );
+  }
 
   const summary = detail?.summary;
   const subline =
@@ -295,13 +312,21 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                   <Download size={15} /> {pulling ? "Pulling…" : `Pull from Sling`}
                 </button>
               </div>
-              <EmptyState
-                icon={Sparkles}
-                title={`No proposal for ${monthLabel(newMonth)} yet`}
-                message="Pull the latest availability, then generate a first draft from your Sling roster and qualifications. Review and adjust it here before pushing."
-                actionLabel={`Generate proposal for ${newMonth}`}
-                onAction={onGenerate}
-              />
+              {isReadOnlyMonth(newMonth, today) ? (
+                <EmptyState
+                  icon={Sparkles}
+                  title={`No proposal for ${monthLabel(newMonth)}`}
+                  message="Past month — read only. Pick the current or an upcoming month to generate a proposal."
+                />
+              ) : (
+                <EmptyState
+                  icon={Sparkles}
+                  title={`No proposal for ${monthLabel(newMonth)} yet`}
+                  message="Pull the latest availability, then generate a first draft from your Sling roster and qualifications. Review and adjust it here before pushing."
+                  actionLabel={`Generate proposal for ${newMonth}`}
+                  onAction={onGenerate}
+                />
+              )}
             </>
           )}
         </div>
@@ -424,7 +449,7 @@ function ProposalShiftsTable({ detail }: { detail: ProposalDetail }) {
                 {s.is_coteach ? (
                   <strong>{s.coteach_label}</strong>
                 ) : s.is_dropped ? (
-                  <span className="muted">DROPPED</span>
+                  <span className="muted">Dropped</span>
                 ) : s.teacher_name ? (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
                     <Avatar name={s.teacher_name} size={20} />
@@ -488,8 +513,8 @@ function EditHistory({ proposalId }: { proposalId: number }) {
                 {e.shift_date} {e.start_time}
               </td>
               <td>{e.class_name}</td>
-              <td>{e.old_teacher_name ?? <span className="muted">DROPPED</span>}</td>
-              <td>{e.new_teacher_name ?? <span className="muted">DROPPED</span>}</td>
+              <td>{e.old_teacher_name ?? <span className="muted">Dropped</span>}</td>
+              <td>{e.new_teacher_name ?? <span className="muted">Dropped</span>}</td>
               <td className="muted">{e.reason ?? ""}</td>
             </tr>
           ))}

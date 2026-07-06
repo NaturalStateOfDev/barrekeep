@@ -36,10 +36,19 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
     return () => { cancelled = true; };
   }, [proposalId]);
 
-  // Subscribe to progress before executing; clean up on unmount.
+  // Subscribe to progress before executing; clean up on unmount. If the
+  // modal unmounts before listen() resolves, unlisten immediately instead
+  // of leaking the subscription.
   useEffect(() => {
-    listen<PushProgress>("push-progress", (e) => setProgress(e.payload)).then((u) => { unlisten.current = u; });
-    return () => { unlisten.current?.(); };
+    let unmounted = false;
+    listen<PushProgress>("push-progress", (e) => setProgress(e.payload)).then((u) => {
+      if (unmounted) u();
+      else unlisten.current = u;
+    });
+    return () => {
+      unmounted = true;
+      unlisten.current?.();
+    };
   }, []);
 
   const onConfirm = async () => {

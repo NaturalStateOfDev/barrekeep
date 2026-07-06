@@ -82,3 +82,25 @@ describe("isReadOnlyMonth", () => {
     expect(isReadOnlyMonth("2026-06", "2026-05-19")).toBe(false);
   });
 });
+
+import { wallClock } from "./dates";
+
+describe("wallClock", () => {
+  it("normalizes DuckDB TIMESTAMPTZ casts (space + offset)", () => {
+    expect(wallClock("2026-08-20 08:00:00-05")).toBe("2026-08-20T08:00:00");
+    expect(wallClock("2026-08-20 08:00:00+00")).toBe("2026-08-20T08:00:00");
+    expect(wallClock("2026-08-20 08:00:00.123-05:30")).toBe("2026-08-20T08:00:00");
+  });
+
+  it("passes through shift-local ISO strings unchanged", () => {
+    expect(wallClock("2026-08-20T05:45:00")).toBe("2026-08-20T05:45:00");
+  });
+
+  it("makes cross-format comparisons consistent", () => {
+    // Same-day leave block vs shift: the raw strings compare wrongly
+    // (' ' < 'T'), normalized they compare correctly.
+    const blockEnd = wallClock("2026-08-20 12:00:00-05");
+    const shiftStart = wallClock("2026-08-20T05:45:00");
+    expect(blockEnd > shiftStart).toBe(true);
+  });
+});

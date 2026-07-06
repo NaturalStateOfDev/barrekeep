@@ -145,7 +145,8 @@ body {
   margin-bottom: var(--space-4);
 }
 
-.card > strong {
+.card > strong,
+.card > .row > strong {
   font-family: var(--font-display);
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
@@ -451,7 +452,7 @@ code {
 .field textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .field textarea {

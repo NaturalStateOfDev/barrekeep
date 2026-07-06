@@ -9,6 +9,7 @@ import {
   type Update,
   type DownloadProgress,
 } from "../lib/updater";
+import { ProgressBar } from "./ui/ProgressBar";
 
 export function UpdateBanner() {
   const [update, setUpdate] = useState<Update | null>(null);
@@ -66,24 +67,8 @@ export function UpdateBanner() {
       </span>
 
       {installing && pct != null && (
-        <div
-          aria-hidden
-          style={{
-            width: 120,
-            height: 6,
-            borderRadius: 3,
-            background: "var(--surface-sunken)",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              width: `${pct}%`,
-              height: "100%",
-              background: "var(--color-info)",
-              transition: "width 0.2s",
-            }}
-          />
+        <div aria-hidden style={{ width: 120 }}>
+          <ProgressBar value={pct} />
         </div>
       )}
 
