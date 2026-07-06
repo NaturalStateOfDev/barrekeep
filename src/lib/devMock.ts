@@ -138,6 +138,7 @@ let hasSlingToken = true;
 let hasAnthropicKey = true;
 let hasSlingCredentials = false;
 let studioConfig = { org_id: 41822, acting_user_id: 1930221, home_location_id: 901 };
+const APP_SETTINGS = new Map<string, string>();
 
 const REVIEWS = [
   {
@@ -193,6 +194,11 @@ export function installDevMock() {
         return null;
       case "has_sling_credentials":
         return hasSlingCredentials;
+      case "get_app_setting":
+        return APP_SETTINGS.get(args.key) ?? null;
+      case "set_app_setting":
+        APP_SETTINGS.set(args.key, args.value);
+        return null;
       case "set_sling_credentials":
         hasSlingCredentials = Boolean(args.email);
         return null;

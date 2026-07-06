@@ -59,23 +59,28 @@ pub fn run() {
             // Sling token (if any). If the vault can't be opened for any
             // reason, log and continue with no token rather than killing
             // app startup.
-            let (secrets, initial_token) = match secrets::Secrets::open(&app.handle()) {
-                Ok(s) => {
-                    let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
-                        eprintln!("[secrets] failed to read sling_token: {e}");
-                        None
-                    });
-                    (Some(s), tok)
-                }
-                Err(e) => {
-                    eprintln!("[secrets] failed to open vault: {e}");
-                    (None, None)
-                }
-            };
+            let (secrets, initial_token, initial_anthropic) =
+                match secrets::Secrets::open(&app.handle()) {
+                    Ok(s) => {
+                        let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
+                            eprintln!("[secrets] failed to read sling_token: {e}");
+                            None
+                        });
+                        let anthropic = s.get(secrets::KEY_ANTHROPIC).unwrap_or_else(|e| {
+                            eprintln!("[secrets] failed to read anthropic_key: {e}");
+                            None
+                        });
+                        (Some(s), tok, anthropic)
+                    }
+                    Err(e) => {
+                        eprintln!("[secrets] failed to open vault: {e}");
+                        (None, None, None)
+                    }
+                };
             if let Some(s) = secrets {
                 app.manage(s);
             }
-            app.manage(AnthropicKey(Mutex::new(None)));
+            app.manage(AnthropicKey(Mutex::new(initial_anthropic)));
             app.manage(SlingToken(Mutex::new(initial_token)));
             app.manage(SlingOrgHint(Mutex::new(None)));
             Ok(())
@@ -95,6 +100,8 @@ pub fn run() {
             commands::has_sling_token,
             commands::set_anthropic_key,
             commands::has_anthropic_key,
+            commands::get_app_setting,
+            commands::set_app_setting,
             commands::set_sling_token,
             commands::set_sling_credentials,
             commands::has_sling_credentials,

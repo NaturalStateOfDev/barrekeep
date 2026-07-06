@@ -875,17 +875,76 @@ pub fn list_edits_for_proposal(
 }
 
 // ============================================================
-// Anthropic key management
+// Anthropic key management + app settings
 // ============================================================
 
+/// Model allowlist for the Claude features. Exact ids only — an unknown
+/// stored value falls back to the default at call time.
+pub const CLAUDE_MODELS: &[&str] = &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"];
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
+
+pub fn claude_model(conn: &duckdb::Connection) -> String {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'claude_model'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    match stored {
+        Some(m) if CLAUDE_MODELS.contains(&m.as_str()) => m,
+        _ => DEFAULT_CLAUDE_MODEL.to_string(),
+    }
+}
+
 #[tauri::command]
-pub fn set_anthropic_key(key: State<'_, AnthropicKey>, value: String) -> Result<(), String> {
+pub fn get_app_setting(db: State<'_, Db>, key: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(err)?;
+    Ok(conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?",
+            duckdb::params![key],
+            |r| r.get(0),
+        )
+        .ok())
+}
+
+#[tauri::command]
+pub fn set_app_setting(db: State<'_, Db>, key: String, value: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(err)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, now())",
+        duckdb::params![key, value],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_anthropic_key(
+    key: State<'_, AnthropicKey>,
+    secrets: State<'_, crate::secrets::Secrets>,
+    value: String,
+) -> Result<(), String> {
     let trimmed = value.trim();
-    let mut guard = key.0.lock().map_err(err)?;
+    {
+        let mut guard = key.0.lock().map_err(err)?;
+        *guard = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    // Persist to Stronghold so the key survives app restarts (same
+    // mechanism as the Sling token).
     if trimmed.is_empty() {
-        *guard = None;
+        secrets
+            .remove(crate::secrets::KEY_ANTHROPIC)
+            .map_err(|e| e.to_string())?;
     } else {
-        *guard = Some(trimmed.to_string());
+        secrets
+            .set(crate::secrets::KEY_ANTHROPIC, trimmed)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2010,6 +2069,16 @@ mod tests {
 
     fn user(id: i64, name: &str, group_ids: Vec<i64>) -> SlingUser {
         SlingUser { id, name: name.into(), lastname: "T".into(), active: true, group_ids }
+    }
+
+    #[test]
+    fn claude_model_setting_roundtrip_and_fallback() {
+        let conn = conn_with_schema();
+        assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unset -> default
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-haiku-4-5')", []).unwrap();
+        assert_eq!(claude_model(&conn), "claude-haiku-4-5");
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-9000')", []).unwrap();
+        assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unknown -> default
     }
 
     /// sync_roster must be a no-op-safe delta sync: repeated runs with the

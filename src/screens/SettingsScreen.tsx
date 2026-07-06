@@ -241,15 +241,35 @@ function StudioConfigCard() {
   );
 }
 
+const CLAUDE_MODEL_OPTIONS = [
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8 — most capable (~13¢ per interaction)" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — balanced (~7¢ per interaction)" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — cheapest (~2–3¢ per interaction)" },
+];
+const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
+
 function AnthropicKeyCard() {
   const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [model, setModel] = useState<string>(DEFAULT_CLAUDE_MODEL);
 
   useEffect(() => {
     api.hasAnthropicKey().then(setHasKey).catch((e) => setError(String(e)));
+    api.getAppSetting("claude_model")
+      .then((m) => { if (m) setModel(m); })
+      .catch(() => {});
   }, []);
+
+  const onModelChange = async (next: string) => {
+    setModel(next);
+    try {
+      await api.setAppSetting("claude_model", next);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const onSave = async () => {
     setError(null);
@@ -259,7 +279,7 @@ function AnthropicKeyCard() {
       setKeyInput("");
       const has = await api.hasAnthropicKey();
       setHasKey(has);
-      setStatus(has ? "Saved. The key is held in memory only — paste again next session." : "Cleared.");
+      setStatus(has ? "Saved to the OS keychain — survives restarts." : "Cleared.");
     } catch (e) {
       setError(String(e));
     }
@@ -279,13 +299,20 @@ function AnthropicKeyCard() {
     <div className="card">
       <strong>Anthropic API key</strong>
       <p className="muted" style={{ marginTop: 4 }}>
-        Required for the "Have Claude review" feature on proposals. Stored
-        in memory only — closes with the app, paste again next session.
-        Get a key from <code>console.anthropic.com</code>.
+        Required for the Claude features on proposals (review, editing,
+        algorithm updates). Stored in the OS keychain (Stronghold) — survives
+        restarts. Get a key from <code>console.anthropic.com</code>.
       </p>
       <div style={{ marginTop: 12 }}>
         Status: <StatusValue state={hasKey} okLabel="set" mutedLabel="not set" />
       </div>
+      <Field label="Model" style={{ marginTop: 12 }} hint="Used by review, the proposal editor, and code drafting.">
+        <select value={model} onChange={(e) => onModelChange(e.target.value)}>
+          {CLAUDE_MODEL_OPTIONS.map((o) => (
+            <option key={o.id} value={o.id}>{o.label}</option>
+          ))}
+        </select>
+      </Field>
       <Field label="Paste key" style={{ marginTop: 12 }}>
         <input
           type="password"

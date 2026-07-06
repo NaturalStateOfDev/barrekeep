@@ -52,6 +52,10 @@ export const api = {
   setAnthropicKey: (value: string) =>
     invoke<void>("set_anthropic_key", { value }),
   hasAnthropicKey: () => invoke<boolean>("has_anthropic_key"),
+  getAppSetting: (key: string) =>
+    invoke<string | null>("get_app_setting", { key }),
+  setAppSetting: (key: string, value: string) =>
+    invoke<void>("set_app_setting", { key, value }),
   setSlingToken: (value: string) => invoke<void>("set_sling_token", { value }),
   hasSlingToken: () => invoke<boolean>("has_sling_token"),
   setSlingCredentials: (email: string, password: string) =>
