@@ -28,6 +28,30 @@ script itself. v9 → v10 → v11, each with a human-readable "what changed".
 The prompt requires Claude to justify why a lesser tier is insufficient
 before escalating.
 
+## Prerequisites: API key & model selection
+
+- **Anthropic API key required.** Every surface added here (instruction box,
+  shortcut, code drafting) gates on the key exactly like today's Review
+  button: disabled with "Set your API key in Settings first". The empty
+  claude tab teaches the next step instead of erroring.
+- **Key moves to Stronghold.** Today the key is memory-only (re-pasted every
+  session — the code already notes "Stronghold-backed persistence comes
+  later"). This feature makes the key a daily-driver, so it moves to the OS
+  keychain using the same mechanism as the Sling token. Settings copy
+  updates accordingly; "Clear" removes it from the vault.
+- **Model is a user setting, not a constant.** A "Claude model" select on
+  the Settings → Anthropic card, stored in a new `app_settings(key, value)`
+  table (migration 0010 rides along). Used by review, the proposal editor,
+  and code drafting alike; replaces the hardcoded `REVIEW_MODEL`
+  (`claude-sonnet-4-6`) in review.rs. Curated options with rough per-call
+  cost shown in the description (typical call ≈ 15k in / 2k out):
+  - `claude-opus-4-8` — **default**; most capable (~13¢/call). Edits must
+    reference real shift ids and drafted code runs against real data, so
+    correctness is worth it at this volume (a handful of calls per month).
+  - `claude-sonnet-4-6` — balanced (~7¢/call); today's review model.
+  - `claude-haiku-4-5` — cheapest (~2–3¢/call).
+  Unknown/stale stored values fall back to the default at call time.
+
 ## UX (frontend)
 
 The Proposals "review" tab becomes the **claude** tab:
@@ -61,6 +85,12 @@ Append-only, no FKs, no UNIQUE beyond the PK, rows never UPDATEd
 (per the DuckDB rules in CLAUDE.md / the schema-change skill):
 
 ```sql
+CREATE TABLE app_settings (
+  key        VARCHAR PRIMARY KEY,   -- e.g. 'claude_model'
+  value      VARCHAR NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE algorithm_versions (
   version       INTEGER PRIMARY KEY,       -- 10, 11, ... (v9 = shipped baseline)
   description   VARCHAR NOT NULL,          -- "v10 — Casey off Reform; Sat opener 8:15"
@@ -174,6 +204,14 @@ without recompiling.
   script_content?, claude_run_id?)` (validates rules schema; assigns
   version = max(existing, 9) + 1; writes the script file when present;
   inserts the row), `delete_algorithm_script(version)`.
+- `get_app_setting(key)` / `set_app_setting(key, value)` (INSERT OR REPLACE;
+  no FKs/extra indexes on the table, so safe under the DuckDB rules).
+  Claude calls read `claude_model` at call time, defaulting to
+  `claude-opus-4-8`; review.rs's `REVIEW_MODEL` constant becomes the
+  fallback path only.
+- `set_anthropic_key` / `has_anthropic_key` gain Stronghold persistence
+  (mirror the Sling-token commands); the in-memory Mutex stays as the
+  session cache, preloaded from the vault at startup like the Sling token.
 - `generate_proposal`: resolve active version → script path + rules →
   include in payload → spawn resolved script.
 - Frontend applies edit checklists by looping the two single-edit commands
