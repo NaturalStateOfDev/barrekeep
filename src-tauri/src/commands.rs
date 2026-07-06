@@ -395,29 +395,18 @@ pub fn generate_proposal(
             }).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
         };
 
-        // Month events: availability + leave + existing shifts for the target month
+        // Month events: availability + leave (overlapping the month, see
+        // query_availability_blocks) + existing shifts for the target month.
         let month_events: Vec<serde_json::Value> = {
-            let (m_start, m_end) = crate::sling::month_range(&target_month).map_err(err)?;
-            let mut stmt = conn.prepare(
-                "SELECT sling_user_id, source, CAST(starts_at AS VARCHAR), CAST(ends_at AS VARCHAR)
-                 FROM availability_blocks
-                 WHERE starts_at >= CAST(? AS TIMESTAMPTZ) AND starts_at <= CAST(? AS TIMESTAMPTZ)"
-            ).map_err(err)?;
-            let mut events: Vec<serde_json::Value> = stmt.query_map(
-                duckdb::params![&m_start, &m_end],
-                |r| {
-                    let uid: i32 = r.get(0)?;
-                    let src: String = r.get(1)?;
-                    let st: String = r.get(2)?;
-                    let en: String = r.get(3)?;
-                    Ok(serde_json::json!({
-                        "type": src,
-                        "dtstart": st,
-                        "dtend": en,
-                        "user": {"id": uid},
-                    }))
-                }
-            ).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
+            let mut events: Vec<serde_json::Value> = query_availability_blocks(&conn, &target_month)?
+                .into_iter()
+                .map(|b| serde_json::json!({
+                    "type": b.source,
+                    "dtstart": b.starts_at,
+                    "dtend": b.ends_at,
+                    "user": {"id": b.sling_user_id},
+                }))
+                .collect();
             // Append target-month external shifts
             let mut stmt2 = conn.prepare(
                 "SELECT CAST(shift_date AS VARCHAR), start_time, end_time, sling_user_id, sling_position_id
@@ -1270,34 +1259,43 @@ fn sync_roster(
 ) -> Result<RosterSyncSummary, String> {
     use std::collections::HashSet;
 
-    // 1. Positions from Sling position-type groups.
+    // 1. Positions from Sling position-type groups. Compare-before-write:
+    // read the current rows once, then only touch rows that actually change.
+    // No-op UPDATEs waste WAL and needlessly exercise DuckDB's touchy
+    // UPDATE machinery (see migrations 0003/0004/0009).
     let pos_groups: Vec<(i64, String)> = groups.iter()
         .filter(|g| g.kind == "position")
         .map(|g| (g.id, g.name.clone()))
         .collect();
     let sling_pos_ids: HashSet<i64> = pos_groups.iter().map(|(id, _)| *id).collect();
+    let existing_pos: std::collections::HashMap<i32, (String, bool)> = {
+        let mut s = conn.prepare(
+            "SELECT sling_position_id, class_name, active FROM positions").map_err(err)?;
+        s.query_map([], |r| Ok((r.get::<_, i32>(0)?, (r.get::<_, String>(1)?, r.get::<_, bool>(2)?))))
+            .map_err(err)?.collect::<Result<_, _>>().map_err(err)?
+    };
     for (id, name) in &pos_groups {
         let pid = *id as i32;
-        let exists: i64 = conn.query_row(
-            "SELECT count(*) FROM positions WHERE sling_position_id = ?",
-            duckdb::params![pid], |r| r.get(0)).map_err(err)?;
-        if exists > 0 {
-            conn.execute("UPDATE positions SET class_name = ? WHERE sling_position_id = ?",
-                duckdb::params![name, pid]).map_err(err)?;
-        } else {
-            conn.execute(
-                "INSERT INTO positions (sling_position_id, class_name, duration_minutes, is_special, active)
-                 VALUES (?, ?, 60, FALSE, TRUE)",
-                duckdb::params![pid, name]).map_err(err)?;
+        match existing_pos.get(&pid) {
+            Some((current_name, _)) => {
+                // `active` is user-managed (schedulable toggle) — never
+                // re-activate here; only track renames.
+                if current_name != name {
+                    conn.execute("UPDATE positions SET class_name = ? WHERE sling_position_id = ?",
+                        duckdb::params![name, pid]).map_err(err)?;
+                }
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO positions (sling_position_id, class_name, duration_minutes, is_special, active)
+                     VALUES (?, ?, 60, FALSE, TRUE)",
+                    duckdb::params![pid, name]).map_err(err)?;
+            }
         }
     }
-    let all_pos: Vec<i32> = {
-        let mut s = conn.prepare("SELECT sling_position_id FROM positions").map_err(err)?;
-        s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
-    };
     let mut positions_deactivated = 0i64;
-    for pid in &all_pos {
-        if !sling_pos_ids.contains(&(*pid as i64)) {
+    for (pid, (_, active)) in &existing_pos {
+        if *active && !sling_pos_ids.contains(&(*pid as i64)) {
             conn.execute("UPDATE positions SET active = FALSE WHERE sling_position_id = ?",
                 duckdb::params![pid]).map_err(err)?;
             positions_deactivated += 1;
@@ -1313,7 +1311,26 @@ fn sync_roster(
     };
     let positions_active = schedulable.len() as i64;
 
-    // 3. Teachers.
+    // 3. Teachers. Same compare-before-write shape as positions.
+    struct TeacherRow {
+        display_name: String,
+        locations: Option<String>,
+        active: bool,
+        is_lead: bool,
+    }
+    let existing_teachers: std::collections::HashMap<i32, TeacherRow> = {
+        let mut s = conn.prepare(
+            "SELECT sling_user_id, display_name, locations, active, is_lead FROM teachers").map_err(err)?;
+        s.query_map([], |r| Ok((
+            r.get::<_, i32>(0)?,
+            TeacherRow {
+                display_name: r.get(1)?,
+                locations: r.get(2)?,
+                active: r.get(3)?,
+                is_lead: r.get(4)?,
+            },
+        ))).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
+    };
     let location_names = crate::sling::location_name_by_id(groups);
     let mut imported: HashSet<i32> = HashSet::new();
     let mut teachers_active = 0i64;
@@ -1325,29 +1342,31 @@ fn sync_roster(
         let display = format!("{} {}", u.name, u.lastname).trim().to_string();
         let locations = crate::sling::compute_locations(&u.group_ids, &location_names);
         let is_lead = u.id == cfg.acting_user_id;
-        let exists: i64 = conn.query_row(
-            "SELECT count(*) FROM teachers WHERE sling_user_id = ?",
-            duckdb::params![uid], |r| r.get(0)).map_err(err)?;
-        if exists > 0 {
-            conn.execute(
-                "UPDATE teachers SET display_name = ?, locations = ?, active = TRUE, is_lead = ?
-                 WHERE sling_user_id = ?",
-                duckdb::params![display, locations, is_lead, uid]).map_err(err)?;
-        } else {
-            conn.execute(
-                "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max,
-                    is_lead, ranking_weight, variety_multiplier, active, locations)
-                 VALUES (?, ?, 4, 5, ?, 1.0, 1.0, TRUE, ?)",
-                duckdb::params![uid, display, is_lead, locations]).map_err(err)?;
+        match existing_teachers.get(&uid) {
+            Some(t) => {
+                let unchanged = t.display_name == display
+                    && t.locations == locations
+                    && t.active
+                    && t.is_lead == is_lead;
+                if !unchanged {
+                    conn.execute(
+                        "UPDATE teachers SET display_name = ?, locations = ?, active = TRUE, is_lead = ?
+                         WHERE sling_user_id = ?",
+                        duckdb::params![display, locations, is_lead, uid]).map_err(err)?;
+                }
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max,
+                        is_lead, ranking_weight, variety_multiplier, active, locations)
+                     VALUES (?, ?, 4, 5, ?, 1.0, 1.0, TRUE, ?)",
+                    duckdb::params![uid, display, is_lead, locations]).map_err(err)?;
+            }
         }
     }
-    let all_teachers: Vec<i32> = {
-        let mut s = conn.prepare("SELECT sling_user_id FROM teachers").map_err(err)?;
-        s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
-    };
     let mut teachers_deactivated = 0i64;
-    for tid in &all_teachers {
-        if !imported.contains(tid) {
+    for (tid, t) in &existing_teachers {
+        if t.active && !imported.contains(tid) {
             conn.execute("UPDATE teachers SET active = FALSE WHERE sling_user_id = ?",
                 duckdb::params![tid]).map_err(err)?;
             teachers_deactivated += 1;
@@ -1436,6 +1455,11 @@ pub fn pull_month_from_sling(
     let mut availability_count: i64 = 0;
     for e in &payload.month_events {
         if e.kind != "availability" && e.kind != "leave" { continue; }
+        // Ownership guard: this pull owns (deletes + rewrites) only blocks
+        // that START in the target month — the same window the DELETE above
+        // clears. A spanning block Sling returns for a later month would
+        // otherwise be inserted a second time.
+        if e.dtstart.get(0..7) != Some(target_month.as_str()) { continue; }
         let uid = match e.user.as_ref().or_else(|| e.users.as_ref().and_then(|v| v.first())) {
             Some(u) => u.id as i32,
             None => continue,
@@ -1501,6 +1525,9 @@ pub fn pull_month_from_sling(
     ).map_err(err)?;
 
     tx.commit().map_err(err)?;
+    // Same WAL-bounding policy as generate/edit: checkpoint after the
+    // largest write in the app so a later crash replays little.
+    let _ = conn.execute("CHECKPOINT", []);
 
     Ok(PullResult {
         target_month: target_month.clone(),
@@ -1783,6 +1810,7 @@ pub fn import_external_shift(
                         &"imported from external sling shift".to_string()],
     ).map_err(err)?;
     tx.commit().map_err(err)?;
+    let _ = conn.execute("CHECKPOINT", []);
     Ok(())
 }
 
@@ -1794,19 +1822,21 @@ pub struct AvailabilityBlockRow {
     pub ends_at: String,
 }
 
-#[tauri::command]
-pub fn list_availability_blocks(
-    db: State<'_, Db>,
-    target_month: String,
+/// Availability/leave blocks that OVERLAP the target month — not just the
+/// ones that start inside it. A leave that begins in the previous month and
+/// runs into this one must stay visible to the proposer and the issue queue,
+/// or the teacher looks available for its first days.
+fn query_availability_blocks(
+    conn: &duckdb::Connection,
+    target_month: &str,
 ) -> Result<Vec<AvailabilityBlockRow>, String> {
-    let conn = db.0.lock().map_err(err)?;
-    let (start, end) = crate::sling::month_range(&target_month).map_err(err)?;
+    let (start, end) = crate::sling::month_range(target_month).map_err(err)?;
     let mut stmt = conn.prepare(
         "SELECT sling_user_id, source, CAST(starts_at AS VARCHAR), CAST(ends_at AS VARCHAR)
          FROM availability_blocks
-         WHERE starts_at >= CAST(? AS TIMESTAMPTZ) AND starts_at <= CAST(? AS TIMESTAMPTZ)"
+         WHERE starts_at <= CAST(? AS TIMESTAMPTZ) AND ends_at >= CAST(? AS TIMESTAMPTZ)"
     ).map_err(err)?;
-    let rows = stmt.query_map(duckdb::params![&start, &end], |r| {
+    let rows = stmt.query_map(duckdb::params![&end, &start], |r| {
         Ok(AvailabilityBlockRow {
             sling_user_id: r.get(0)?,
             source: r.get(1)?,
@@ -1815,6 +1845,15 @@ pub fn list_availability_blocks(
         })
     }).map_err(err)?;
     rows.collect::<Result<_, _>>().map_err(err)
+}
+
+#[tauri::command]
+pub fn list_availability_blocks(
+    db: State<'_, Db>,
+    target_month: String,
+) -> Result<Vec<AvailabilityBlockRow>, String> {
+    let conn = db.0.lock().map_err(err)?;
+    query_availability_blocks(&conn, &target_month)
 }
 
 #[derive(Serialize)]
@@ -1913,6 +1952,7 @@ pub fn refresh_roster_from_sling(
     let tx = conn.transaction().map_err(err)?;
     let summary = sync_roster(&tx, &users, &groups, &cfg)?;
     tx.commit().map_err(err)?;
+    let _ = conn.execute("CHECKPOINT", []);
     Ok(summary)
 }
 
@@ -1943,4 +1983,112 @@ fn tail(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sling::{SlingGroup, SlingUser, StudioConfig};
+
+    fn conn_with_schema() -> duckdb::Connection {
+        let conn = duckdb::Connection::open_in_memory().expect("open");
+        crate::migrations::run(&conn).expect("migrations");
+        conn
+    }
+
+    fn cfg() -> StudioConfig {
+        StudioConfig { org_id: 41822, acting_user_id: 1930001, home_location_id: 901 }
+    }
+
+    fn groups() -> Vec<SlingGroup> {
+        vec![
+            SlingGroup { id: 101, name: "Classic".into(), kind: "position".into() },
+            SlingGroup { id: 102, name: "Empower".into(), kind: "position".into() },
+            SlingGroup { id: 901, name: "Downtown Studio".into(), kind: "location".into() },
+        ]
+    }
+
+    fn user(id: i64, name: &str, group_ids: Vec<i64>) -> SlingUser {
+        SlingUser { id, name: name.into(), lastname: "T".into(), active: true, group_ids }
+    }
+
+    /// sync_roster must be a no-op-safe delta sync: repeated runs with the
+    /// same Sling data change nothing (and count nothing), user-managed
+    /// position toggles survive, and the whole thing works while a proposal
+    /// references the positions (the original pull-failure scenario).
+    #[test]
+    fn sync_roster_is_idempotent_delta_sync() {
+        let mut conn = conn_with_schema();
+        let users = vec![
+            user(1930001, "Alex", vec![901, 101, 102]),
+            user(1930002, "Kayla", vec![901, 101]),
+        ];
+
+        let tx = conn.transaction().unwrap();
+        let s1 = sync_roster(&tx, &users, &groups(), &cfg()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(s1.teachers_active, 2);
+        assert_eq!(s1.positions_active, 2);
+        assert_eq!(s1.teachers_deactivated, 0);
+        assert_eq!(s1.positions_deactivated, 0);
+
+        // A generated proposal now references position 101 (this is the state
+        // that used to make the next sync explode — see migration 0009).
+        conn.execute_batch(
+            "INSERT INTO proposals (target_month, algorithm_version, parameters, is_current)
+             VALUES ('2026-08', 'v3', '{}', TRUE);
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-08-03', '09:00', '10:00', 101, 1930001, 'rotation' FROM proposals;",
+        ).unwrap();
+        // The lead teacher deactivates a position she doesn't schedule.
+        conn.execute("UPDATE positions SET active = FALSE WHERE sling_position_id = 102", []).unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let s2 = sync_roster(&tx, &users, &groups(), &cfg()).unwrap();
+        tx.commit().unwrap();
+        // Idempotent: nothing (further) deactivated, manual toggle preserved.
+        assert_eq!(s2.teachers_deactivated, 0);
+        assert_eq!(s2.positions_deactivated, 0);
+        let active_102: bool = conn.query_row(
+            "SELECT active FROM positions WHERE sling_position_id = 102", [], |r| r.get(0)).unwrap();
+        assert!(!active_102, "user-managed schedulable toggle must survive a sync");
+
+        // Renames propagate; departures deactivate exactly once.
+        let mut renamed = groups();
+        renamed[0].name = "Classique".into();
+        let departed = vec![users[0].clone()];
+        let tx = conn.transaction().unwrap();
+        let s3 = sync_roster(&tx, &departed, &renamed, &cfg()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(s3.teachers_deactivated, 1);
+        let name: String = conn.query_row(
+            "SELECT class_name FROM positions WHERE sling_position_id = 101", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Classique");
+
+        let tx = conn.transaction().unwrap();
+        let s4 = sync_roster(&tx, &departed, &renamed, &cfg()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(s4.teachers_deactivated, 0, "already-inactive teacher must not recount");
+    }
+
+    /// Blocks are visible for every month they OVERLAP, not just the month
+    /// they start in — a leave spanning a month boundary must show up for
+    /// the second month too.
+    #[test]
+    fn availability_blocks_visible_across_month_boundary() {
+        let conn = conn_with_schema();
+        conn.execute_batch(
+            "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+             VALUES (1930001, 'Alex', 4, 5);
+             INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at) VALUES
+               (1930001, 'leave', TIMESTAMPTZ '2026-07-25 00:00:00-05', TIMESTAMPTZ '2026-08-10 23:59:59-05'),
+               (1930001, 'leave', TIMESTAMPTZ '2026-08-20 08:00:00-05', TIMESTAMPTZ '2026-08-20 12:00:00-05'),
+               (1930001, 'leave', TIMESTAMPTZ '2026-06-01 00:00:00-05', TIMESTAMPTZ '2026-06-05 00:00:00-05');",
+        ).unwrap();
+        let aug = query_availability_blocks(&conn, "2026-08").unwrap();
+        assert_eq!(aug.len(), 2, "spanning + in-month blocks visible, June-only block excluded");
+        let jul = query_availability_blocks(&conn, "2026-07").unwrap();
+        assert_eq!(jul.len(), 1, "spanning block also visible from its starting month");
+    }
 }

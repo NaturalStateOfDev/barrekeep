@@ -5,44 +5,69 @@ description: Use this skill whenever a change to the DuckDB schema is needed —
 
 # How to make a schema change
 
-The DuckDB schema is the source of truth for app state. Changes must be migration-driven, never ad-hoc.
+The DuckDB schema is the source of truth for app state. Changes must be
+migration-driven, never ad-hoc. Migrations are plain SQL files in
+`src-tauri/migrations/`, registered in `src-tauri/src/migrations.rs`, and
+applied once at startup (tracked in the `_migrations` table).
 
 ## Steps
 
-1. **Update `docs/data-model.md` first.** Document the change in the markdown DDL before touching code. This is the human-readable canonical reference.
+1. **Update `docs/data-model.md` first.** Document the change in the markdown
+   DDL before touching code. This is the human-readable canonical reference.
 
-2. **Add a migration file at `src/lib/migrations/NNN_short_description.ts`** where NNN is the next sequential number. Format:
+2. **Add a migration file at `src-tauri/migrations/NNNN_short_description.sql`**
+   where NNNN is the next sequential number. Start the file with a comment
+   block explaining what and WHY (see 0003 and 0009 for the expected depth).
 
-   ```typescript
-   import type { Migration } from '../duckdb';
+3. **Register it in `src-tauri/src/migrations.rs`** — append a
+   `Migration { version, label, sql: include_str!(...) }` entry. Versions are
+   monotonically increasing; once shipped, never edit a migration's SQL —
+   write a new one.
 
-   export const migration: Migration = {
-     version: 23,
-     description: "Add coteach_partner_shift_id to proposal_shifts",
-     async up(conn) {
-       await conn.run(`
-         ALTER TABLE proposal_shifts
-         ADD COLUMN coteach_partner_shift_id BIGINT REFERENCES proposal_shifts(id)
-       `);
-     },
-   };
-   ```
+4. **Add a backfill if needed.** If existing rows need values for a new
+   column, make the backfill statement idempotent (`WHERE column IS NULL`,
+   `INSERT ... SELECT ... WHERE NOT EXISTS`, etc.).
 
-3. **Add a backfill if needed.** If existing rows need values for the new column, add a second statement in the migration that's idempotent (uses `WHERE column IS NULL` etc.).
+5. **Update affected Rust structs and queries** in `src-tauri/src/commands.rs`
+   and the TypeScript types in `src/types.ts`.
 
-4. **Update affected TypeScript types in `src/types.ts`.** The schedule type, the proposal type, etc.
+6. **Add a test in `migrations.rs`'s `#[cfg(test)]` module** exercising the
+   new shape on a fresh in-memory DB (`migrations::run` + representative
+   data). `cargo test --lib migrations` must pass.
 
-5. **Update affected queries.** `src/lib/queries.ts` is the canonical location.
+## DuckDB constraint rules (learned the hard way — migrations 0003/0004/0009)
 
-6. **Test by deleting `data/scheduler.duckdb` and rerunning the app.** Confirm seed data + migrations bring the DB to the expected state.
+- **Never put UNIQUE constraints (beyond the PK) or incoming FKs on a table
+  whose rows get UPDATEd.** DuckDB executes an UPDATE that touches an indexed
+  column as DELETE+INSERT; the delete half trips incoming FK references with
+  "still referenced by a foreign key in a different table".
+- **DuckDB has no `ALTER TABLE DROP CONSTRAINT`.** Removing a constraint
+  means rebuilding the table: `CREATE TABLE t_new (...)`,
+  `INSERT INTO t_new SELECT ...`, `DROP TABLE t`, `RENAME`. Recreate any
+  indexes; sequences keep their high-water marks. Rebuild referencing tables
+  first if they hold FKs into the one being dropped.
+- **Validate destructive migrations against the shipped engine version
+  before committing.** `pip install duckdb==<engine>` (the engine version is
+  encoded in the crate version: `1.1MMPP` = libduckdb `1.MM.PP`, see
+  `src-tauri/Cargo.toml`), run the full migration chain + realistic data, and
+  assert row counts/ids/sequences are preserved.
 
 ## Things to avoid
 
-- **Never DROP a column.** Add a new column instead, mark the old one deprecated in `data-model.md`, and stop reading from it. We can prune deprecated columns in a quarterly cleanup migration.
-- **Never alter a primary key.** If you need a different PK, create a new table and migrate rows.
-- **Don't use DuckDB-specific syntax that won't work in plain SQL.** This DB might one day move to Postgres or SQLite for some features. Keep DDL portable.
-- **Don't write migrations that fail if run twice.** All `CREATE` should be `CREATE TABLE IF NOT EXISTS`, all `ALTER ADD COLUMN` should be guarded with a column-exists check.
+- **Never DROP a column.** Add a new column instead, mark the old one
+  deprecated in `data-model.md`, and stop reading from it.
+- **Never alter a primary key.** If you need a different PK, create a new
+  table and migrate rows.
+- **Don't write migrations that fail if run twice.** Additive DDL should be
+  `CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`. (Table-rebuild
+  migrations can't be statement-idempotent — they rely on the `_migrations`
+  version gate instead; that's acceptable.)
+- **Don't use DuckDB-specific syntax that won't work in plain SQL** where a
+  portable form exists. This DB might one day move to Postgres or SQLite for
+  some features.
 
 ## When the change touches Sling integration
 
-If a column maps to a Sling API field (e.g., `sling_user_id`, `sling_position_id`), update `docs/sling-api.md` too. Cross-reference the migration in the doc.
+If a column maps to a Sling API field (e.g., `sling_user_id`,
+`sling_position_id`), update `docs/sling-api.md` too. Cross-reference the
+migration in the doc.

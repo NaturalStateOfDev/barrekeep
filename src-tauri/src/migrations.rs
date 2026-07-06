@@ -100,6 +100,29 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// If migrations are pending on an existing database, checkpoint and copy
+/// the file aside first (scheduler.duckdb.backup-vN, N = schema version the
+/// backup contains). Proposal/edit history exists nowhere but this file —
+/// Sling can restore the roster, not the schedule history — so a botched
+/// table-rebuild migration must be recoverable by hand. Fresh databases
+/// (version 0) are skipped: nothing to lose yet. Returns the backup path
+/// when one was made.
+pub fn backup_if_pending(
+    conn: &Connection,
+    db_file: &std::path::Path,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let current = current_version(conn)?;
+    let latest = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
+    if current == 0 || current >= latest || !db_file.exists() {
+        return Ok(None);
+    }
+    // Flush any WAL replayed at open so the copy is a consistent snapshot.
+    let _ = conn.execute("CHECKPOINT", []);
+    let backup = db_file.with_extension(format!("duckdb.backup-v{current}"));
+    std::fs::copy(db_file, &backup)?;
+    Ok(Some(backup))
+}
+
 /// Highest applied migration version. 0 = unmigrated.
 pub fn current_version(conn: &Connection) -> anyhow::Result<i32> {
     let v: Option<i32> = conn
@@ -181,4 +204,33 @@ mod tests {
         .expect("teacher swap");
         tx.commit().expect("commit");
     }
+
+    /// backup_if_pending: no-op when up to date or fresh; copies the file
+    /// when a real database has pending migrations.
+    #[test]
+    fn backup_only_when_pending_on_existing_db() {
+        let dir = std::env::temp_dir().join(format!("bk-mig-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_file = dir.join("scheduler.duckdb");
+        let _ = std::fs::remove_file(&db_file);
+
+        let conn = Connection::open(&db_file).expect("open file db");
+
+        // Fresh db, everything pending -> skipped (version 0, nothing to lose).
+        assert!(backup_if_pending(&conn, &db_file).unwrap().is_none());
+
+        run(&conn).expect("migrations");
+        // Fully migrated -> no backup.
+        assert!(backup_if_pending(&conn, &db_file).unwrap().is_none());
+
+        // Simulate an older install: pretend the last migration is pending.
+        let latest = MIGRATIONS.last().unwrap().version;
+        conn.execute("DELETE FROM _migrations WHERE version = ?", duckdb::params![latest]).unwrap();
+        let backup = backup_if_pending(&conn, &db_file).unwrap().expect("backup made");
+        assert!(backup.exists());
+        assert!(backup.to_string_lossy().ends_with(&format!("backup-v{}", latest - 1)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+

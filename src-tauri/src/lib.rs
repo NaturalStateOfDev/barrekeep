@@ -1,7 +1,7 @@
 // Tauri 2 entry point. Wires up:
 //   - DuckDB connection (managed as Tauri State)
 //   - Migrations (run once at startup)
-//   - Seed data (populates roster + positions on first launch)
+//   - Seed hook (intentionally a no-op — roster comes from Sling)
 //   - Stronghold plugin (OS-keychain-backed vault for the Sling token)
 //   - Anthropic API key + Sling token (in-memory state caches; Stronghold
 //     write for the Sling token is delegated to the frontend via the
@@ -46,6 +46,10 @@ pub fn run() {
             let db = db::Db::open(app.handle())?;
             {
                 let conn = db.0.lock().expect("db poisoned at startup");
+                let path = db::db_path(app.handle())?;
+                if let Some(backup) = migrations::backup_if_pending(&conn, &path)? {
+                    eprintln!("[migration] backed up database to {}", backup.display());
+                }
                 migrations::run(&conn)?;
                 seed::run_if_empty(&conn)?;
             }
