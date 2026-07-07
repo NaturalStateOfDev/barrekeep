@@ -9,6 +9,7 @@ import {
   type Update,
   type DownloadProgress,
 } from "../lib/updater";
+import { ProgressBar } from "./ui/ProgressBar";
 
 export function UpdateBanner() {
   const [update, setUpdate] = useState<Update | null>(null);
@@ -49,18 +50,7 @@ export function UpdateBanner() {
   const pct = progress?.percent;
 
   return (
-    <div
-      role="status"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "8px 16px",
-        background: "hsl(210 60% 96%)",
-        borderBottom: "1px solid hsl(210 40% 80%)",
-        fontSize: 14,
-      }}
-    >
+    <div role="status" className="bk-update-banner">
       <span style={{ flex: 1 }}>
         {installing ? (
           <>
@@ -68,7 +58,7 @@ export function UpdateBanner() {
             {pct != null ? ` — ${pct}%` : "…"} The app will restart.
           </>
         ) : error ? (
-          <span style={{ color: "hsl(0 65% 38%)" }}>Update failed: {error}</span>
+          <span style={{ color: "var(--color-danger)" }}>Update failed: {error}</span>
         ) : (
           <>
             <strong>Barrekeep v{update.version}</strong> is available.
@@ -77,33 +67,17 @@ export function UpdateBanner() {
       </span>
 
       {installing && pct != null && (
-        <div
-          aria-hidden
-          style={{
-            width: 120,
-            height: 6,
-            borderRadius: 3,
-            background: "hsl(210 30% 85%)",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              width: `${pct}%`,
-              height: "100%",
-              background: "hsl(210 70% 50%)",
-              transition: "width 0.2s",
-            }}
-          />
+        <div aria-hidden style={{ width: 120 }}>
+          <ProgressBar value={pct} />
         </div>
       )}
 
       {!installing && (
         <>
-          <button className="btn-primary" onClick={onInstall}>
+          <button className="btn-primary btn-sm" onClick={onInstall}>
             Install &amp; restart
           </button>
-          <button className="btn-ghost" onClick={() => setDismissed(true)}>
+          <button className="btn-ghost btn-sm" onClick={() => setDismissed(true)}>
             Later
           </button>
         </>

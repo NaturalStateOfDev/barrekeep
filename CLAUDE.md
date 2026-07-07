@@ -21,7 +21,9 @@ server, no cloud database.
 - **Storage:** DuckDB embedded (single file at `data/scheduler.duckdb`)
 - **Secrets:** Tauri Stronghold plugin (OS keychain, never on disk in plaintext)
 - **AI:** Anthropic SDK for prompt-driven schedule analysis
-- **Sling integration:** Python scripts in `scripts/`, called as Tauri sidecars
+- **Sling integration:** in-process Rust (`src-tauri/src/sling.rs` — pull, push,
+  dedupe, rate limiting). Only `scripts/propose.py` (the schedule algorithm)
+  still runs as a sidecar, fed a JSON payload over stdin.
 
 ## Repository layout
 
@@ -61,9 +63,10 @@ See `docs/architecture.md` for the full map. The summary:
 ## Reference data
 
 The class-type/position mapping, weekly cap defaults, and special scheduling
-rules are documented in `docs/data-model.md` and seeded into DuckDB at first
-launch — see `src-tauri/src/seed.rs`. The seed is placeholder demo data;
-real teachers and qualifications come from the Sling pull.
+rules are documented in `docs/data-model.md`. There is no seed data — a fresh
+install starts empty on purpose (`src-tauri/src/seed.rs` is intentionally a
+no-op) so it's obvious whether Sling is actually connected. The roster,
+positions, and qualifications all arrive via the Sling pull or roster refresh.
 
 ## Working on this project
 
@@ -96,6 +99,17 @@ When you (Claude) edit code in this repo:
 - **DST transitions.** The studio observes US Central Time; the scripts
   currently send a fixed `-05:00` offset on date queries. Spring-forward /
   fall-back will need explicit timezone handling.
+- **DuckDB UPDATEs are landmines near indexes and foreign keys.** An UPDATE
+  that touches an indexed column (UNIQUE/PK) is executed as DELETE+INSERT
+  internally, and fails with "still referenced by a foreign key in a
+  different table" if any row references it. Migrations 0003, 0004, and 0009
+  each removed constraints for this reason. Rules: never put UNIQUE (beyond
+  the PK) or incoming FKs on a table whose rows get UPDATEd; never UPDATE a
+  PK; prefer compare-before-write so unchanged rows are not touched at all.
+  The engine version is tilde-pinned in `src-tauri/Cargo.toml` (crate
+  `1.1MMPP` = libduckdb `1.MM.PP`) because engine bumps change the on-disk
+  format and are not backward-readable — bump deliberately, via the
+  dependabot PR.
 - **Creating a webview window (the Sling login) must NOT happen on the UI
   thread on Windows.** `WebviewWindowBuilder::build()` blocks until WebView2's
   controller-ready notification arrives, and that only fires from the event

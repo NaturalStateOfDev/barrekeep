@@ -1,3 +1,5 @@
+import { AlertTriangle } from "lucide-react";
+
 interface Props {
   lastPulledAt: string;
   generatedAt: string;
@@ -6,18 +8,10 @@ interface Props {
 
 export function StaleBanner({ lastPulledAt, onRegenerate }: Props) {
   return (
-    <div style={{
-      padding: "0.5rem 0.75rem",
-      background: "hsl(36 60% 92%)",
-      border: "1px solid hsl(36 60% 70%)",
-      borderRadius: "var(--radius)",
-      marginBottom: "0.5rem",
-      display: "flex",
-      alignItems: "center",
-      gap: "0.75rem",
-    }}>
-      <span>&#9888; This proposal was generated before the latest Sling pull ({prettyAgo(lastPulledAt)}).</span>
-      <button className="btn-ghost" onClick={onRegenerate}>Regenerate</button>
+    <div className="bk-stale-banner">
+      <AlertTriangle size={16} style={{ color: "var(--color-warning)", flexShrink: 0 }} />
+      <span>This proposal was generated before the latest Sling pull ({prettyAgo(lastPulledAt)}).</span>
+      <button className="btn-ghost btn-sm" onClick={onRegenerate}>Regenerate</button>
     </div>
   );
 }

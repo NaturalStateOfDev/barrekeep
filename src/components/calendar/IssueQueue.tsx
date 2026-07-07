@@ -28,7 +28,10 @@ export function IssueQueue({
   return (
     <aside className="bk-issue-queue" aria-label="schedule issues">
       <div className="bk-issue-queue-head">
-        Issues ({visible.length})
+        Issues
+        <span className={`bk-issue-count${visible.length === 0 ? " bk-clear" : ""}`}>
+          {visible.length}
+        </span>
       </div>
       <div className="bk-issue-queue-body">
         {visible.length === 0 && <div className="muted">No issues.</div>}

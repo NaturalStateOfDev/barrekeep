@@ -1,5 +1,5 @@
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
-import { isoWeekKey } from "./dates";
+import { isoWeekKey, wallClock } from "./dates";
 
 function overlaps(
   blocks: AvailabilityBlock[],
@@ -9,7 +9,7 @@ function overlaps(
 ): boolean {
   return blocks.some((b) => {
     if (b.sling_user_id !== userId) return false;
-    return b.starts_at < shiftEndIso && b.ends_at > shiftStartIso;
+    return wallClock(b.starts_at) < shiftEndIso && wallClock(b.ends_at) > shiftStartIso;
   });
 }
 

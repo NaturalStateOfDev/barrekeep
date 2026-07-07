@@ -1,0 +1,28 @@
+/* ============================================================
+   Barrekeep — Spacing, radius & elevation tokens  ·  Barre & Bloom
+   Soft, rounded, gently elevated: cream cards float on faint warm-
+   brown shadows; the plum primary carries a soft plum shadow.
+   ============================================================ */
+
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-8: 48px;
+
+  /* Radii — soft boutique rounding */
+  --radius-sm: 9px;    /* mini buttons, chips, icon boxes */
+  --radius: 11px;      /* buttons, inputs, nav items */
+  --radius-lg: 18px;   /* cards, panels */
+  --radius-xl: 22px;   /* modals, large surfaces */
+  --radius-pill: 999px;
+
+  /* Elevation — soft, warm brown-toned */
+  --shadow-card: 0 10px 26px rgba(88, 60, 40, 0.06);
+  --shadow-raised: 0 8px 18px rgba(109, 74, 128, 0.26); /* plum primary button */
+  --shadow-modal: 0 24px 60px rgba(70, 48, 34, 0.20);
+  --shadow-panel: -4px 0 24px rgba(70, 48, 34, 0.10);
+}

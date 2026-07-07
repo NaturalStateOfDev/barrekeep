@@ -1,0 +1,57 @@
+/* ============================================================
+   Barrekeep — Color tokens  ·  "Barre & Bloom" warm-plum theme
+   A boutique-studio palette: warm oat-paper canvas, soft cream
+   cards, a refined plum accent, blush + sage + ochre accents.
+   Base values + semantic aliases (components reference the aliases).
+   ============================================================ */
+
+:root {
+  /* ---- Base neutrals (warm oat paper) ---- */
+  --color-bg: #f4ede4;          /* app canvas */
+  --color-surface: #fdfaf5;     /* cards, panels */
+  --color-surface-alt: #f7f0e8; /* sunken rows, hover fills, user chip */
+  --color-border: #e2d5c8;      /* structural borders, sidebar edge */
+  --color-border-card: #ece1d3; /* soft card outline */
+  --color-text: #2f2733;        /* deep aubergine-brown ink */
+  --color-text-muted: #8a7d84;  /* secondary / meta */
+
+  /* ---- Accent (refined plum) ---- */
+  --color-accent: #6d4a80;
+  --color-accent-hover: #5d3d6f;
+  --color-accent-soft: #ece1ef;      /* soft ghost / tint fill */
+  --color-accent-soft-text: #6d4a80; /* text/icon on soft fill */
+
+  /* ---- Status colors (boutique-warm, harmonized) ---- */
+  --color-success: #4f6b50;   --color-success-bg: #e4ece2;   /* sage */
+  --color-danger:  #a24d6e;   --color-danger-bg:  #f2e0e6;   /* berry */
+  --color-warning: #8a6320;   --color-warning-bg: #f3e7d3;   /* ochre */
+  --color-info:    #3f7278;   --color-info-bg:    #dcebec;   /* teal */
+
+  /* Softer severity strokes (issue-card left borders) */
+  --color-danger-stroke:  #c77e93;
+  --color-warning-stroke: #cf9a54;
+  --color-info-stroke:    #7fa27f;
+
+  /* Legacy strong aliases (kept so older component code resolves) */
+  --color-danger-strong: var(--color-danger);
+  --color-warning-strong: var(--color-warning);
+  --color-info-strong: var(--color-info);
+
+  /* ---- Semantic aliases (prefer these) ---- */
+  --surface-page: var(--color-bg);
+  --surface-card: var(--color-surface);
+  --surface-sunken: var(--color-surface-alt);
+  --border-hairline: var(--color-border);
+  --border-card: var(--color-border-card);
+  --text-body: var(--color-text);
+  --text-muted: var(--color-text-muted);
+  --text-on-accent: #ffffff;
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-hover);
+  --accent-soft: var(--color-accent-soft);
+  --accent-soft-text: var(--color-accent-soft-text);
+
+  /* Focus ring */
+  --focus-ring: #c3aecd;
+  --focus-fill: #f7f0e8;
+}

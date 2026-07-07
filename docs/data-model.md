@@ -31,21 +31,42 @@ CREATE TABLE teachers (
 );
 ```
 
-### `sling_candidates`
+### `month_pulls`
 
-Mirror of Sling's roster, filtered to active + holds a teaching position +
-tagged to the home location location. Wiped + repopulated on every pull. The
-teachers page's "Add teacher from Sling" picker reads from here, minus
-users already in `teachers`.
+One row per pulled month — when and what the last pull for that month brought
+in. `get_proposal` compares `pulled_at` against `generated_at` to flag stale
+proposals. (The `sling_candidates` table that used to live here was dropped in
+migration 0008 — the roster now syncs directly into `teachers`.)
 
 ```sql
-CREATE TABLE sling_candidates (
-  sling_user_id INTEGER PRIMARY KEY,
-  display_name  VARCHAR NOT NULL,
-  active        BOOLEAN NOT NULL,
-  locations     VARCHAR,
-  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE month_pulls (
+  target_month         VARCHAR PRIMARY KEY,  -- 'YYYY-MM'
+  pulled_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  user_count           INTEGER NOT NULL,
+  qual_count           INTEGER NOT NULL,
+  availability_count   INTEGER NOT NULL,
+  external_shift_count INTEGER NOT NULL
 );
+```
+
+### `external_sling_shifts`
+
+Shifts that already exist in Sling (pulled per month, plus trailing history
+used by the proposer's slot template). Replaced per target month on each pull.
+
+```sql
+CREATE TABLE external_sling_shifts (
+  sling_shift_id    BIGINT PRIMARY KEY,
+  target_month      VARCHAR NOT NULL,   -- denormalized for fast WHERE
+  shift_date        DATE NOT NULL,
+  start_time        VARCHAR NOT NULL,   -- 'HH:MM'
+  end_time          VARCHAR NOT NULL,
+  sling_user_id     INTEGER,            -- nullable: unassigned shifts exist
+  sling_position_id INTEGER NOT NULL,
+  status            VARCHAR NOT NULL,   -- 'planning' | 'published'
+  pulled_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ext_shift_month ON external_sling_shifts(target_month);
 ```
 
 ### `studio_config`
@@ -76,12 +97,22 @@ Class types and Sling position mapping.
 ```sql
 CREATE TABLE positions (
   sling_position_id  INTEGER PRIMARY KEY,
-  class_name         VARCHAR NOT NULL UNIQUE,
+  class_name         VARCHAR NOT NULL,  -- UNIQUE dropped in migration 0009 (DuckDB indexed-update limitation)
   duration_minutes   INTEGER NOT NULL DEFAULT 60,
   is_special         BOOLEAN NOT NULL DEFAULT FALSE,  -- Focus, etc.
   active             BOOLEAN NOT NULL DEFAULT TRUE
 );
 ```
+
+> **Why no UNIQUE on `class_name`, and no FKs into this table** (migration
+> 0009): DuckDB executes an UPDATE that touches an indexed column as
+> DELETE+INSERT, which fails with "still referenced by a foreign key in a
+> different table" whenever `teacher_qualifications` / `proposal_shifts` rows
+> reference the position. `sync_roster()` must update `class_name` on every
+> pull, so both the UNIQUE constraint and the incoming FKs had to go —
+> the same limitation that motivated migrations 0003 and 0004. Integrity now
+> lives in application code: positions are upserted before anything
+> references them.
 
 ### `teacher_qualifications`
 
@@ -90,7 +121,7 @@ Many-to-many: which teachers can teach which classes (from Sling group membershi
 ```sql
 CREATE TABLE teacher_qualifications (
   sling_user_id      INTEGER NOT NULL REFERENCES teachers(sling_user_id),
-  sling_position_id  INTEGER NOT NULL REFERENCES positions(sling_position_id),
+  sling_position_id  INTEGER NOT NULL,  -- FK to positions dropped in migration 0009
   is_blocklisted     BOOLEAN NOT NULL DEFAULT FALSE,  -- manager override
   blocklist_reason   VARCHAR,
   PRIMARY KEY (sling_user_id, sling_position_id)
@@ -133,7 +164,7 @@ CREATE SEQUENCE seq_proposals;
 
 ### `proposal_shifts`
 
-Generated assignments. One row per slot. Co-teach rows have `is_coteach = TRUE` and link to a sibling row via `coteach_partner_shift_id`.
+Generated assignments. One row per slot. Co-teach rows have `is_coteach = TRUE`; propose.py emits the pairing as a `coteach_label` string ("Teacher A + Teacher E") on a single row (migration 0002) rather than sibling rows linked via `coteach_partner_shift_id`.
 
 ```sql
 CREATE TABLE proposal_shifts (
@@ -142,13 +173,14 @@ CREATE TABLE proposal_shifts (
   shift_date               DATE NOT NULL,
   start_time               VARCHAR NOT NULL,  -- 'HH:MM'
   end_time                 VARCHAR NOT NULL,
-  sling_position_id        INTEGER NOT NULL REFERENCES positions(sling_position_id),
+  sling_position_id        INTEGER NOT NULL,  -- FK to positions dropped in migration 0009
   sling_user_id            INTEGER REFERENCES teachers(sling_user_id),  -- NULL = dropped
   generation_reason        VARCHAR NOT NULL,  -- 'primary, under target', 'format-flex', etc.
   flag                     VARCHAR,           -- 'TEACHER_X - VERIFY', 'NEW 7AM SLOT', etc.
   is_coteach               BOOLEAN NOT NULL DEFAULT FALSE,
-  coteach_partner_shift_id BIGINT REFERENCES proposal_shifts(id),
-  is_dropped               BOOLEAN NOT NULL DEFAULT FALSE
+  coteach_partner_shift_id BIGINT,  -- self-FK dropped in migration 0009; always NULL today
+  is_dropped               BOOLEAN NOT NULL DEFAULT FALSE,
+  coteach_label            VARCHAR  -- added in migration 0002
 );
 CREATE SEQUENCE seq_proposal_shifts;
 CREATE INDEX idx_prop_shifts_date ON proposal_shifts(proposal_id, shift_date, start_time);
@@ -204,8 +236,8 @@ Audit log of every Anthropic API call: which prompt, what input, what came back,
 ```sql
 CREATE TABLE claude_runs (
   id                   BIGINT PRIMARY KEY DEFAULT nextval('seq_claude_runs'),
-  prompt_id            BIGINT NOT NULL REFERENCES prompts(id),
-  proposal_id          BIGINT REFERENCES proposals(id),
+  prompt_id            BIGINT,   -- FKs dropped in migration 0004; nullable until prompt syncing exists
+  proposal_id          BIGINT,   -- logically references proposals(id), enforced in app code
   model               VARCHAR NOT NULL,    -- 'claude-opus-4-7' etc.
   input_tokens         INTEGER NOT NULL,
   output_tokens        INTEGER NOT NULL,
@@ -287,13 +319,11 @@ FROM claude_runs
 WHERE date_trunc('month', ran_at) = date_trunc('month', now());
 ```
 
-## Reference data (seeded on first run)
+## Reference data
 
-See `src/lib/seed.ts` for the initial values:
-
-- 10 teachers (current roster)
-- 7 positions (Empower, Focus, Breaking Down the Barre, Align, Classic, Define, Reform)
-- All 35 (teacher × position) qualifications from the Sling group memberships
-- One blocklist row: Teacher E × Reform (manager hasn't approved them yet)
-
-The seed runs only if `teachers` is empty. After that, edits are user-driven.
+There is no seed data (`src-tauri/src/seed.rs` is intentionally a no-op, and
+migration 0008 purged the placeholder demo roster older installs carried).
+A fresh install starts empty; the roster, positions, and qualifications
+arrive via the Sling pull or the Teachers page's "Refresh from Sling".
+Weekly caps default to target 4 / max 5 on import and are edited in-app;
+position duration/special flags are edited in-app after import.
