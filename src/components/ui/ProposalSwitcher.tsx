@@ -1,24 +1,32 @@
 import { useState } from "react";
 import { ChevronDown, Plus } from "lucide-react";
-import type { ProposalSummary } from "../../types";
 import { monthLabel } from "../../lib/dates";
 
+export interface MonthEntry {
+  month: string; // "YYYY-MM"
+  /** The month's current (or newest) proposal — selected when the month is picked. */
+  proposalId: number;
+  draftCount: number;
+}
+
 interface Props {
-  proposals: ProposalSummary[];
-  /** Selected proposal id, or null when starting a new month. */
-  value: number | null;
-  /** Title to show when no proposal is selected (new-month mode). */
+  months: MonthEntry[];
+  /** Selected month, or null when starting a new month. */
+  value: string | null;
+  /** Title to show when no month is selected (new-month mode). */
   fallbackTitle: string;
-  onChange: (id: number) => void;
+  onChange: (proposalId: number) => void;
   onNew: () => void;
 }
 
 /** The Proposals page title: a serif month heading that drops down over the
- *  proposal history, with a "Start a new month…" entry at the bottom. */
-export function ProposalSwitcher({ proposals, value, fallbackTitle, onChange, onNew }: Props) {
+ *  scheduled months, with a "Start a new month…" entry at the bottom.
+ *  Draft/version history for the selected month lives in the sibling
+ *  VersionSwitcher. */
+export function ProposalSwitcher({ months, value, fallbackTitle, onChange, onNew }: Props) {
   const [open, setOpen] = useState(false);
-  const current = value != null ? proposals.find((p) => p.id === value) : undefined;
-  const title = current ? monthLabel(current.target_month) : fallbackTitle;
+  const current = value != null ? months.find((m) => m.month === value) : undefined;
+  const title = current ? monthLabel(current.month) : fallbackTitle;
 
   return (
     <div className="bk-switcher">
@@ -30,23 +38,24 @@ export function ProposalSwitcher({ proposals, value, fallbackTitle, onChange, on
         <>
           <div className="bk-switcher-backdrop" onClick={() => setOpen(false)} />
           <div className="bk-switcher-menu">
-            {proposals.map((p) => (
+            {months.map((m) => (
               <button
-                key={p.id}
-                className={`bk-switcher-item ${p.id === value ? "active" : ""}`}
+                key={m.month}
+                className={`bk-switcher-item ${m.month === value ? "active" : ""}`}
                 onClick={() => {
-                  onChange(p.id);
+                  onChange(m.proposalId);
                   setOpen(false);
                 }}
               >
                 <span>
-                  {monthLabel(p.target_month)}{" "}
-                  <span className="meta">· #{p.id} · {p.algorithm_version}</span>
+                  {monthLabel(m.month)}
+                  {m.draftCount > 1 && (
+                    <span className="meta"> · {m.draftCount} drafts</span>
+                  )}
                 </span>
-                <span className="status">{p.is_current ? "current" : "superseded"}</span>
               </button>
             ))}
-            {proposals.length > 0 && <div className="bk-switcher-divider" />}
+            {months.length > 0 && <div className="bk-switcher-divider" />}
             <button
               className="bk-switcher-new"
               onClick={() => {

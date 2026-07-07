@@ -1,9 +1,11 @@
 //! In-app browser-login flow for Sling.
 //!
 //! Opens a Tauri webview window pointed at app.getsling.com with an
-//! injected interceptor script. When the page makes its first
-//! authenticated request to api.getsling.com, the script triggers a
-//! same-origin navigation to `/__bk_capture?t=<token>`. The Rust-side
+//! injected interceptor script. When the page exchanges its first
+//! authenticated request or response with api.getsling.com (normally the
+//! login POST's response, which carries the token in its Authorization
+//! header), the script triggers a same-origin navigation to
+//! `/__bk_capture?t=<token>`. The Rust-side
 //! `on_navigation` hook intercepts that URL, extracts the token into the
 //! in-memory SlingToken state, then hands persistence + window-close off
 //! to a background thread.
