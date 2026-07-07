@@ -1895,21 +1895,23 @@ pub fn list_external_shifts_for_month(
 // ============================================================
 
 #[tauri::command]
-pub fn open_sling_login_window(app: tauri::AppHandle) -> Result<(), String> {
-    // Build the login webview on the MAIN thread. Tauri runs sync commands on a
-    // worker thread; creating a WebView2 window off the main thread deadlocks the
-    // event-loop message pump on Windows — the window frame appears but its
-    // content never initializes and the whole app freezes (the window won't even
-    // close). WebKitGTK tolerates off-thread creation, so this only bit on
-    // Windows. run_on_main_thread queues the build onto the event loop, where
-    // webview creation is valid; the command returns immediately.
-    let app_for_build = app.clone();
-    app.run_on_main_thread(move || {
-        if let Err(e) = crate::sling_login::open_login_window(app_for_build) {
-            eprintln!("[sling_login] failed to open login window: {e}");
-        }
-    })
-    .map_err(err)
+pub async fn open_sling_login_window(app: tauri::AppHandle) -> Result<(), String> {
+    // Webview creation must NOT run on the main/UI thread. On Windows,
+    // WebviewWindowBuilder::build() blocks while WebView2 asynchronously creates
+    // its controller, and that controller-ready notification is only delivered
+    // from the event loop's top-level message processing. Calling build() *on*
+    // the main thread — directly from a sync command, OR via run_on_main_thread —
+    // nests it inside a user-event callback, so the notification never arrives and
+    // build() deadlocks: the window frame paints but its content never initializes
+    // (and DevTools never opens). WebKitGTK on Linux has no async-controller step,
+    // so this only bit on Windows.
+    //
+    // Making this command `async` runs it on the async runtime (a worker thread).
+    // From there build() dispatches the actual creation to the event loop's
+    // top-level context — where the controller wait can complete — and blocks the
+    // worker, not the UI, until the window is ready. This is the pattern in
+    // Tauri's own docs for opening a window from a command.
+    crate::sling_login::open_login_window(app).map_err(err)
 }
 
 #[tauri::command]
