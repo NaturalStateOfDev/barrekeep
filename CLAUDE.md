@@ -113,3 +113,16 @@ When you (Claude) edit code in this repo:
   `1.1MMPP` = libduckdb `1.MM.PP`) because engine bumps change the on-disk
   format and are not backward-readable — bump deliberately, via the
   dependabot PR.
+- **Creating a webview window (the Sling login) must NOT happen on the UI
+  thread on Windows.** `WebviewWindowBuilder::build()` blocks until WebView2's
+  controller-ready notification arrives, and that only fires from the event
+  loop's top-level message processing. Calling `build()` on the main thread —
+  directly from a sync command, or via `run_on_main_thread` — nests it inside a
+  user-event callback, the notification never arrives, and `build()` deadlocks:
+  the window frame paints but the content stays blank. Fix: make the opening
+  command `async` so it runs off the UI thread (see
+  `open_sling_login_window` in `commands.rs`). WebKitGTK on Linux has no
+  async-controller step, so this only bites on Windows.
+- **On Windows, the app's `eprintln!`/stderr does NOT reliably reach the
+  `tauri dev` terminal.** "No errors in the logs" can be misleading; to trace a
+  Windows-only webview/runtime issue, log to a temp file instead.

@@ -14,16 +14,18 @@ name: ci
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   warm-cache:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -35,6 +37,9 @@ jobs:
         with:
           workspaces: src-tauri -> target
           shared-key: "barrekeep" # must match release.yml
+          # Only the default branch writes the shared cache; PR runs restore it
+          # read-only so a branch can't overwrite it with its own artifacts.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: npm ci

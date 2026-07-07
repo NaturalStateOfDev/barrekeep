@@ -32,12 +32,12 @@ anyhow = "1"
 # HTTP client for the Anthropic API. Sync (blocking) is fine — Tauri commands
 # run on a worker thread pool so blocking calls don't stall the main thread.
 # Using ureq instead of reqwest to keep compile time and binary size down.
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 # Persistent secret storage (OS keychain on macOS/Windows, in-process vault on Linux).
 # Holds the Sling auth token between sessions. CLAUDE.md: never plaintext, always keychain.
 tauri-plugin-stronghold = "2"
 # SHA-256 for deriving the Stronghold vault encryption key at startup.
-sha2 = "0.10"
+sha2 = "0.11"
 chrono = "0.4"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

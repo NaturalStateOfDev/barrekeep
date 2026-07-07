@@ -142,26 +142,33 @@ pub(crate) fn call_anthropic(
         ]
     });
 
+    let agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(120)))
+        .build()
+        .new_agent();
     let started = Instant::now();
-    let resp = ureq::post(ANTHROPIC_URL)
-        .set("x-api-key", api_key)
-        .set("anthropic-version", ANTHROPIC_VERSION)
-        .set("content-type", "application/json")
-        .timeout(Duration::from_secs(120))
+    let resp = agent
+        .post(ANTHROPIC_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("content-type", "application/json")
         .send_json(&body);
     let duration_ms = started.elapsed().as_millis() as u32;
 
-    let resp = match resp {
+    let mut resp = match resp {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, r)) => {
-            let body = r.into_string().unwrap_or_default();
-            anyhow::bail!("Anthropic API returned HTTP {code}: {body}");
-        }
         Err(e) => anyhow::bail!("Anthropic API call failed: {e}"),
     };
+    let status = resp.status().as_u16();
+    if !(200..=299).contains(&status) {
+        let body = resp.body_mut().read_to_string().unwrap_or_default();
+        anyhow::bail!("Anthropic API returned HTTP {status}: {body}");
+    }
 
     let api_response: ApiResponse = resp
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| anyhow::anyhow!("could not parse Anthropic response: {e}"))?;
 
     let raw_output = api_response

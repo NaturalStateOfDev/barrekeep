@@ -250,64 +250,80 @@ fn http_get(token: &str, url: &str) -> Result<serde_json::Value> {
     http_get_with_query(token, url, &[])
 }
 
+/// A ureq agent that surfaces non-2xx responses as `Ok` instead of an `Err`, so
+/// we can read the body and translate Sling's status codes ourselves. ureq 3
+/// otherwise collapses 4xx/5xx into `Error::StatusCode` and drops the body.
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
+}
+
+/// Map a ureq 3 response into parsed JSON, translating the statuses the command
+/// layer keys on (sling-401 = token expired, sling-429 = rate limit, sling-1010
+/// = Cloudflare block) into sentinel errors.
+fn map_sling_response(
+    resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    url: &str,
+) -> Result<serde_json::Value> {
+    match resp {
+        Ok(mut r) => match r.status().as_u16() {
+            401 => Err(anyhow!("sling-401")),
+            429 => Err(anyhow!("sling-429")),
+            1010 => Err(anyhow!("sling-1010")),
+            c if (200..=299).contains(&c) => r
+                .body_mut()
+                .read_json::<serde_json::Value>()
+                .with_context(|| format!("invalid JSON from {url}")),
+            c => {
+                let body = r.body_mut().read_to_string().unwrap_or_default();
+                Err(anyhow!("sling-{c}: {body}"))
+            }
+        },
+        Err(e) => Err(anyhow!("sling-network: {e}")),
+    }
+}
+
 /// Like http_get but routes query params through ureq's .query() method so
 /// reserved characters (notably `:` in ISO datetimes and `/` in the
 /// dates= separator) get percent-encoded. Matches what Python's `requests`
 /// does when you pass a params dict.
 fn http_get_with_query(token: &str, url: &str, query: &[(&str, &str)]) -> Result<serde_json::Value> {
-    let mut req = ureq::get(url)
-        .set("Authorization", token)
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .set("Origin", "https://app.getsling.com")
-        .set("Referer", "https://app.getsling.com/")
-        .set("Sec-Fetch-Dest", "empty")
-        .set("Sec-Fetch-Mode", "cors")
-        .set("Sec-Fetch-Site", "same-site")
-        .set("Accept", "application/json");
+    let mut req = http_agent()
+        .get(url)
+        .header("Authorization", token)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Origin", "https://app.getsling.com")
+        .header("Referer", "https://app.getsling.com/")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-site")
+        .header("Accept", "application/json");
     for (k, v) in query {
-        req = req.query(k, v);
+        req = req.query(*k, *v);
     }
-    let resp = req.call();
-    match resp {
-        Ok(r) => Ok(r.into_json::<serde_json::Value>()
-            .with_context(|| format!("invalid JSON from {url}"))?),
-        Err(ureq::Error::Status(401, _)) => Err(anyhow!("sling-401")),
-        Err(ureq::Error::Status(429, _)) => Err(anyhow!("sling-429")),
-        Err(ureq::Error::Status(1010, _)) => Err(anyhow!("sling-1010")),
-        Err(ureq::Error::Status(code, r)) => {
-            let body = r.into_string().unwrap_or_default();
-            Err(anyhow!("sling-{code}: {}", body))
-        }
-        Err(e) => Err(anyhow!("sling-network: {e}")),
-    }
+    map_sling_response(req.call(), url)
 }
 
 /// POST JSON with browser-like headers + percent-encoded query params.
 /// Returns parsed JSON on 2xx; maps known statuses to sentinel errors that
 /// the command layer recognizes (sling-401, sling-429, sling-1010).
 fn http_post(token: &str, url: &str, query: &[(&str, &str)], body: &serde_json::Value) -> Result<serde_json::Value> {
-    let mut req = ureq::post(url)
-        .set("Authorization", token)
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .set("Origin", "https://app.getsling.com")
-        .set("Referer", "https://app.getsling.com/")
-        .set("Sec-Fetch-Dest", "empty")
-        .set("Sec-Fetch-Mode", "cors")
-        .set("Sec-Fetch-Site", "same-site")
-        .set("Accept", "application/json, text/plain, */*");
-    for (k, v) in query { req = req.query(k, v); }
-    match req.send_json(body.clone()) {
-        Ok(r) => Ok(r.into_json::<serde_json::Value>()
-            .with_context(|| format!("invalid JSON from {url}"))?),
-        Err(ureq::Error::Status(401, _)) => Err(anyhow!("sling-401")),
-        Err(ureq::Error::Status(429, _)) => Err(anyhow!("sling-429")),
-        Err(ureq::Error::Status(1010, _)) => Err(anyhow!("sling-1010")),
-        Err(ureq::Error::Status(code, r)) => {
-            let b = r.into_string().unwrap_or_default();
-            Err(anyhow!("sling-{code}: {b}"))
-        }
-        Err(e) => Err(anyhow!("sling-network: {e}")),
+    let mut req = http_agent()
+        .post(url)
+        .header("Authorization", token)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Origin", "https://app.getsling.com")
+        .header("Referer", "https://app.getsling.com/")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-site")
+        .header("Accept", "application/json, text/plain, */*");
+    for (k, v) in query {
+        req = req.query(*k, *v);
     }
+    map_sling_response(req.send_json(body), url)
 }
 
 const PUSH_MAX_RETRIES: u32 = 3;
