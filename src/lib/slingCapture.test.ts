@@ -7,20 +7,9 @@ import { describe, expect, it, vi } from "vitest";
 const TOKEN = "0123456789abcdef0123456789abcdef"; // >= 20 chars
 
 class FakeXHR {
-  __listeners: Record<string, Array<() => void>> = {};
-  __responseHeaders: Record<string, string> = {};
-  addEventListener(ev: string, fn: () => void) {
-    (this.__listeners[ev] ??= []).push(fn);
-  }
   open(_method: string, _url: string) {}
   setRequestHeader(_name: string, _value: string) {}
-  getResponseHeader(name: string): string | null {
-    return this.__responseHeaders[name.toLowerCase()] ?? null;
-  }
   send() {}
-  fireLoad() {
-    for (const fn of this.__listeners["load"] ?? []) fn.call(this);
-  }
 }
 
 interface Harness {
@@ -34,10 +23,8 @@ interface Harness {
 }
 
 /** Load a fresh copy of the capture script against faked globals. */
-function loadScript(fetchResult?: unknown): Harness {
-  const fetchMock = vi.fn(() =>
-    Promise.resolve(fetchResult ?? { url: "", headers: { get: () => null } }),
-  );
+function loadScript(): Harness {
+  const fetchMock = vi.fn(() => Promise.resolve({ url: "", headers: { get: () => null } }));
   const window: Harness["window"] = {
     fetch: fetchMock,
     location: {
@@ -79,9 +66,11 @@ function capturedUrl(h: Harness): string | undefined {
   return h.window.location.replace.mock.calls[0]?.[0];
 }
 
-const flush = () => new Promise((r) => setTimeout(r, 0));
-
-describe("request-header capture (existing behavior)", () => {
+// Capture keys off the Authorization REQUEST header. On an already-signed-in
+// session the SPA's first /v1/ call carries it, so this fires ~instantly;
+// reading the response side is impossible cross-origin (see the script's
+// header comment), which is why there is no response-capture path to test.
+describe("request-header capture", () => {
   it("captures from a fetch with an Authorization header", () => {
     const h = loadScript();
     h.window.fetch("https://api.getsling.com/v1/account", {
@@ -92,9 +81,21 @@ describe("request-header capture (existing behavior)", () => {
     );
   });
 
+  it("captures from a fetch whose init.headers is a Headers instance", () => {
+    const h = loadScript();
+    const headers = new Map([["authorization", TOKEN]]);
+    h.window.fetch("https://api.getsling.com/v1/account", {
+      headers: { get: (k: string) => headers.get(k.toLowerCase()) ?? null },
+    });
+    expect(capturedUrl(h)).toContain(`t=${encodeURIComponent(TOKEN)}`);
+  });
+
   it("captures from an XHR setRequestHeader and extracts the org id", () => {
     const h = loadScript();
-    const xhr = new h.XHR();
+    const xhr = new h.XHR() as FakeXHR & {
+      open: (m: string, u: string) => void;
+      setRequestHeader: (n: string, v: string) => void;
+    };
     xhr.open("GET", "https://api.getsling.com/v1/8675309/shifts");
     xhr.setRequestHeader("Authorization", TOKEN);
     expect(capturedUrl(h)).toContain(`t=${encodeURIComponent(TOKEN)}`);
@@ -111,57 +112,11 @@ describe("request-header capture (existing behavior)", () => {
     });
     expect(h.window.location.replace).not.toHaveBeenCalled();
   });
-});
 
-describe("response-header capture (login POST carries the token)", () => {
-  it("captures the authorization header from a fetch response", async () => {
-    const h = loadScript({
-      url: "https://api.getsling.com/v1/account/login",
-      headers: {
-        get: (n: string) => (n.toLowerCase() === "authorization" ? TOKEN : null),
-      },
-    });
-    // Login POST itself has no Authorization request header.
-    h.window.fetch("https://api.getsling.com/v1/account/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-    await flush();
-    expect(capturedUrl(h)).toBe(
-      `https://app.getsling.com/__bk_capture?t=${encodeURIComponent(TOKEN)}`,
-    );
-  });
-
-  it("captures the authorization header from an XHR response", () => {
+  it("only captures once", () => {
     const h = loadScript();
-    const xhr = new h.XHR();
-    xhr.open("POST", "https://api.getsling.com/v1/account/login");
-    xhr.__responseHeaders["authorization"] = TOKEN;
-    xhr.fireLoad();
-    expect(capturedUrl(h)).toBe(
-      `https://app.getsling.com/__bk_capture?t=${encodeURIComponent(TOKEN)}`,
-    );
-  });
-
-  it("ignores response headers from non-api hosts", async () => {
-    const h = loadScript({
-      url: "https://cdn.example.com/asset.js",
-      headers: { get: () => TOKEN },
-    });
-    h.window.fetch("https://cdn.example.com/asset.js");
-    await flush();
-    expect(h.window.location.replace).not.toHaveBeenCalled();
-  });
-
-  it("does not double-capture when both request and response match", async () => {
-    const h = loadScript({
-      url: "https://api.getsling.com/v1/account",
-      headers: { get: () => TOKEN },
-    });
-    h.window.fetch("https://api.getsling.com/v1/account", {
-      headers: { Authorization: TOKEN },
-    });
-    await flush();
+    h.window.fetch("https://api.getsling.com/v1/account", { headers: { Authorization: TOKEN } });
+    h.window.fetch("https://api.getsling.com/v1/other", { headers: { Authorization: TOKEN } });
     expect(h.window.location.replace).toHaveBeenCalledTimes(1);
   });
 });

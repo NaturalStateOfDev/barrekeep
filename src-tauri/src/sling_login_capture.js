@@ -5,20 +5,22 @@
 //     as those inputs appear. Captcha and the submit click are left
 //     to the user (lowest chance of tripping Sling's bot heuristics).
 //
-//  2. CAPTURE — monkey-patch fetch + XHR and, when the page exchanges an
-//     authenticated request OR response with api.getsling.com, trigger a
-//     same-origin navigation to a sentinel URL that the Rust on_navigation
-//     hook intercepts. The response side matters: Sling's login POST
-//     returns the bearer token in the `Authorization` RESPONSE header, so
-//     capturing there fires the moment sign-in succeeds instead of waiting
-//     (sometimes minutes) for the SPA's next authenticated main-thread
-//     request.
+//  2. CAPTURE — monkey-patch fetch + XHR and, when the page makes an
+//     authenticated request to api.getsling.com, trigger a same-origin
+//     navigation to a sentinel URL that the Rust on_navigation hook
+//     intercepts. On an already-signed-in session this fires on the very
+//     first request (the SPA's /account/session check), so capture is
+//     effectively instant; on a fresh sign-in it fires on the first
+//     authenticated call after login. (Reading the token from the response
+//     side is not possible: api.getsling.com is cross-origin to the app
+//     shell, so the Authorization response header is hidden from JS unless
+//     Sling opts in via Access-Control-Expose-Headers, which it does not.)
 //
 // Why a navigation rather than a Tauri event emit: Tauri 2 does not
 // expose the IPC bridge on external/remote URLs by default.
 //
-// Filter: URL host == api.getsling.com, path starts with /v1/,
-// Authorization header (request or response) is non-empty and >= 20 chars.
+// Filter: request URL host == api.getsling.com, path starts with /v1/,
+// Authorization header is non-empty and >= 20 chars.
 
 (() => {
   // -------- 1. AUTOFILL --------
@@ -136,34 +138,13 @@
       if (typeof h.get === "function") auth = h.get("Authorization") || h.get("authorization");
     }
     if (auth) tryCapture(url, auth);
-    const p = _fetch.apply(this, arguments);
-    // Response side: the login POST answers with the token in its
-    // Authorization response header (exposed via CORS by Sling's API).
-    if (!captured && p && typeof p.then === "function") {
-      p.then((resp) => {
-        try {
-          const h = resp && resp.headers;
-          const respAuth = h && typeof h.get === "function"
-            ? h.get("authorization") || h.get("Authorization")
-            : null;
-          if (respAuth) tryCapture((resp && resp.url) || url, respAuth);
-        } catch (_) { /* swallow */ }
-      }, () => { /* page code handles its own rejections */ });
-    }
-    return p;
+    return _fetch.apply(this, arguments);
   };
 
   // Patch XHR
   const _open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__bk_url = url;
-    // Response side (see fetch patch above).
-    this.addEventListener("load", () => {
-      try {
-        const auth = this.getResponseHeader && this.getResponseHeader("authorization");
-        if (auth) tryCapture(this.__bk_url || window.location.href, auth);
-      } catch (_) { /* swallow */ }
-    });
     return _open.apply(this, arguments);
   };
   const _setHeader = XMLHttpRequest.prototype.setRequestHeader;
