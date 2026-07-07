@@ -21,6 +21,7 @@ const CLIENT_PATH: &[u8] = b"barrekeep";
 pub const KEY_SLING_TOKEN: &[u8] = b"sling_token";
 pub const KEY_SLING_EMAIL: &[u8] = b"sling_email";
 pub const KEY_SLING_PASSWORD: &[u8] = b"sling_password";
+pub const KEY_ANTHROPIC: &[u8] = b"anthropic_key";
 
 pub struct Secrets(Mutex<Stronghold>);
 

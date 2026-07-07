@@ -1,0 +1,154 @@
+{
+ "target_month": "2026-08",
+ "home_location_id": 901,
+ "teachers": [
+  {
+   "sling_user_id": 501,
+   "display_name": "Alex T",
+   "weekly_target": 4,
+   "weekly_max": 5,
+   "is_lead": true,
+   "ranking_weight": 1.0,
+   "variety_multiplier": 1.0,
+   "active": true
+  },
+  {
+   "sling_user_id": 502,
+   "display_name": "Kay M",
+   "weekly_target": 4,
+   "weekly_max": 5,
+   "is_lead": false,
+   "ranking_weight": 1.0,
+   "variety_multiplier": 1.0,
+   "active": true
+  },
+  {
+   "sling_user_id": 503,
+   "display_name": "Cee D",
+   "weekly_target": 4,
+   "weekly_max": 5,
+   "is_lead": false,
+   "ranking_weight": 1.0,
+   "variety_multiplier": 1.0,
+   "active": true
+  }
+ ],
+ "users": [
+  {
+   "id": 501,
+   "name": "Alex",
+   "lastname": "T",
+   "groupIds": [
+    901,
+    29303965,
+    29304030
+   ]
+  },
+  {
+   "id": 502,
+   "name": "Kay",
+   "lastname": "M",
+   "groupIds": [
+    901,
+    29303965,
+    29304030
+   ]
+  },
+  {
+   "id": 503,
+   "name": "Cee",
+   "lastname": "D",
+   "groupIds": [
+    901,
+    29303965
+   ]
+  }
+ ],
+ "history_events": [
+  {
+   "type": "shift",
+   "dtstart": "2026-06-01T09:00:00-05:00",
+   "dtend": "2026-06-01T10:00:00-05:00",
+   "user": {
+    "id": 501
+   },
+   "position": {
+    "id": 29303965
+   },
+   "location": {
+    "id": 901
+   }
+  },
+  {
+   "type": "shift",
+   "dtstart": "2026-06-08T09:00:00-05:00",
+   "dtend": "2026-06-08T10:00:00-05:00",
+   "user": {
+    "id": 501
+   },
+   "position": {
+    "id": 29303965
+   },
+   "location": {
+    "id": 901
+   }
+  },
+  {
+   "type": "shift",
+   "dtstart": "2026-06-15T09:00:00-05:00",
+   "dtend": "2026-06-15T10:00:00-05:00",
+   "user": {
+    "id": 501
+   },
+   "position": {
+    "id": 29303965
+   },
+   "location": {
+    "id": 901
+   }
+  },
+  {
+   "type": "shift",
+   "dtstart": "2026-06-03T17:30:00-05:00",
+   "dtend": "2026-06-03T18:20:00-05:00",
+   "user": {
+    "id": 502
+   },
+   "position": {
+    "id": 29304030
+   },
+   "location": {
+    "id": 901
+   }
+  },
+  {
+   "type": "shift",
+   "dtstart": "2026-06-10T17:30:00-05:00",
+   "dtend": "2026-06-10T18:20:00-05:00",
+   "user": {
+    "id": 502
+   },
+   "position": {
+    "id": 29304030
+   },
+   "location": {
+    "id": 901
+   }
+  },
+  {
+   "type": "shift",
+   "dtstart": "2026-06-17T17:30:00-05:00",
+   "dtend": "2026-06-17T18:20:00-05:00",
+   "user": {
+    "id": 502
+   },
+   "position": {
+    "id": 29304030
+   },
+   "location": {
+    "id": 901
+   }
+  }
+ ],
+ "month_events": []
+}

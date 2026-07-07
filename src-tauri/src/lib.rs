@@ -8,7 +8,9 @@
 //     plugin's JS bridge)
 //   - IPC commands (exposed to the React frontend)
 
+mod algorithm;
 mod commands;
+mod editor;
 mod db;
 mod migrations;
 mod review;
@@ -52,6 +54,19 @@ pub fn run() {
                 }
                 migrations::run(&conn)?;
                 seed::run_if_empty(&conn)?;
+                // Tidy old algorithm script versions (spec: >3 versions
+                // behind AND unused >3 months → algorithms/archive/).
+                match algorithm::algorithms_dir(app.handle()) {
+                    Ok(dir) => match algorithm::archive_sweep(&conn, &dir) {
+                        Ok(moved) => {
+                            for f in moved {
+                                eprintln!("[algorithm] archived old script {f}");
+                            }
+                        }
+                        Err(e) => eprintln!("[algorithm] archive sweep failed: {e}"),
+                    },
+                    Err(e) => eprintln!("[algorithm] no algorithms dir: {e}"),
+                }
             }
             app.manage(db);
 
@@ -59,23 +74,28 @@ pub fn run() {
             // Sling token (if any). If the vault can't be opened for any
             // reason, log and continue with no token rather than killing
             // app startup.
-            let (secrets, initial_token) = match secrets::Secrets::open(&app.handle()) {
-                Ok(s) => {
-                    let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
-                        eprintln!("[secrets] failed to read sling_token: {e}");
-                        None
-                    });
-                    (Some(s), tok)
-                }
-                Err(e) => {
-                    eprintln!("[secrets] failed to open vault: {e}");
-                    (None, None)
-                }
-            };
+            let (secrets, initial_token, initial_anthropic) =
+                match secrets::Secrets::open(&app.handle()) {
+                    Ok(s) => {
+                        let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
+                            eprintln!("[secrets] failed to read sling_token: {e}");
+                            None
+                        });
+                        let anthropic = s.get(secrets::KEY_ANTHROPIC).unwrap_or_else(|e| {
+                            eprintln!("[secrets] failed to read anthropic_key: {e}");
+                            None
+                        });
+                        (Some(s), tok, anthropic)
+                    }
+                    Err(e) => {
+                        eprintln!("[secrets] failed to open vault: {e}");
+                        (None, None, None)
+                    }
+                };
             if let Some(s) = secrets {
                 app.manage(s);
             }
-            app.manage(AnthropicKey(Mutex::new(None)));
+            app.manage(AnthropicKey(Mutex::new(initial_anthropic)));
             app.manage(SlingToken(Mutex::new(initial_token)));
             app.manage(SlingOrgHint(Mutex::new(None)));
             Ok(())
@@ -91,10 +111,16 @@ pub fn run() {
             commands::list_proposals,
             commands::get_proposal,
             commands::edit_proposal_shift_teacher,
+            commands::edit_proposal_shift_position,
             commands::list_edits_for_proposal,
             commands::has_sling_token,
             commands::set_anthropic_key,
             commands::has_anthropic_key,
+            commands::get_app_setting,
+            commands::set_app_setting,
+            commands::list_algorithm_versions,
+            commands::adopt_algorithm_version,
+            commands::delete_algorithm_script,
             commands::set_sling_token,
             commands::set_sling_credentials,
             commands::has_sling_credentials,
@@ -103,6 +129,9 @@ pub fn run() {
             commands::open_sling_login_window,
             commands::discover_studio_config,
             commands::review_proposal,
+            commands::claude_edit_proposal,
+            commands::claude_draft_code_change,
+            commands::validate_code_draft,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
             commands::refresh_roster_from_sling,

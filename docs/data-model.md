@@ -327,3 +327,39 @@ A fresh install starts empty; the roster, positions, and qualifications
 arrive via the Sling pull or the Teachers page's "Refresh from Sling".
 Weekly caps default to target 4 / max 5 on import and are edited in-app;
 position duration/special flags are edited in-app after import.
+
+### `app_settings`
+
+Tiny key-value store for user preferences that belong in the DB (first key:
+`claude_model`). PK-only, no extra indexes, no FKs — `INSERT OR REPLACE`
+upserts are safe under the DuckDB constraint rules.
+
+```sql
+CREATE TABLE app_settings (
+  key        VARCHAR PRIMARY KEY,
+  value      VARCHAR NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### `algorithm_versions`
+
+Append-only history of adopted algorithm versions (migration 0010). Version 9
+is the implicit baseline: the shipped `scripts/propose.py` with empty rules.
+Adopted versions start at 10. `rules` is a full snapshot, not a delta.
+`script_file` NULL = run the shipped baseline script; otherwise a file under
+`<app_local_data>/algorithms/` (resolution also checks `algorithms/archive/`).
+Rows are inserted on explicit user adoption and never UPDATEd; "last used"
+per version is derived from `proposals.algorithm_version` + `generated_at`.
+
+```sql
+CREATE TABLE algorithm_versions (
+  version       INTEGER PRIMARY KEY,
+  description   VARCHAR NOT NULL,
+  rules         JSON NOT NULL,
+  script_file   VARCHAR,
+  created_by    VARCHAR NOT NULL,      -- 'claude' | 'user'
+  claude_run_id BIGINT,                -- provenance into claude_runs (app-enforced)
+  adopted_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```

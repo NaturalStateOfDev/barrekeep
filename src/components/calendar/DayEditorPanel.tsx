@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { X, UserRoundCog, AlertTriangle } from "lucide-react";
-import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../../types";
+import { X, UserRoundCog, Shapes, AlertTriangle } from "lucide-react";
+import type { ProposalShiftRow, Teacher, Position, AvailabilityBlock } from "../../types";
 import type { Issue } from "../../lib/issues";
 import { candidatesFor } from "../../lib/candidates";
 import { formatTimeShort, prettyDayLong } from "../../lib/dates";
@@ -12,29 +12,35 @@ interface Props {
   shifts: ProposalShiftRow[];
   allShifts: ProposalShiftRow[];
   teachers: Teacher[];
+  positions: Position[];
   qualifiedPairs: Set<string>;
   blocks: AvailabilityBlock[];
   warnings: Issue[];
   readonly: boolean;
   onClose: () => void;
   onAssign: (proposalShiftId: number, newUserId: number | null) => Promise<void>;
+  onChangeFormat: (proposalShiftId: number, newPositionId: number) => Promise<void>;
 }
 
 /** Slide-in day editor: every class that day, with a candidate list to
  *  (re)assign a teacher. Candidates show qualification / leave / cap notes. */
+type EditingState = { id: number; kind: "teacher" | "format" } | null;
+
 export function DayEditorPanel({
   iso,
   shifts,
   allShifts,
   teachers,
+  positions,
   qualifiedPairs,
   blocks,
   warnings,
   readonly,
   onClose,
   onAssign,
+  onChangeFormat,
 }: Props) {
-  const [editing, setEditing] = useState<number | null>(null);
+  const [editing, setEditing] = useState<EditingState>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,6 +49,19 @@ export function DayEditorPanel({
     setError(null);
     try {
       await onAssign(shiftId, userId);
+      setEditing(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeFormat = async (shiftId: number, positionId: number) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await onChangeFormat(shiftId, positionId);
       setEditing(null);
     } catch (e) {
       setError(String(e));
@@ -116,7 +135,34 @@ export function DayEditorPanel({
                 )}
                 {!readonly && !s.is_coteach && (
                   <div style={{ marginTop: 10 }}>
-                    {editing === s.id ? (
+                    {editing?.id === s.id && editing.kind === "format" ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <div className="bk-candidate-label">Change format</div>
+                        <div className="row" style={{ gap: 6 }}>
+                          {positions
+                            .filter((p) => p.active)
+                            .map((p) => (
+                              <button
+                                key={p.sling_position_id}
+                                className={`bk-candidate${p.sling_position_id === s.sling_position_id ? " bk-current" : ""}`}
+                                style={{ width: "auto" }}
+                                disabled={saving}
+                                onClick={() =>
+                                  p.sling_position_id === s.sling_position_id
+                                    ? setEditing(null)
+                                    : changeFormat(s.id, p.sling_position_id)
+                                }
+                              >
+                                <ClassChip className={p.class_name} size="md" />
+                              </button>
+                            ))}
+                        </div>
+                        {error && <div className="error" style={{ marginTop: 4 }}>{error}</div>}
+                        <button className="bk-candidate-cancel" onClick={() => { setEditing(null); setError(null); }}>
+                          Cancel
+                        </button>
+                      </div>
+                    ) : editing?.id === s.id && editing.kind === "teacher" ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <div className="bk-candidate-label">Assign teacher</div>
                         {candidatesFor(s, allShifts, teachers, qualifiedPairs, blocks).map((c) => (
@@ -164,9 +210,20 @@ export function DayEditorPanel({
                         </button>
                       </div>
                     ) : (
-                      <button className="btn-ghost btn-sm" onClick={() => { setEditing(s.id); setError(null); }}>
-                        <UserRoundCog size={14} /> {unassigned || s.is_dropped ? "Assign" : "Change teacher"}
-                      </button>
+                      <div className="row" style={{ gap: 6 }}>
+                        <button
+                          className="btn-ghost btn-sm"
+                          onClick={() => { setEditing({ id: s.id, kind: "teacher" }); setError(null); }}
+                        >
+                          <UserRoundCog size={14} /> {unassigned || s.is_dropped ? "Assign" : "Change teacher"}
+                        </button>
+                        <button
+                          className="btn-ghost btn-sm"
+                          onClick={() => { setEditing({ id: s.id, kind: "format" }); setError(null); }}
+                        >
+                          <Shapes size={14} /> Change format
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
