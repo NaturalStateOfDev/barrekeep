@@ -124,19 +124,29 @@ export function DayEditorPanel({
                             key={c.teacher.sling_user_id}
                             className={`bk-candidate${c.current ? " bk-current" : ""}`}
                             disabled={!c.qualified || saving}
+                            title={
+                              !c.qualified
+                                ? "Not trained for this class (Sling positions)"
+                                : c.current
+                                  ? "Currently assigned"
+                                  : ""
+                            }
                             onClick={() =>
                               c.current ? setEditing(null) : assign(s.id, c.teacher.sling_user_id)
                             }
                           >
                             <Avatar name={c.teacher.display_name} size={22} />
-                            <span>{c.teacher.display_name}</span>
-                            {c.note ? (
-                              <span className={`note${c.note === "not qualified" ? " bk-danger" : ""}`}>
-                                {c.note}
+                            <span className="bk-cand-name">{c.teacher.display_name}</span>
+                            <span className="bk-cand-tags">
+                              <span className={`bk-cand-tag ${c.qualified ? "ok" : "off"}`}>
+                                {c.qualified ? "trained" : "not trained"}
                               </span>
-                            ) : c.current ? (
-                              <span className="note bk-quiet">current</span>
-                            ) : null}
+                              <span
+                                className={`bk-cand-tag ${c.on_leave ? "danger" : c.at_cap ? "warn" : "ok"}`}
+                              >
+                                {c.on_leave ? "on leave" : c.at_cap ? "at cap" : "available"}
+                              </span>
+                            </span>
                           </button>
                         ))}
                         {s.sling_user_id != null && (
