@@ -417,3 +417,47 @@
   align-items: center;
   gap: 0.75rem;
 }
+
+/* Candidate trained/available tags (day editor). */
+.bk-cand-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bk-cand-tags {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.bk-cand-tag {
+  font-size: 10.5px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-badge);
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.bk-cand-tag.ok {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.bk-cand-tag.warn {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.bk-cand-tag.danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.bk-cand-tag.off {
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  border: 1px solid var(--border-card);
+}

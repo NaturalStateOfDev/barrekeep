@@ -1,17 +1,20 @@
-// Candidate list for the day-editor panel: every active teacher, annotated
-// with why they might be a poor pick (not qualified / on leave / at cap).
-// Unqualified teachers stay visible but disabled — positions are ground
-// truth for "who can teach what" (see CLAUDE.md).
+// Candidate list for the day-editor panel: the whole active roster, each
+// teacher marked trained (qualified per Sling positions — ground truth, see
+// CLAUDE.md) and available (no leave block over the slot, under weekly cap).
+// Untrained teachers stay visible but unselectable.
 
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
 import { isoWeekKey, wallClock } from "./dates";
 
 export interface Candidate {
   teacher: Teacher;
+  /** Qualified for this class per Sling positions ("trained"). */
   qualified: boolean;
+  on_leave: boolean;
+  at_cap: boolean;
+  /** No leave conflict and under weekly cap. */
+  available: boolean;
   current: boolean;
-  /** null when the teacher is a clean pick. */
-  note: "not qualified" | "on leave" | "at weekly cap" | null;
 }
 
 function onLeave(blocks: AvailabilityBlock[], userId: number, startIso: string, endIso: string): boolean {
@@ -50,22 +53,23 @@ export function candidatesFor(
           isoWeekKey(s.shift_date) === week,
       ).length;
 
-      let note: Candidate["note"] = null;
-      if (!qualified) note = "not qualified";
-      else if (onLeave(blocks, t.sling_user_id, startIso, endIso)) note = "on leave";
-      else if (weekly >= t.weekly_max) note = "at weekly cap";
+      const on_leave = onLeave(blocks, t.sling_user_id, startIso, endIso);
+      const at_cap = weekly >= t.weekly_max;
 
-      return { teacher: t, qualified, current, note };
+      return {
+        teacher: t,
+        qualified,
+        on_leave,
+        at_cap,
+        available: !on_leave && !at_cap,
+        current,
+      };
     });
 
-  // Clean qualified picks first (highest ranking weight, then name),
-  // then flagged-but-qualified, then unqualified.
-  const rank = (c: Candidate) => (!c.qualified ? 2 : c.note ? 1 : 0);
+  // Trained first, then available, then alphabetical.
   out.sort((a, b) => {
-    if (rank(a) !== rank(b)) return rank(a) - rank(b);
-    if (b.teacher.ranking_weight !== a.teacher.ranking_weight) {
-      return b.teacher.ranking_weight - a.teacher.ranking_weight;
-    }
+    if (a.qualified !== b.qualified) return a.qualified ? -1 : 1;
+    if (a.available !== b.available) return a.available ? -1 : 1;
     return a.teacher.display_name.localeCompare(b.teacher.display_name);
   });
   return out;
