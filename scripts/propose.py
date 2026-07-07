@@ -59,7 +59,6 @@ TEACHERS = {
 NAME_TO_UID = {v: k for k, v in TEACHERS.items()}
 # Per-teacher operational hooks are disabled in the generic build (None never
 # matches a real uid, so the guards that reference these are inert).
-PRIORITY_UID = None
 EXCLUDE_UID = None
 
 TARGETS = {
@@ -128,9 +127,7 @@ HARD_ASSIGNMENTS = {}
 FOCUS_HARD_PLACEMENTS = []
 FOCUS_PLACEMENTS_JUNE = []
 
-# Optional priority seeding: (weekday, time) slots where a specific teacher
-# should be weighted up. Empty in the generic build.
-PRIORITY_SLOTS = set()
+# Priority seeding now comes from the rules payload (PRIORITY_ENTRIES below).
 
 # Soft blocks (Sling says cleared, but manager hasn't approved)
 TEACHER_CLASS_BLOCKLIST = {}
@@ -153,6 +150,32 @@ SEVEN_AM_LAST_RESORT = True
 # with the lighter monthly load to date. This is added as a penalty to
 # the ranking score: penalty = current_assignments * VARIETY_PENALTY_PER_CLASS
 VARIETY_PENALTY_PER_CLASS = 0.3  # tuneable; higher = more rotation
+
+# ============================================================
+# Rules-as-data (algorithm_versions): populate the override knobs from the
+# payload. Empty/absent rules leave every knob at its default — output must
+# stay byte-identical to v9 (scripts/tests/test_propose_rules.py). Rules are
+# validated Rust-side before storage (src-tauri/src/algorithm.rs); this end
+# trusts its input.
+# ============================================================
+_WD_IDX = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
+_rules = _payload.get('rules') or {}
+VERSION_LABEL = _payload.get('version_label') or 'v9'
+for _r in _rules.get('teacher_class_blocklist') or []:
+    TEACHER_CLASS_BLOCKLIST.setdefault(_r['sling_user_id'], set()).add(_r['class_name'])
+for _r in _rules.get('teacher_slot_blocklist') or []:
+    TEACHER_SLOT_BLOCKLIST.setdefault(_r['sling_user_id'], set()).add(
+        (_WD_IDX[_r['weekday']], _r['time']))
+PRIORITY_ENTRIES = [(_WD_IDX[_r['weekday']], _r['time'], _r['sling_user_id'])
+                    for _r in _rules.get('priority_slots') or []]
+for _r in _rules.get('slot_class_overrides') or []:
+    JUNE_SLOT_CLASS_OVERRIDES[(_WD_IDX[_r['weekday']], _r['time'])] = _r['class_name']
+for _uid, _mult in (_rules.get('variety_penalty_multiplier') or {}).items():
+    VARIETY_PENALTY_MULTIPLIER[int(_uid)] = float(_mult)
+if 'variety_penalty_per_class' in _rules:
+    VARIETY_PENALTY_PER_CLASS = float(_rules['variety_penalty_per_class'])
+SAT_TIME_SHIFTS.update(_rules.get('sat_time_shifts') or {})
+SUN_TIME_SHIFTS.update(_rules.get('sun_time_shifts') or {})
 
 # ============================================================
 # Helpers
@@ -235,11 +258,11 @@ for key in list(slot_teachers.keys()):
         if not teacher_qualified(uid, cls):
             del slot_teachers[key][uid]
 
-# Priority seeding (boost weight for a teacher at specific slots; empty by default)
-for (wd, st) in PRIORITY_SLOTS:
+# Priority seeding (boost weight for a teacher at specific slots; from rules)
+for (wd, st, _uid) in PRIORITY_ENTRIES:
     for cls in slot_classes.get((wd, st), {}):
-        if not teacher_qualified(PRIORITY_UID, cls): continue
-        slot_teachers[(wd, st, cls)][PRIORITY_UID] = max(slot_teachers[(wd, st, cls)].get(PRIORITY_UID, 0), 3)
+        if not teacher_qualified(_uid, cls): continue
+        slot_teachers[(wd, st, cls)][_uid] = max(slot_teachers[(wd, st, cls)].get(_uid, 0), 3)
 
 # Build slot_rule
 slot_rule = {}
@@ -639,7 +662,7 @@ print("\nFile: proposed.csv")
 
 if JSON_OUT:
     payload = {
-        'algorithm_version': 'v9',
+        'algorithm_version': VERSION_LABEL,
         'target_month': TARGET_MONTH,
         'parameters': {
             'variety_penalty_per_class': VARIETY_PENALTY_PER_CLASS,

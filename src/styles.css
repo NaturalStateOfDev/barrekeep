@@ -794,3 +794,39 @@ code {
   margin-bottom: var(--space-4);
   font-size: var(--text-base);
 }
+
+/* ---- Claude editor ---- */
+
+.bk-edit-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  margin-top: 6px;
+}
+
+.bk-edit-row.applied {
+  opacity: 0.65;
+}
+
+.bk-edit-row.invalid {
+  opacity: 0.55;
+}
+
+.bk-code-scroll {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  margin: 8px 0 0;
+}

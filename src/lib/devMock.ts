@@ -5,6 +5,7 @@
 
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
+  AlgorithmVersion,
   Teacher,
   Position,
   ProposalSummary,
@@ -138,6 +139,26 @@ let hasSlingToken = true;
 let hasAnthropicKey = true;
 let hasSlingCredentials = false;
 let studioConfig = { org_id: 41822, acting_user_id: 1930221, home_location_id: 901 };
+const APP_SETTINGS = new Map<string, string>();
+
+const ALGO_VERSIONS: AlgorithmVersion[] = [
+  {
+    version: 10,
+    description: "v10 — Casey off Reform; Saturday opener 8:15",
+    rules: {
+      teacher_class_blocklist: [
+        { sling_user_id: 1930003, class_name: "Reform", reason: "recurring manual swaps" },
+      ],
+      sat_time_shifts: { "08:00": "08:15" },
+    },
+    script_file: null,
+    created_by: "claude",
+    adopted_at: "2026-07-01 10:00:00",
+    last_used_month: "2026-08",
+    script_archived: false,
+    script_missing: false,
+  },
+];
 
 const REVIEWS = [
   {
@@ -193,6 +214,11 @@ export function installDevMock() {
         return null;
       case "has_sling_credentials":
         return hasSlingCredentials;
+      case "get_app_setting":
+        return APP_SETTINGS.get(args.key) ?? null;
+      case "set_app_setting":
+        APP_SETTINGS.set(args.key, args.value);
+        return null;
       case "set_sling_credentials":
         hasSlingCredentials = Boolean(args.email);
         return null;
@@ -286,12 +312,45 @@ export function installDevMock() {
             new_value: t ? String(t.sling_user_id) : null,
             old_teacher_name: s.teacher_name,
             new_teacher_name: t?.display_name ?? null,
+            old_class_name: null,
+            new_class_name: null,
             reason: args.reason ?? null,
             edited_at: "2026-07-05 12:00:00",
             reverted: false,
           });
           s.sling_user_id = t?.sling_user_id ?? null;
           s.teacher_name = t?.display_name ?? null;
+          p.summary.edit_count += 1;
+        }
+        return null;
+      }
+      case "edit_proposal_shift_position": {
+        for (const p of PROPOSALS) {
+          const s = p.shifts.find((x) => x.id === args.proposalShiftId);
+          if (!s) continue;
+          const pos = POSITIONS.find((x) => x.sling_position_id === args.newPositionId);
+          if (!pos) throw new Error(`position ${args.newPositionId} not found`);
+          const oldPos = POSITIONS.find((x) => x.sling_position_id === s.sling_position_id);
+          EDITS.push({
+            id: nextEditId++,
+            proposal_shift_id: s.id,
+            shift_date: s.shift_date,
+            start_time: s.start_time,
+            class_name: pos.class_name,
+            field: "sling_position_id",
+            old_value: String(s.sling_position_id),
+            new_value: String(pos.sling_position_id),
+            old_teacher_name: null,
+            new_teacher_name: null,
+            old_class_name: oldPos?.class_name ?? null,
+            new_class_name: pos.class_name,
+            reason: args.reason ?? null,
+            edited_at: "2026-07-06 12:00:00",
+            reverted: false,
+          });
+          s.sling_position_id = pos.sling_position_id;
+          s.class_name = pos.class_name;
+          s.end_time = addMinutes(s.start_time, pos.duration_minutes);
           p.summary.edit_count += 1;
         }
         return null;
@@ -352,6 +411,109 @@ export function installDevMock() {
         return { run_id: 1, suggestions: REVIEWS[0].suggestions, overall_assessment: REVIEWS[0].overall_assessment, model: REVIEWS[0].model, input_tokens: 4210, output_tokens: 680, cache_read_input_tokens: 0, cost_usd: 0.018, duration_ms: 3200 };
       case "list_reviews_for_proposal":
         return REVIEWS;
+
+      // ---- Claude proposal editor ----
+      case "claude_edit_proposal": {
+        await sleep(1200);
+        const p = findProposal(args.proposalId);
+        const assigned = p.shifts.filter((s) => !s.is_dropped && s.sling_user_id != null);
+        const a = assigned[4] ?? assigned[0];
+        const b = assigned[9] ?? assigned[1];
+        const other = TEACHERS.find((t) => t.sling_user_id !== a.sling_user_id)!;
+        return {
+          run_id: 42,
+          summary:
+            "Rebalanced two slots per the instruction. Casey keeps getting swapped off Reform — proposed a standing rule.",
+          edits: [
+            {
+              proposal_shift_id: a.id,
+              action: "reassign",
+              new_user_id: other.sling_user_id,
+              new_class_name: null,
+              rationale: `${other.display_name} is under target this week`,
+              valid: true,
+              validation_note: null,
+            },
+            {
+              proposal_shift_id: b.id,
+              action: "change_format",
+              new_user_id: null,
+              new_class_name: b.class_name === "Classic" ? "Empower" : "Classic",
+              rationale: "thin coverage for the original format",
+              valid: true,
+              validation_note: null,
+            },
+            {
+              proposal_shift_id: 999999,
+              action: "unassign",
+              new_user_id: null,
+              new_class_name: null,
+              rationale: "a hallucinated slot, for the invalid-row UI",
+              valid: false,
+              validation_note: "that slot is not in this proposal",
+            },
+          ],
+          ruleset_proposal: {
+            description: "v-next — Casey never teaches Reform",
+            rules: {
+              teacher_class_blocklist: [
+                { sling_user_id: 1930003, class_name: "Reform", reason: "swapped off 3 months running" },
+              ],
+              sat_time_shifts: { "08:00": "08:15" },
+            },
+          },
+          needs_code_change: null,
+          model: APP_SETTINGS.get("claude_model") ?? "claude-opus-4-8",
+          cost_usd: 0.11,
+          duration_ms: 4200,
+        };
+      }
+      case "claude_draft_code_change":
+        await sleep(1500);
+        return {
+          run_id: 43,
+          description: "v-next — never assign back-to-back evening classes",
+          script: "#!/usr/bin/env python3\n# (dev mock) full drafted script would appear here\nprint('draft')\n",
+          model: APP_SETTINGS.get("claude_model") ?? "claude-opus-4-8",
+          cost_usd: 0.34,
+          duration_ms: 9100,
+        };
+      case "validate_code_draft":
+        await sleep(900);
+        return {
+          ok: true,
+          error: null,
+          shift_count: 114,
+          changed_assignments: 6,
+          added_slots: 0,
+          removed_slots: 0,
+          month: "2026-08",
+        };
+      case "list_algorithm_versions":
+        return [...ALGO_VERSIONS].sort((x, y) => y.version - x.version);
+      case "adopt_algorithm_version": {
+        const version = Math.max(9, ...ALGO_VERSIONS.map((v) => v.version)) + 1;
+        ALGO_VERSIONS.push({
+          version,
+          description: args.description,
+          rules: args.rules ?? {},
+          script_file: args.scriptContent ? `propose_v${version}.py` : null,
+          created_by: args.claudeRunId != null ? "claude" : "user",
+          adopted_at: "2026-07-06 12:00:00",
+          last_used_month: null,
+          script_archived: false,
+          script_missing: false,
+        });
+        return version;
+      }
+      case "delete_algorithm_script": {
+        const v = ALGO_VERSIONS.find((x) => x.version === args.version);
+        if (!v) throw new Error(`version v${args.version} not found`);
+        if (v.version === Math.max(...ALGO_VERSIONS.map((x) => x.version)))
+          throw new Error("cannot delete the active version's script");
+        v.script_missing = true;
+        return null;
+      }
 
       default:
         throw new Error(`devMock: unhandled command ${cmd}`);

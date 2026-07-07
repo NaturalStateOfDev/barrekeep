@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ProposalDetail, Teacher, ProposalShiftRow, AvailabilityBlock } from "../../types";
+import type { ProposalDetail, Teacher, Position, ProposalShiftRow, AvailabilityBlock } from "../../types";
 import { api } from "../../lib/api";
 import type { Issue } from "../../lib/issues";
 import { StaleBanner } from "./StaleBanner";
@@ -10,6 +10,7 @@ import { DayEditorPanel } from "./DayEditorPanel";
 interface Props {
   proposal: ProposalDetail;
   teachers: Teacher[];
+  positions: Position[];
   qualifiedPairs: Set<string>;
   blocks: AvailabilityBlock[];
   issues: Issue[];
@@ -22,6 +23,7 @@ interface Props {
 export function CalendarView({
   proposal,
   teachers,
+  positions,
   qualifiedPairs,
   blocks,
   issues,
@@ -49,6 +51,12 @@ export function CalendarView({
   const handleAssign = async (proposalShiftId: number, newUserId: number | null) => {
     if (readonly) return;
     await api.editProposalShiftTeacher(proposalShiftId, newUserId, null);
+    onProposalChanged();
+  };
+
+  const handleChangeFormat = async (proposalShiftId: number, newPositionId: number) => {
+    if (readonly) return;
+    await api.editProposalShiftPosition(proposalShiftId, newPositionId, null);
     onProposalChanged();
   };
 
@@ -100,12 +108,14 @@ export function CalendarView({
           shifts={dayShifts}
           allShifts={proposal.shifts}
           teachers={teachers}
+          positions={positions}
           qualifiedPairs={qualifiedPairs}
           blocks={blocks}
           warnings={dayWarnings}
           readonly={!!readonly}
           onClose={() => setSelectedDay(null)}
           onAssign={handleAssign}
+          onChangeFormat={handleChangeFormat}
         />
       )}
     </div>

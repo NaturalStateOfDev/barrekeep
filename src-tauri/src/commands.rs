@@ -295,23 +295,15 @@ pub struct GenerateResult {
     pub stderr_tail: String,
 }
 
-#[tauri::command]
-pub fn generate_proposal(
-    db: State<'_, Db>,
-    target_month: String,
-) -> Result<GenerateResult, String> {
-    // Step 1: spawn propose.py with cwd at project root (so its relative
-    // fixture paths resolve correctly). Find the project root by walking up
-    // from the current dir looking for package.json — works in dev mode.
-    let project_root = find_project_root().map_err(err)?;
-    let python_bin = if cfg!(windows) { "python" } else { "python3" };
-
-    // Build the input payload the ported propose.py expects on stdin.
+/// Build the stdin payload propose.py expects, straight from the DB.
+/// Shared by generate_proposal and the code-draft validator.
+fn build_propose_payload(
+    conn: &duckdb::Connection,
+    target_month: &str,
+) -> Result<serde_json::Value, String> {
+    // Studio's home location id — propose.py filters shifts to this.
+    let studio_cfg = load_studio_config(conn)?;
     let payload_json = {
-        let conn = db.0.lock().map_err(err)?;
-
-        // Studio's home location id — propose.py filters shifts to this.
-        let studio_cfg = load_studio_config(&conn)?;
 
         let teachers: Vec<serde_json::Value> = {
             let mut stmt = conn.prepare(
@@ -378,7 +370,7 @@ pub fn generate_proposal(
                  FROM external_sling_shifts
                  WHERE target_month >= ? AND target_month < ?"
             ).map_err(err)?;
-            stmt.query_map(duckdb::params![&cutoff, &target_month], |r| {
+            stmt.query_map(duckdb::params![&cutoff, target_month], |r| {
                 let date: String = r.get(0)?;
                 let start: String = r.get(1)?;
                 let end: String = r.get(2)?;
@@ -413,7 +405,7 @@ pub fn generate_proposal(
                  FROM external_sling_shifts
                  WHERE target_month = ?"
             ).map_err(err)?;
-            for row in stmt2.query_map(duckdb::params![&target_month], |r| {
+            for row in stmt2.query_map(duckdb::params![target_month], |r| {
                 let date: String = r.get(0)?;
                 let start: String = r.get(1)?;
                 let end: String = r.get(2)?;
@@ -452,14 +444,27 @@ pub fn generate_proposal(
             "month_events": month_events,
         })
     };
+    Ok(payload_json)
+}
 
+/// Spawn a propose script (baseline or a versioned copy) with the payload
+/// on stdin; parse its JSON output. Returns (parsed output, stderr tail).
+fn spawn_propose(
+    script_path: &std::path::Path,
+    project_root: &std::path::Path,
+    payload_json: &serde_json::Value,
+    target_month: &str,
+) -> Result<(ProposeOutput, String), String> {
     use std::io::Write;
     use std::process::Stdio;
 
+    let python_bin = if cfg!(windows) { "python" } else { "python3" };
+    let script = script_path
+        .to_str()
+        .ok_or_else(|| "script path is not valid UTF-8".to_string())?;
     let mut child = Command::new(python_bin)
-        .args(["scripts/propose.py", "--json-out", "--from-stdin",
-               "--target-month", &target_month])
-        .current_dir(&project_root)
+        .args([script, "--json-out", "--from-stdin", "--target-month", target_month])
+        .current_dir(project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -472,19 +477,50 @@ pub fn generate_proposal(
             .map_err(|e| format!("failed to write stdin: {e}"))?;
     }
     let output = child.wait_with_output()
-        .map_err(|e| format!("failed to wait on propose.py: {e}"))?;
+        .map_err(|e| format!("failed to wait on the propose script: {e}"))?;
 
+    let stderr_tail = tail(&String::from_utf8_lossy(&output.stderr), 40);
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "propose.py exited {}:\n{}",
-            output.status,
-            tail(&stderr, 40)
+            "propose script exited {}:\n{}",
+            output.status, stderr_tail
         ));
     }
 
-    let payload: ProposeOutput = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("invalid JSON from propose.py: {e}"))?;
+    let parsed: ProposeOutput = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("invalid JSON from the propose script: {e}"))?;
+    Ok((parsed, stderr_tail))
+}
+
+#[tauri::command]
+pub fn generate_proposal(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    target_month: String,
+) -> Result<GenerateResult, String> {
+    // Step 1: build the payload and resolve the active algorithm version
+    // (rules + script). cwd stays at project root so the baseline script's
+    // relative paths keep resolving in dev mode.
+    let project_root = find_project_root().map_err(err)?;
+    let (payload_json, script_path) = {
+        let conn = db.0.lock().map_err(err)?;
+        let mut payload = build_propose_payload(&conn, &target_month)?;
+        let active = crate::algorithm::active_version(&conn)?;
+        let script = match &active {
+            Some(v) => {
+                let dir = crate::algorithm::algorithms_dir(&app)?;
+                payload["rules"] = v.rules.clone();
+                payload["version_label"] =
+                    serde_json::Value::String(format!("v{}", v.version));
+                crate::algorithm::resolve_script(&dir, v, &project_root)?
+            }
+            None => project_root.join("scripts").join("propose.py"),
+        };
+        (payload, script)
+    };
+
+    let (payload, stderr_tail) =
+        spawn_propose(&script_path, &project_root, &payload_json, &target_month)?;
 
     // Step 2: write the proposal + shifts to DuckDB in a single transaction.
     let mut conn = db.0.lock().map_err(err)?;
@@ -554,7 +590,7 @@ pub fn generate_proposal(
         algorithm_version: payload.algorithm_version,
         shift_count: payload.shifts.len(),
         dropped_count,
-        stderr_tail: tail(&String::from_utf8_lossy(&output.stderr), 20),
+        stderr_tail,
     })
 }
 
@@ -752,6 +788,8 @@ pub struct EditRow {
     pub new_value: Option<String>,
     pub old_teacher_name: Option<String>,
     pub new_teacher_name: Option<String>,
+    pub old_class_name: Option<String>,
+    pub new_class_name: Option<String>,
     pub reason: Option<String>,
     pub edited_at: String,
     pub reverted: bool,
@@ -819,6 +857,95 @@ pub fn edit_proposal_shift_teacher(
     Ok(())
 }
 
+fn add_minutes_hhmm(hhmm: &str, minutes: i64) -> Result<String, String> {
+    let (h, m) = hhmm
+        .split_once(':')
+        .ok_or_else(|| format!("bad time '{hhmm}'"))?;
+    let h: i64 = h.parse().map_err(|_| format!("bad time '{hhmm}'"))?;
+    let m: i64 = m.parse().map_err(|_| format!("bad time '{hhmm}'"))?;
+    let total = (h * 60 + m + minutes).rem_euclid(24 * 60);
+    Ok(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
+/// Change the class format on a single proposal_shift. Records the
+/// before/after position ids in `edits` (field 'sling_position_id') and
+/// recomputes end_time from the new class's duration. Co-teach rows are
+/// blocked, like teacher edits.
+fn edit_position_impl(
+    conn: &mut duckdb::Connection,
+    proposal_shift_id: i64,
+    new_position_id: i32,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(err)?;
+
+    let (old_pid, start_time, is_coteach): (i32, String, bool) = tx
+        .query_row(
+            "SELECT sling_position_id, start_time, is_coteach
+             FROM proposal_shifts WHERE id = ?",
+            duckdb::params![proposal_shift_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| format!("proposal_shift {proposal_shift_id} not found: {e:#}"))?;
+
+    if is_coteach {
+        return Err("co-teach editing is not yet supported".into());
+    }
+    if old_pid == new_position_id {
+        return Err("class type unchanged".into());
+    }
+
+    let (duration, active): (i32, bool) = tx
+        .query_row(
+            "SELECT duration_minutes, active FROM positions WHERE sling_position_id = ?",
+            duckdb::params![new_position_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| format!("position {new_position_id} not found: {e:#}"))?;
+    if !active {
+        return Err("that class type is not schedulable".into());
+    }
+    let end_time = add_minutes_hhmm(&start_time, duration as i64)?;
+
+    let reason_clean = reason.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    });
+
+    tx.execute(
+        "INSERT INTO edits (proposal_shift_id, field, old_value, new_value, reason)
+         VALUES (?, 'sling_position_id', ?, ?, ?)",
+        duckdb::params![
+            proposal_shift_id,
+            old_pid.to_string(),
+            new_position_id.to_string(),
+            reason_clean
+        ],
+    )
+    .map_err(err)?;
+
+    tx.execute(
+        "UPDATE proposal_shifts SET sling_position_id = ?, end_time = ? WHERE id = ?",
+        duckdb::params![new_position_id, end_time, proposal_shift_id],
+    )
+    .map_err(err)?;
+
+    tx.commit().map_err(err)?;
+    let _ = conn.execute("CHECKPOINT", []);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn edit_proposal_shift_position(
+    db: State<'_, Db>,
+    proposal_shift_id: i64,
+    new_position_id: i32,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let mut conn = db.0.lock().map_err(err)?;
+    edit_position_impl(&mut conn, proposal_shift_id, new_position_id, reason)
+}
+
 #[tauri::command]
 pub fn list_edits_for_proposal(
     db: State<'_, Db>,
@@ -838,6 +965,8 @@ pub fn list_edits_for_proposal(
                 e.new_value,
                 t_old.display_name AS old_teacher_name,
                 t_new.display_name AS new_teacher_name,
+                p_old.class_name AS old_class_name,
+                p_new.class_name AS new_class_name,
                 e.reason,
                 CAST(e.edited_at AS VARCHAR),
                 e.reverted
@@ -845,9 +974,17 @@ pub fn list_edits_for_proposal(
              JOIN proposal_shifts ps ON ps.id = e.proposal_shift_id
              JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
              LEFT JOIN teachers t_old
-                ON CAST(t_old.sling_user_id AS VARCHAR) = e.old_value
+                ON e.field = 'sling_user_id'
+               AND CAST(t_old.sling_user_id AS VARCHAR) = e.old_value
              LEFT JOIN teachers t_new
-                ON CAST(t_new.sling_user_id AS VARCHAR) = e.new_value
+                ON e.field = 'sling_user_id'
+               AND CAST(t_new.sling_user_id AS VARCHAR) = e.new_value
+             LEFT JOIN positions p_old
+                ON e.field = 'sling_position_id'
+               AND CAST(p_old.sling_position_id AS VARCHAR) = e.old_value
+             LEFT JOIN positions p_new
+                ON e.field = 'sling_position_id'
+               AND CAST(p_new.sling_position_id AS VARCHAR) = e.new_value
              WHERE ps.proposal_id = ?
              ORDER BY e.edited_at DESC",
         )
@@ -865,9 +1002,11 @@ pub fn list_edits_for_proposal(
                 new_value: r.get(7)?,
                 old_teacher_name: r.get(8)?,
                 new_teacher_name: r.get(9)?,
-                reason: r.get(10)?,
-                edited_at: r.get(11)?,
-                reverted: r.get(12)?,
+                old_class_name: r.get(10)?,
+                new_class_name: r.get(11)?,
+                reason: r.get(12)?,
+                edited_at: r.get(13)?,
+                reverted: r.get(14)?,
             })
         })
         .map_err(err)?;
@@ -875,17 +1014,76 @@ pub fn list_edits_for_proposal(
 }
 
 // ============================================================
-// Anthropic key management
+// Anthropic key management + app settings
 // ============================================================
 
+/// Model allowlist for the Claude features. Exact ids only — an unknown
+/// stored value falls back to the default at call time.
+pub const CLAUDE_MODELS: &[&str] = &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"];
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
+
+pub fn claude_model(conn: &duckdb::Connection) -> String {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'claude_model'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    match stored {
+        Some(m) if CLAUDE_MODELS.contains(&m.as_str()) => m,
+        _ => DEFAULT_CLAUDE_MODEL.to_string(),
+    }
+}
+
 #[tauri::command]
-pub fn set_anthropic_key(key: State<'_, AnthropicKey>, value: String) -> Result<(), String> {
+pub fn get_app_setting(db: State<'_, Db>, key: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(err)?;
+    Ok(conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?",
+            duckdb::params![key],
+            |r| r.get(0),
+        )
+        .ok())
+}
+
+#[tauri::command]
+pub fn set_app_setting(db: State<'_, Db>, key: String, value: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(err)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, now())",
+        duckdb::params![key, value],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_anthropic_key(
+    key: State<'_, AnthropicKey>,
+    secrets: State<'_, crate::secrets::Secrets>,
+    value: String,
+) -> Result<(), String> {
     let trimmed = value.trim();
-    let mut guard = key.0.lock().map_err(err)?;
+    {
+        let mut guard = key.0.lock().map_err(err)?;
+        *guard = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    // Persist to Stronghold so the key survives app restarts (same
+    // mechanism as the Sling token).
     if trimmed.is_empty() {
-        *guard = None;
+        secrets
+            .remove(crate::secrets::KEY_ANTHROPIC)
+            .map_err(|e| e.to_string())?;
     } else {
-        *guard = Some(trimmed.to_string());
+        secrets
+            .set(crate::secrets::KEY_ANTHROPIC, trimmed)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -942,8 +1140,9 @@ pub fn review_proposal(
     };
 
     // 2. Build the user payload from DB. Same pattern: lock, query, drop.
-    let user_payload = {
+    let (user_payload, model) = {
         let conn = db.0.lock().map_err(err)?;
+        let model = claude_model(&conn);
 
         let (target_month, algorithm_version): (String, String) = conn
             .query_row(
@@ -1050,7 +1249,7 @@ pub fn review_proposal(
             .collect::<Result<Vec<_>, _>>()
             .map_err(err)?;
 
-        json!({
+        (json!({
             "proposal": {
                 "id": proposal_id,
                 "target_month": target_month,
@@ -1059,11 +1258,11 @@ pub fn review_proposal(
             "shifts": shifts,
             "edits": edits,
             "roster": roster,
-        })
+        }), model)
     };
 
     // 3. Call Anthropic. This is the slow step (~5–30s).
-    let result = review::run_review(&api_key, &user_payload).map_err(err)?;
+    let result = review::run_review(&api_key, &model, &user_payload).map_err(err)?;
 
     // 4. Persist run for audit + cost tracking.
     let suggestions_json = serde_json::to_string(&result.payload).map_err(err)?;
@@ -1120,12 +1319,13 @@ pub fn list_reviews_for_proposal(
     let rows = stmt
         .query_map(duckdb::params![proposal_id], |r| {
             let output_text: String = r.get(7)?;
-            // Re-parse the stored payload. If parsing fails, return an empty
-            // suggestion list rather than failing the whole query.
+            // Re-parse the stored payload. claude_runs also holds editor
+            // runs (different JSON shape) — mark those to be filtered out
+            // below instead of failing the whole query.
             let parsed: review::ReviewPayload = serde_json::from_str(&output_text)
                 .unwrap_or(review::ReviewPayload {
                     suggestions: vec![],
-                    overall_assessment: "(could not parse stored review)".into(),
+                    overall_assessment: "__not_a_review__".into(),
                 });
             // duckdb-rs returns DECIMAL as a string; parse to f64 so the
             // frontend can display it cleanly.
@@ -1144,7 +1344,603 @@ pub fn list_reviews_for_proposal(
             })
         })
         .map_err(err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?
+        .into_iter()
+        .filter(|r| r.overall_assessment != "__not_a_review__")
+        .collect())
+}
+
+// ============================================================
+// Claude proposal editor (spec: 2026-07-06-claude-proposal-editor-design)
+// ============================================================
+
+#[derive(Serialize)]
+pub struct ClaudeEditResult {
+    pub run_id: i64,
+    pub summary: String,
+    pub edits: Vec<crate::editor::ProposedEdit>,
+    pub ruleset_proposal: Option<crate::editor::RulesetProposal>,
+    pub needs_code_change: Option<crate::editor::NeedsCodeChange>,
+    pub model: String,
+    pub cost_usd: f64,
+    pub duration_ms: u32,
+}
+
+/// Everything the editor prompt needs about a proposal, in one JSON value.
+/// Shared by the editor and code-draft calls.
+fn build_editor_payload(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+    instruction: &str,
+) -> Result<serde_json::Value, String> {
+    let target_month: String = conn
+        .query_row(
+            "SELECT target_month FROM proposals WHERE id = ?",
+            duckdb::params![proposal_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("proposal {proposal_id} not found: {e:#}"))?;
+
+    let shifts: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ps.id, CAST(ps.shift_date AS VARCHAR), ps.start_time, ps.end_time,
+                        pos.class_name, t.display_name, ps.sling_user_id, ps.is_coteach,
+                        ps.is_dropped
+                 FROM proposal_shifts ps
+                 JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
+                 LEFT JOIN teachers t ON t.sling_user_id = ps.sling_user_id
+                 WHERE ps.proposal_id = ?
+                 ORDER BY ps.shift_date, ps.start_time",
+            )
+            .map_err(err)?;
+        stmt.query_map(duckdb::params![proposal_id], |r| {
+            Ok(json!({
+                "proposal_shift_id": r.get::<_, i64>(0)?,
+                "date": r.get::<_, String>(1)?,
+                "start": r.get::<_, String>(2)?,
+                "end": r.get::<_, String>(3)?,
+                "class_name": r.get::<_, String>(4)?,
+                "teacher": r.get::<_, Option<String>>(5)?,
+                "sling_user_id": r.get::<_, Option<i32>>(6)?,
+                "is_coteach": r.get::<_, bool>(7)?,
+                "is_dropped": r.get::<_, bool>(8)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let roster: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT sling_user_id, display_name, weekly_target, weekly_max
+                 FROM teachers WHERE active ORDER BY display_name",
+            )
+            .map_err(err)?;
+        stmt.query_map([], |r| {
+            Ok(json!({
+                "sling_user_id": r.get::<_, i32>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "weekly_target": r.get::<_, i32>(2)?,
+                "weekly_max": r.get::<_, i32>(3)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let qualifications: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT tq.sling_user_id, p.class_name
+                 FROM teacher_qualifications tq
+                 JOIN positions p ON p.sling_position_id = tq.sling_position_id
+                 WHERE NOT tq.is_blocklisted",
+            )
+            .map_err(err)?;
+        stmt.query_map([], |r| {
+            Ok(json!({
+                "sling_user_id": r.get::<_, i32>(0)?,
+                "class_name": r.get::<_, String>(1)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let blocks: Vec<serde_json::Value> = query_availability_blocks(conn, &target_month)?
+        .into_iter()
+        .map(|b| {
+            json!({
+                "sling_user_id": b.sling_user_id,
+                "source": b.source,
+                "starts_at": b.starts_at,
+                "ends_at": b.ends_at,
+            })
+        })
+        .collect();
+
+    let edit_history: Vec<serde_json::Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT CAST(ps.shift_date AS VARCHAR), ps.start_time, pos.class_name,
+                        e.field, e.old_value, e.new_value, e.reason
+                 FROM edits e
+                 JOIN proposal_shifts ps ON ps.id = e.proposal_shift_id
+                 JOIN positions pos ON pos.sling_position_id = ps.sling_position_id
+                 WHERE ps.proposal_id = ? AND NOT e.reverted
+                 ORDER BY e.edited_at",
+            )
+            .map_err(err)?;
+        stmt.query_map(duckdb::params![proposal_id], |r| {
+            Ok(json!({
+                "date": r.get::<_, String>(0)?,
+                "start": r.get::<_, String>(1)?,
+                "class_name": r.get::<_, String>(2)?,
+                "field": r.get::<_, String>(3)?,
+                "from": r.get::<_, Option<String>>(4)?,
+                "to": r.get::<_, Option<String>>(5)?,
+                "reason": r.get::<_, Option<String>>(6)?,
+            }))
+        })
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?
+    };
+
+    let active_rules = crate::algorithm::active_version(conn)?
+        .map(|v| v.rules)
+        .unwrap_or_else(|| json!({}));
+
+    Ok(json!({
+        "proposal": { "id": proposal_id, "target_month": target_month, "shifts": shifts },
+        "roster": roster,
+        "qualifications": qualifications,
+        "availability_blocks": blocks,
+        "edit_history": edit_history,
+        "active_rules": active_rules,
+        "instruction": instruction,
+    }))
+}
+
+/// Check Claude's proposed edits against the database. Invalid edits are
+/// kept (so the user sees what was attempted) but marked un-appliable.
+fn validate_claude_edits(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+    edits: &mut [crate::editor::ProposedEdit],
+) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut shift_info: HashMap<i64, (bool, Option<i32>, i32)> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, is_coteach, sling_user_id, sling_position_id
+                 FROM proposal_shifts WHERE proposal_id = ?",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map(duckdb::params![proposal_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get::<_, bool>(1)?, r.get::<_, Option<i32>>(2)?, r.get::<_, i32>(3)?),
+                ))
+            })
+            .map_err(err)?;
+        for row in rows {
+            let (k, v) = row.map_err(err)?;
+            shift_info.insert(k, v);
+        }
+    }
+
+    let active_teachers: HashSet<i32> = {
+        let mut stmt = conn
+            .prepare("SELECT sling_user_id FROM teachers WHERE active")
+            .map_err(err)?;
+        stmt.query_map([], |r| r.get(0))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+    };
+
+    let class_to_pid: HashMap<String, i32> = {
+        let mut stmt = conn
+            .prepare("SELECT class_name, sling_position_id FROM positions WHERE active")
+            .map_err(err)?;
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+    };
+
+    for e in edits.iter_mut() {
+        let mut fail = |note: String| (false, Some(note));
+        let (valid, note) = match shift_info.get(&e.proposal_shift_id) {
+            None => fail("that slot is not in this proposal".to_string()),
+            Some((is_coteach, current_uid, current_pid)) => {
+                if *is_coteach {
+                    fail("co-teach slots can't be edited here".to_string())
+                } else {
+                    match e.action.as_str() {
+                        "reassign" => match e.new_user_id {
+                            None => fail("reassign needs new_user_id".to_string()),
+                            Some(uid) if !active_teachers.contains(&uid) => {
+                                fail(format!("teacher {uid} is unknown or inactive"))
+                            }
+                            Some(uid) if Some(uid) == *current_uid => {
+                                fail("already assigned to that teacher".to_string())
+                            }
+                            Some(_) => (true, None),
+                        },
+                        "unassign" => {
+                            if current_uid.is_none() {
+                                fail("already unassigned".to_string())
+                            } else {
+                                (true, None)
+                            }
+                        }
+                        "change_format" => match &e.new_class_name {
+                            None => fail("change_format needs new_class_name".to_string()),
+                            Some(name) => match class_to_pid.get(name) {
+                                None => fail(format!("'{name}' is not a schedulable class")),
+                                Some(pid) if pid == current_pid => {
+                                    fail("already that format".to_string())
+                                }
+                                Some(_) => (true, None),
+                            },
+                        },
+                        other => fail(format!("unknown action '{other}'")),
+                    }
+                }
+            }
+        };
+        e.valid = valid;
+        e.validation_note = note;
+    }
+    Ok(())
+}
+
+fn persist_claude_run(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    raw_input: &str,
+    raw_output: &str,
+    cost_usd: f64,
+    duration_ms: u32,
+) -> Result<i64, String> {
+    conn.query_row(
+        "INSERT INTO claude_runs (
+            proposal_id, model, input_tokens, output_tokens,
+            input_text, output_text, cost_usd, duration_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        duckdb::params![
+            proposal_id,
+            model,
+            input_tokens as i32,
+            output_tokens as i32,
+            raw_input,
+            raw_output,
+            cost_usd,
+            duration_ms as i32,
+        ],
+        |r| r.get(0),
+    )
+    .map_err(err)
+}
+
+#[tauri::command]
+pub fn claude_edit_proposal(
+    db: State<'_, Db>,
+    key: State<'_, AnthropicKey>,
+    proposal_id: i64,
+    instruction: String,
+) -> Result<ClaudeEditResult, String> {
+    if instruction.trim().is_empty() {
+        return Err("instruction is empty".to_string());
+    }
+    let api_key = {
+        let guard = key.0.lock().map_err(err)?;
+        guard
+            .clone()
+            .ok_or_else(|| "Anthropic API key is not set — add it in Settings".to_string())?
+    };
+
+    // Lock, build payload, drop — never hold the DB across the HTTP call.
+    let (user_payload, model) = {
+        let conn = db.0.lock().map_err(err)?;
+        (
+            build_editor_payload(&conn, proposal_id, instruction.trim())?,
+            claude_model(&conn),
+        )
+    };
+
+    let system = crate::editor::editor_system_prompt(find_project_root().ok().as_deref());
+    let result = crate::editor::run_editor(&api_key, &model, &system, &user_payload).map_err(err)?;
+
+    let conn = db.0.lock().map_err(err)?;
+    let mut payload = result.payload;
+    validate_claude_edits(&conn, proposal_id, &mut payload.edits)?;
+
+    // A rule proposal that doesn't validate is downgraded to a summary note
+    // rather than shown with a broken Adopt button.
+    let mut summary = payload.summary.clone();
+    let ruleset_proposal = match payload.ruleset_proposal {
+        Some(rp) => match crate::algorithm::validate_rules(&rp.rules) {
+            Ok(_) => Some(rp),
+            Err(e) => {
+                summary.push_str(&format!(
+                    " (A rule change was proposed but failed validation and was dropped: {e})"
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+
+    let run_id = persist_claude_run(
+        &conn,
+        proposal_id,
+        &result.model,
+        result.input_tokens,
+        result.output_tokens,
+        &result.raw_input,
+        &result.raw_output,
+        result.cost_usd,
+        result.duration_ms,
+    )?;
+    let _ = conn.execute("CHECKPOINT", []);
+
+    Ok(ClaudeEditResult {
+        run_id,
+        summary,
+        edits: payload.edits,
+        ruleset_proposal,
+        needs_code_change: payload.needs_code_change,
+        model: result.model,
+        cost_usd: result.cost_usd,
+        duration_ms: result.duration_ms,
+    })
+}
+
+// ============================================================
+// Code drafts (tier 3): draft via Claude, validate against the most
+// recent month before Adopt is possible.
+// ============================================================
+
+#[derive(Serialize)]
+pub struct CodeDraft {
+    pub run_id: i64,
+    pub description: String,
+    pub script: String,
+    pub model: String,
+    pub cost_usd: f64,
+    pub duration_ms: u32,
+}
+
+#[derive(Serialize)]
+pub struct DraftValidation {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub shift_count: i64,
+    pub changed_assignments: i64,
+    pub added_slots: i64,
+    pub removed_slots: i64,
+    pub month: String,
+}
+
+/// Compare two schedules keyed by (date, start, position): how many slots
+/// kept the key but changed teacher, and how many keys were added/removed.
+fn diff_schedules(
+    baseline: &[(String, String, i32, Option<i32>)],
+    candidate: &[(String, String, i32, Option<i32>)],
+) -> (i64, i64, i64) {
+    use std::collections::HashMap;
+    let b: HashMap<(&str, &str, i32), Option<i32>> = baseline
+        .iter()
+        .map(|(d, t, p, u)| ((d.as_str(), t.as_str(), *p), *u))
+        .collect();
+    let c: HashMap<(&str, &str, i32), Option<i32>> = candidate
+        .iter()
+        .map(|(d, t, p, u)| ((d.as_str(), t.as_str(), *p), *u))
+        .collect();
+    let mut changed = 0i64;
+    let mut added = 0i64;
+    for (k, u) in &c {
+        match b.get(k) {
+            Some(bu) if bu != u => changed += 1,
+            Some(_) => {}
+            None => added += 1,
+        }
+    }
+    let removed = b.keys().filter(|k| !c.contains_key(*k)).count() as i64;
+    (changed, added, removed)
+}
+
+#[tauri::command]
+pub fn claude_draft_code_change(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    key: State<'_, AnthropicKey>,
+    proposal_id: i64,
+    instruction: String,
+    rationale: String,
+) -> Result<CodeDraft, String> {
+    let api_key = {
+        let guard = key.0.lock().map_err(err)?;
+        guard
+            .clone()
+            .ok_or_else(|| "Anthropic API key is not set — add it in Settings".to_string())?
+    };
+    let project_root = find_project_root().map_err(err)?;
+
+    let (user_payload, model) = {
+        let conn = db.0.lock().map_err(err)?;
+        let model = claude_model(&conn);
+        let target_month: String = conn
+            .query_row(
+                "SELECT target_month FROM proposals WHERE id = ?",
+                duckdb::params![proposal_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("proposal {proposal_id} not found: {e:#}"))?;
+        let active = crate::algorithm::active_version(&conn)?;
+        let (script_path, active_rules) = match &active {
+            Some(v) => {
+                let dir = crate::algorithm::algorithms_dir(&app)?;
+                (
+                    crate::algorithm::resolve_script(&dir, v, &project_root)?,
+                    v.rules.clone(),
+                )
+            }
+            None => (
+                project_root.join("scripts").join("propose.py"),
+                serde_json::json!({}),
+            ),
+        };
+        let current_script = std::fs::read_to_string(&script_path)
+            .map_err(|e| format!("could not read {}: {e}", script_path.display()))?;
+        (
+            serde_json::json!({
+                "target_month": target_month,
+                "current_script": current_script,
+                "active_rules": active_rules,
+                "instruction": instruction,
+                "rationale": rationale,
+            }),
+            model,
+        )
+    };
+
+    let result = crate::editor::run_code_draft(&api_key, &model, &user_payload).map_err(err)?;
+
+    let conn = db.0.lock().map_err(err)?;
+    let run_id = persist_claude_run(
+        &conn,
+        proposal_id,
+        &result.model,
+        result.input_tokens,
+        result.output_tokens,
+        &result.raw_input,
+        &result.raw_output,
+        result.cost_usd,
+        result.duration_ms,
+    )?;
+    let _ = conn.execute("CHECKPOINT", []);
+
+    Ok(CodeDraft {
+        run_id,
+        description: result.payload.description,
+        script: result.payload.script,
+        model: result.model,
+        cost_usd: result.cost_usd,
+        duration_ms: result.duration_ms,
+    })
+}
+
+/// Run a candidate script against the most recent generated month and diff
+/// its output vs. that month's proposal (the schedule-algorithm skill's
+/// reproduce-last-month rule). Adoption stays disabled until this passes.
+#[tauri::command]
+pub fn validate_code_draft(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    script_content: String,
+) -> Result<DraftValidation, String> {
+    let project_root = find_project_root().map_err(err)?;
+
+    let (month, payload, baseline) = {
+        let conn = db.0.lock().map_err(err)?;
+        let month: String = conn
+            .query_row(
+                "SELECT target_month FROM proposals ORDER BY generated_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| "no proposals yet — generate one first so there is a month to validate against".to_string())?;
+        let baseline_id: i64 = conn
+            .query_row(
+                "SELECT id FROM proposals WHERE target_month = ?
+                 ORDER BY is_current DESC, generated_at DESC LIMIT 1",
+                duckdb::params![&month],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        let mut payload = build_propose_payload(&conn, &month)?;
+        if let Some(v) = crate::algorithm::active_version(&conn)? {
+            payload["rules"] = v.rules;
+        }
+        payload["version_label"] = serde_json::Value::String("candidate".to_string());
+
+        let baseline: Vec<(String, String, i32, Option<i32>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT CAST(shift_date AS VARCHAR), start_time, sling_position_id, sling_user_id
+                     FROM proposal_shifts WHERE proposal_id = ? AND NOT is_dropped",
+                )
+                .map_err(err)?;
+            stmt.query_map(duckdb::params![baseline_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+        };
+        (month, payload, baseline)
+    };
+
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    let candidate_path = dir.join("candidate_draft.py");
+    std::fs::write(&candidate_path, &script_content).map_err(err)?;
+
+    let spawn_result = spawn_propose(&candidate_path, &project_root, &payload, &month);
+    let _ = std::fs::remove_file(&candidate_path);
+
+    match spawn_result {
+        Err(e) => Ok(DraftValidation {
+            ok: false,
+            error: Some(e),
+            shift_count: 0,
+            changed_assignments: 0,
+            added_slots: 0,
+            removed_slots: 0,
+            month,
+        }),
+        Ok((out, _stderr)) => {
+            let candidate: Vec<(String, String, i32, Option<i32>)> = out
+                .shifts
+                .iter()
+                .filter(|s| !s.is_dropped)
+                .map(|s| {
+                    (
+                        s.shift_date.clone(),
+                        s.start_time.clone(),
+                        s.sling_position_id,
+                        s.sling_user_id,
+                    )
+                })
+                .collect();
+            let (changed, added, removed) = diff_schedules(&baseline, &candidate);
+            Ok(DraftValidation {
+                ok: true,
+                error: None,
+                shift_count: candidate.len() as i64,
+                changed_assignments: changed,
+                added_slots: added,
+                removed_slots: removed,
+                month,
+            })
+        }
+    }
 }
 
 // ============================================================
@@ -1959,6 +2755,84 @@ pub fn refresh_roster_from_sling(
 }
 
 // ============================================================
+// Algorithm versions (rules-as-data + code drafts) — thin wrappers over
+// src-tauri/src/algorithm.rs
+// ============================================================
+
+#[tauri::command]
+pub fn list_algorithm_versions(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+) -> Result<Vec<crate::algorithm::AlgorithmVersion>, String> {
+    let conn = db.0.lock().map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    crate::algorithm::list_versions(&conn, &dir)
+}
+
+#[tauri::command]
+pub fn adopt_algorithm_version(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    description: String,
+    rules: serde_json::Value,
+    script_content: Option<String>,
+    claude_run_id: Option<i64>,
+) -> Result<i32, String> {
+    let conn = db.0.lock().map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    let v = crate::algorithm::adopt_version(
+        &conn,
+        &dir,
+        &description,
+        &rules,
+        script_content.as_deref(),
+        claude_run_id,
+    )?;
+    let _ = conn.execute("CHECKPOINT", []);
+    Ok(v)
+}
+
+/// Delete a non-active version's script file (from algorithms/ and
+/// archive/). Proposal history is untouched — the version just can't be
+/// re-run any more.
+#[tauri::command]
+pub fn delete_algorithm_script(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    version: i32,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(err)?;
+    let active = crate::algorithm::active_version(&conn)?
+        .map(|v| v.version)
+        .unwrap_or(crate::algorithm::BASELINE_VERSION);
+    if version == active {
+        return Err("cannot delete the active version's script".to_string());
+    }
+    let file: Option<String> = conn
+        .query_row(
+            "SELECT script_file FROM algorithm_versions WHERE version = ?",
+            duckdb::params![version],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("version v{version} not found: {e:#}"))?;
+    let Some(file) = file else {
+        return Err("that version runs the baseline script — nothing to delete".to_string());
+    };
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    let mut removed = false;
+    for candidate in [dir.join(&file), dir.join("archive").join(&file)] {
+        if candidate.exists() {
+            std::fs::remove_file(&candidate).map_err(err)?;
+            removed = true;
+        }
+    }
+    if !removed {
+        return Err(format!("script {file} is already gone"));
+    }
+    Ok(())
+}
+
+// ============================================================
 // helpers
 // ============================================================
 
@@ -2012,6 +2886,138 @@ mod tests {
 
     fn user(id: i64, name: &str, group_ids: Vec<i64>) -> SlingUser {
         SlingUser { id, name: name.into(), lastname: "T".into(), active: true, group_ids }
+    }
+
+    #[test]
+    fn claude_model_setting_roundtrip_and_fallback() {
+        let conn = conn_with_schema();
+        assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unset -> default
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-haiku-4-5')", []).unwrap();
+        assert_eq!(claude_model(&conn), "claude-haiku-4-5");
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-9000')", []).unwrap();
+        assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unknown -> default
+    }
+
+    #[test]
+    fn edit_position_recomputes_end_time_and_audits() {
+        let mut conn = conn_with_schema();
+        conn.execute_batch(
+            "INSERT INTO positions (sling_position_id, class_name, duration_minutes) VALUES
+               (29470407, 'Classic', 50), (29470408, 'Empower', 45);
+             INSERT INTO positions (sling_position_id, class_name, duration_minutes, active)
+               VALUES (29470409, 'Retired', 30, FALSE);
+             INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+               VALUES (1930001, 'Alex', 4, 5);
+             INSERT INTO proposals (target_month, algorithm_version, parameters)
+               VALUES ('2026-08', 'v9', '{}');
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-08-03', '09:00', '09:50', 29470407, 1930001, 'test'
+             FROM proposals;",
+        )
+        .unwrap();
+        let sid: i64 = conn
+            .query_row("SELECT min(id) FROM proposal_shifts", [], |r| r.get(0))
+            .unwrap();
+
+        edit_position_impl(&mut conn, sid, 29470408, Some("format swap".into())).expect("edit ok");
+        let (pid, end): (i32, String) = conn
+            .query_row(
+                "SELECT sling_position_id, end_time FROM proposal_shifts WHERE id = ?",
+                duckdb::params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pid, 29470408);
+        assert_eq!(end, "09:45"); // 09:00 + 45min
+        let (field, old_v, new_v): (String, String, String) = conn
+            .query_row(
+                "SELECT field, old_value, new_value FROM edits
+                 WHERE proposal_shift_id = ? ORDER BY id DESC LIMIT 1",
+                duckdb::params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(field, "sling_position_id");
+        assert_eq!((old_v.as_str(), new_v.as_str()), ("29470407", "29470408"));
+
+        // Guards: unchanged position, inactive position.
+        assert!(edit_position_impl(&mut conn, sid, 29470408, None).is_err());
+        assert!(edit_position_impl(&mut conn, sid, 29470409, None).is_err());
+    }
+
+    #[test]
+    fn validate_claude_edits_marks_bad_edits() {
+        let conn = conn_with_schema();
+        conn.execute_batch(
+            "INSERT INTO positions (sling_position_id, class_name, duration_minutes) VALUES
+               (101, 'Classic', 50), (102, 'Empower', 45);
+             INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+               VALUES (501, 'Alex', 4, 5), (502, 'Kay', 4, 5);
+             INSERT INTO proposals (target_month, algorithm_version, parameters)
+               VALUES ('2026-08', 'v9', '{}');
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-08-03', '09:00', '09:50', 101, 501, 'test' FROM proposals;",
+        )
+        .unwrap();
+        let pid: i64 = conn.query_row("SELECT min(id) FROM proposals", [], |r| r.get(0)).unwrap();
+        let sid: i64 = conn.query_row("SELECT min(id) FROM proposal_shifts", [], |r| r.get(0)).unwrap();
+
+        let mk = |shift, action: &str, uid: Option<i32>, class: Option<&str>| {
+            crate::editor::ProposedEdit {
+                proposal_shift_id: shift,
+                action: action.to_string(),
+                new_user_id: uid,
+                new_class_name: class.map(String::from),
+                rationale: "t".into(),
+                valid: true,
+                validation_note: None,
+            }
+        };
+        let mut edits = vec![
+            mk(sid, "reassign", Some(502), None),        // ok
+            mk(sid, "reassign", Some(501), None),        // same teacher
+            mk(sid, "reassign", Some(999), None),        // unknown teacher
+            mk(sid, "change_format", None, Some("Empower")), // ok
+            mk(sid, "change_format", None, Some("Yoga")),    // unknown class
+            mk(sid, "unassign", None, None),             // ok
+            mk(9999, "unassign", None, None),            // unknown slot
+            mk(sid, "explode", None, None),              // unknown action
+        ];
+        validate_claude_edits(&conn, pid, &mut edits).unwrap();
+        let flags: Vec<bool> = edits.iter().map(|e| e.valid).collect();
+        assert_eq!(flags, vec![true, false, false, true, false, true, false, false]);
+        assert!(edits[6].validation_note.as_deref().unwrap().contains("not in this proposal"));
+    }
+
+    #[test]
+    fn draft_validation_diff_counts() {
+        let s = |d: &str, t: &str, p: i32, u: Option<i32>| (d.to_string(), t.to_string(), p, u);
+        let base = vec![
+            s("2026-08-03", "09:00", 101, Some(501)),
+            s("2026-08-03", "17:30", 102, Some(502)),
+            s("2026-08-04", "09:00", 101, None),
+        ];
+        assert_eq!(diff_schedules(&base, &base), (0, 0, 0));
+
+        let mut reassigned = base.clone();
+        reassigned[0].3 = Some(502);
+        assert_eq!(diff_schedules(&base, &reassigned), (1, 0, 0));
+
+        let mut shifted = base.clone();
+        shifted.remove(2);
+        shifted.push(s("2026-08-05", "09:00", 101, Some(501)));
+        assert_eq!(diff_schedules(&base, &shifted), (0, 1, 1));
+    }
+
+    /// The payload builder still fails loudly with no trailing history
+    /// (blank-calendar guard), and stays independent of the version store.
+    #[test]
+    fn build_payload_requires_history() {
+        let conn = conn_with_schema();
+        let e = build_propose_payload(&conn, "2026-09").unwrap_err();
+        assert!(e.contains("Pull from Sling"), "{e}");
     }
 
     /// sync_roster must be a no-op-safe delta sync: repeated runs with the

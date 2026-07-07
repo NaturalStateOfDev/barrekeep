@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { CalendarView } from "../components/calendar/CalendarView";
+import { ClaudeEditorPanel } from "../components/claude/ClaudeEditorPanel";
+import { AlgorithmCard } from "../components/claude/AlgorithmCard";
 import { SlingTokenModal } from "../components/SlingTokenModal";
 import { PushModal } from "../components/PushModal";
 import { MonthSelector } from "../components/MonthSelector";
@@ -33,6 +35,7 @@ import {
   WEEKDAYS_SHORT,
 } from "../lib/dates";
 import type {
+  Position,
   Teacher,
   ProposalSummary,
   ProposalDetail,
@@ -47,7 +50,7 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-const TABS = ["calendar", "list", "edits", "review"] as const;
+const TABS = ["calendar", "list", "edits", "claude"] as const;
 type Tab = (typeof TABS)[number];
 
 export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) {
@@ -74,6 +77,9 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   // Schedule context for the selected proposal (shared by KPIs, the
   // calendar grid, the issue queue and the day editor).
   const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
+  const [algoRefresh, setAlgoRefresh] = useState(0);
   const [qualifiedPairs, setQualifiedPairs] = useState<Set<string>>(new Set());
   const [blocks, setBlocks] = useState<AvailabilityBlock[]>([]);
   const [externalShifts, setExternalShifts] = useState<ExternalShiftRow[]>([]);
@@ -110,6 +116,8 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
 
   const loadContext = (month: string) => {
     api.listTeachers().then(setTeachers).catch(() => {});
+    api.listPositions().then(setPositions).catch(() => {});
+    api.hasAnthropicKey().then(setHasAnthropicKey).catch(() => {});
     api.listQualifiedPairs().then((list) => setQualifiedPairs(new Set(list))).catch(() => {});
     api.listAvailabilityBlocks(month).then(setBlocks).catch(() => {});
     api.listExternalShiftsForMonth(month).then(setExternalShifts).catch(() => {});
@@ -361,6 +369,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
             <CalendarView
               proposal={detail}
               teachers={teachers}
+              positions={positions}
               qualifiedPairs={qualifiedPairs}
               blocks={blocks}
               issues={issues}
@@ -376,7 +385,20 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
           )}
           {tab === "list" && <ProposalShiftsTable detail={detail} />}
           {tab === "edits" && <EditHistory proposalId={detail.summary.id} />}
-          {tab === "review" && <ClaudeReviewSection proposalId={detail.summary.id} />}
+          {tab === "claude" && (
+            <>
+              <ClaudeEditorPanel
+                detail={detail}
+                positions={positions}
+                teachers={teachers}
+                hasKey={hasAnthropicKey}
+                onProposalChanged={onProposalChanged}
+                onVersionAdopted={() => setAlgoRefresh((n) => n + 1)}
+              />
+              <ClaudeReviewSection proposalId={detail.summary.id} />
+              <AlgorithmCard refreshToken={algoRefresh} />
+            </>
+          )}
         </>
       ) : null}
 
@@ -513,8 +535,21 @@ function EditHistory({ proposalId }: { proposalId: number }) {
                 {e.shift_date} {e.start_time}
               </td>
               <td>{e.class_name}</td>
-              <td>{e.old_teacher_name ?? <span className="muted">Dropped</span>}</td>
-              <td>{e.new_teacher_name ?? <span className="muted">Dropped</span>}</td>
+              <td>
+                {e.field === "sling_position_id"
+                  ? e.old_class_name ?? e.old_value
+                  : e.old_teacher_name ?? <span className="muted">Dropped</span>}
+              </td>
+              <td>
+                {e.field === "sling_position_id" ? (
+                  <>
+                    {e.new_class_name ?? e.new_value}{" "}
+                    <span className="pill pill-fyi">format</span>
+                  </>
+                ) : (
+                  e.new_teacher_name ?? <span className="muted">Dropped</span>
+                )}
+              </td>
               <td className="muted">{e.reason ?? ""}</td>
             </tr>
           ))}
