@@ -46,3 +46,19 @@ tauri-plugin-process = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Optimize the scrypt snapshot KDF even in dev builds. Stronghold encrypts its
+# snapshot with an age/scrypt scheme; scrypt is memory-hard integer code that
+# runs ~40x slower unoptimized, so a Sling-token save (secrets.set) took ~46s
+# under `tauri dev` vs ~1.1s in release. Optimizing just these crates brings
+# dev in line with release (measured 46.3s -> 1.2s). Scoped so only they
+# recompile — the app crate stays unoptimized for fast rebuilds; release is
+# unaffected (it already optimizes everything). NOT the earlier argon2/chacha
+# crates — the hot loop is in scrypt/salsa20, which is why the first attempt
+# at this did nothing.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
