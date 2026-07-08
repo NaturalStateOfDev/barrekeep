@@ -1,0 +1,9 @@
+# Dev-machine linker. GNU ld peaks at 2-3GB RSS per link of the Tauri app
+# (measured 2026-07-07), which is what exhausts laptop RAM during long
+# `tauri dev` sessions; mold links the same binary in a fraction of the
+# memory and time. Scoped to Linux, so the Windows laptop and the
+# windows-latest CI runners are untouched.
+#
+# Requires mold on the machine: sudo apt-get install -y mold
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

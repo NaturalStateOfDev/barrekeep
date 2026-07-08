@@ -16,7 +16,8 @@ import { AlgorithmCard } from "../components/claude/AlgorithmCard";
 import { SlingTokenModal } from "../components/SlingTokenModal";
 import { PushModal } from "../components/PushModal";
 import { MonthSelector } from "../components/MonthSelector";
-import { ProposalSwitcher } from "../components/ui/ProposalSwitcher";
+import { ProposalSwitcher, type MonthEntry } from "../components/ui/ProposalSwitcher";
+import { VersionSwitcher } from "../components/ui/VersionSwitcher";
 import { PageHead } from "../components/ui/PageHead";
 import { Kpi, CoverageRing } from "../components/ui/Kpi";
 import { Tabs } from "../components/ui/Tabs";
@@ -151,6 +152,34 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
 
   const kpis = useMemo(() => computeKpis(detail?.shifts ?? []), [detail]);
 
+  // One switcher entry per month (its current proposal), newest month first.
+  // The list arrives ordered generated_at DESC, so the first proposal seen
+  // per month is the newest; prefer the is_current one as representative.
+  const monthEntries = useMemo<MonthEntry[]>(() => {
+    const byMonth = new Map<string, { rep: ProposalSummary; count: number }>();
+    for (const p of proposals ?? []) {
+      const e = byMonth.get(p.target_month);
+      if (!e) byMonth.set(p.target_month, { rep: p, count: 1 });
+      else {
+        e.count += 1;
+        if (p.is_current && !e.rep.is_current) e.rep = p;
+      }
+    }
+    return [...byMonth.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([month, e]) => ({ month, proposalId: e.rep.id, draftCount: e.count }));
+  }, [proposals]);
+
+  const selectedSummary =
+    selectedId != null ? proposals?.find((p) => p.id === selectedId) : undefined;
+  const monthVersions = useMemo(
+    () =>
+      selectedSummary
+        ? (proposals ?? []).filter((p) => p.target_month === selectedSummary.target_month)
+        : [],
+    [proposals, selectedSummary],
+  );
+
   const activeMonth = mode === "detail" && detail ? detail.summary.target_month : newMonth;
   const readonly = isReadOnlyMonth(activeMonth, today);
   const readonlyTitle = readonly ? "Past month — read only" : "";
@@ -241,12 +270,13 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     );
   }
 
+  // The draft id + current/superseded status now live in the version pill
+  // next to the title, so the subline keeps only the schedule stats.
   const summary = detail?.summary;
   const subline =
     mode === "detail" && summary ? (
       <>
-        Proposal #{summary.id} · {kpis.totalCount} classes · {kpis.teacherCount} teachers ·{" "}
-        {summary.is_current ? "current" : "superseded"}
+        {kpis.totalCount} classes · {kpis.teacherCount} teachers
         {summary.edit_count > 0 &&
           ` · ${summary.edit_count} manual edit${summary.edit_count === 1 ? "" : "s"}`}
         {readonly && " · past month, read only"}
@@ -257,20 +287,29 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     <div>
       <PageHead
         title={
-          <ProposalSwitcher
-            proposals={proposals}
-            value={mode === "detail" ? selectedId : null}
-            fallbackTitle={monthLabel(newMonth)}
-            onChange={(id) => {
-              setSelectedId(id);
-              setMode("detail");
-            }}
-            onNew={() => {
-              setMode("new");
-              setError(null);
-              setLastResult(null);
-            }}
-          />
+          <div className="bk-title-row">
+            <ProposalSwitcher
+              months={monthEntries}
+              value={mode === "detail" ? selectedSummary?.target_month ?? null : null}
+              fallbackTitle={monthLabel(newMonth)}
+              onChange={(id) => {
+                setSelectedId(id);
+                setMode("detail");
+              }}
+              onNew={() => {
+                setMode("new");
+                setError(null);
+                setLastResult(null);
+              }}
+            />
+            {mode === "detail" && selectedId != null && monthVersions.length > 0 && (
+              <VersionSwitcher
+                versions={monthVersions}
+                value={selectedId}
+                onChange={(id) => setSelectedId(id)}
+              />
+            )}
+          </div>
         }
         sub={subline}
         actions={

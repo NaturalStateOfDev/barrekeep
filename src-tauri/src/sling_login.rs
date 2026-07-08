@@ -1,9 +1,11 @@
 //! In-app browser-login flow for Sling.
 //!
 //! Opens a Tauri webview window pointed at app.getsling.com with an
-//! injected interceptor script. When the page makes its first
-//! authenticated request to api.getsling.com, the script triggers a
-//! same-origin navigation to `/__bk_capture?t=<token>`. The Rust-side
+//! injected interceptor script. When the page exchanges its first
+//! authenticated request or response with api.getsling.com (normally the
+//! login POST's response, which carries the token in its Authorization
+//! header), the script triggers a same-origin navigation to
+//! `/__bk_capture?t=<token>`. The Rust-side
 //! `on_navigation` hook intercepts that URL, extracts the token into the
 //! in-memory SlingToken state, then hands persistence + window-close off
 //! to a background thread.
@@ -111,12 +113,14 @@ pub fn open_login_window(app: AppHandle) -> Result<()> {
         // tick rather than reentrantly.
         let app_deferred = app_for_nav.clone();
         std::thread::spawn(move || {
-            // Persist off the UI thread (Stronghold save = disk I/O + crypto).
-            if let Some(secrets) = app_deferred.try_state::<crate::secrets::Secrets>() {
-                if let Err(e) = secrets.set(crate::secrets::KEY_SLING_TOKEN, &token) {
-                    eprintln!("[sling_login] failed to persist token: {e}");
-                }
-            }
+            // The in-memory token was already stored before this thread ran
+            // (see the try_state::<SlingToken> write above), so the UI never
+            // needs to wait for disk persistence. Close the window and notify
+            // the frontend FIRST, then commit the encrypted Stronghold
+            // snapshot. Order matters: the Stronghold commit runs argon2 and
+            // takes ~1-2s in release (and tens of seconds in an unoptimized
+            // dev build); persisting before the close previously held the
+            // login window open for that entire duration.
             let _ = app_deferred.emit("sling-token-saved", ());
             let app_close = app_deferred.clone();
             let _ = app_deferred.run_on_main_thread(move || {
@@ -124,6 +128,12 @@ pub fn open_login_window(app: AppHandle) -> Result<()> {
                     let _ = w.close();
                 }
             });
+            // Persist off the UI thread (Stronghold save = disk I/O + crypto).
+            if let Some(secrets) = app_deferred.try_state::<crate::secrets::Secrets>() {
+                if let Err(e) = secrets.set(crate::secrets::KEY_SLING_TOKEN, &token) {
+                    eprintln!("[sling_login] failed to persist token: {e}");
+                }
+            }
         });
         false
     })

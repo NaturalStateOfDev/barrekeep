@@ -8,7 +8,13 @@
 //  2. CAPTURE — monkey-patch fetch + XHR and, when the page makes an
 //     authenticated request to api.getsling.com, trigger a same-origin
 //     navigation to a sentinel URL that the Rust on_navigation hook
-//     intercepts.
+//     intercepts. On an already-signed-in session this fires on the very
+//     first request (the SPA's /account/session check), so capture is
+//     effectively instant; on a fresh sign-in it fires on the first
+//     authenticated call after login. (Reading the token from the response
+//     side is not possible: api.getsling.com is cross-origin to the app
+//     shell, so the Authorization response header is hidden from JS unless
+//     Sling opts in via Access-Control-Expose-Headers, which it does not.)
 //
 // Why a navigation rather than a Tauri event emit: Tauri 2 does not
 // expose the IPC bridge on external/remote URLs by default.
@@ -149,20 +155,31 @@
     return _setHeader.call(this, name, value);
   };
 
-  // 90s idle banner
-  setTimeout(() => {
+  // Waiting banner, two stages. With response-side capture the token is
+  // normally grabbed the instant sign-in succeeds, so this is a fallback —
+  // but if we ARE still waiting, say so early rather than look stalled.
+  let banner = null;
+  function showBanner(text) {
     if (captured) return;
     try {
-      const b = document.createElement("div");
-      b.style.cssText =
-        "position:fixed;top:0;left:0;right:0;background:hsl(36 60% 92%);" +
-        "color:hsl(36 70% 26%);padding:0.5rem 0.75rem;" +
-        "font:13px/1.4 sans-serif;border-bottom:1px solid hsl(36 60% 70%);" +
-        "z-index:99999";
-      b.textContent =
-        "Still waiting for sign-in. If you're already signed in, " +
-        "try clicking around the calendar or refresh once.";
-      if (document.body) document.body.appendChild(b);
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.style.cssText =
+          "position:fixed;top:0;left:0;right:0;background:hsl(36 60% 92%);" +
+          "color:hsl(36 70% 26%);padding:0.5rem 0.75rem;" +
+          "font:13px/1.4 sans-serif;border-bottom:1px solid hsl(36 60% 70%);" +
+          "z-index:99999";
+        if (document.body) document.body.appendChild(banner);
+      }
+      banner.textContent = text;
     } catch (_) { /* swallow */ }
-  }, 90000);
+  }
+  setTimeout(() => showBanner(
+    "Barrekeep is waiting for you to sign in — this window closes by itself " +
+    "as soon as your session is captured."
+  ), 20000);
+  setTimeout(() => showBanner(
+    "Still waiting for sign-in. If you're already signed in, " +
+    "try clicking around the calendar or refresh once."
+  ), 90000);
 })();

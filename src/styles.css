@@ -733,6 +733,33 @@ code {
   background: var(--surface-sunken);
 }
 
+/* Month title + version pill side by side */
+.bk-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.bk-switcher-button.version {
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  letter-spacing: normal;
+  color: var(--text-muted);
+  padding: 4px 12px;
+  border: 1px solid var(--border-card);
+  border-radius: 999px;
+  background: var(--surface-card);
+}
+
+.bk-switcher-button.version:hover {
+  background: var(--surface-sunken);
+}
+
+.bk-version-switcher .bk-switcher-menu {
+  min-width: 340px;
+}
+
 /* ---- Push modal internals ---- */
 
 .bk-push-list {
