@@ -12,6 +12,7 @@ mod algorithm;
 mod commands;
 mod editor;
 mod db;
+mod logging;
 mod migrations;
 mod review;
 mod secrets;
@@ -39,6 +40,9 @@ pub fn run() {
             hasher.finalize().to_vec()
         }).build())
         .setup(|app| {
+            // First: file logging + panic hook, so any failure below (DB open,
+            // migrations) is recorded even though Windows discards stderr.
+            logging::init(app.handle());
             #[cfg(desktop)]
             {
                 app.handle()
@@ -101,6 +105,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            logging::log_frontend_error,
             commands::db_info,
             commands::list_teachers,
             commands::update_teacher_settings,
