@@ -18,17 +18,15 @@ import "@fontsource/hanken-grotesk/700.css";
 import "./styles.css";
 import "./components/calendar/calendar.css";
 
-// Catch errors that escape React (async throws, event handlers, early module
-// eval) and log them to the file so a blank window is never a dead end.
-window.addEventListener("error", (e) => {
-  logFrontendError(
-    `window.onerror: ${e.message} @ ${e.filename}:${e.lineno}:${e.colno}\n${e.error?.stack ?? ""}`,
-  );
-});
-window.addEventListener("unhandledrejection", (e) => {
-  const r = e.reason;
-  logFrontendError(`unhandledrejection: ${r?.stack ?? r?.message ?? String(r)}`);
-});
+// Global window.onerror / unhandledrejection capture lives in index.html so
+// it's registered before this module graph evaluates — a throw during module
+// evaluation, or the bundle failing to load at all, would otherwise be
+// silent. Don't re-register here: the inline handlers cover the app's whole
+// lifetime and duplicates would double-log every error.
+
+// Breadcrumb: separates "webview never loaded our JS" (line absent) from
+// "JS loaded but the app broke later" (line present) when reading the log.
+logFrontendError("boot: frontend bundle evaluated, main.tsx running");
 
 async function start() {
   // Browser-only preview (npm run dev outside Tauri): install a mock IPC
