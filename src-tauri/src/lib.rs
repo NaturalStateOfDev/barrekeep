@@ -123,13 +123,16 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         app.handle().plugin(tauri_plugin_process::init())?;
     }
     let path = db::db_path(app.handle())?;
+    // Backup BEFORE the long-lived connection opens — backup_if_pending must
+    // copy the file with no handle open (Windows locks are mandatory).
+    logging::write_line("startup", "pre-migration backup check");
+    if let Some(backup) = migrations::backup_if_pending(&path)? {
+        logging::write_line("migration", &format!("backed up database to {}", backup.display()));
+    }
     logging::write_line("startup", &format!("opening database at {}", path.display()));
     let db = db::Db::open(app.handle())?;
     {
         let conn = db.0.lock().expect("db poisoned at startup");
-        if let Some(backup) = migrations::backup_if_pending(&conn, &path)? {
-            logging::write_line("migration", &format!("backed up database to {}", backup.display()));
-        }
         logging::write_line("startup", "running migrations");
         migrations::run(&conn)?;
         seed::run_if_empty(&conn)?;
