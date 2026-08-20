@@ -6,6 +6,47 @@
     <title>Barrekeep</title>
   </head>
   <body>
+    <script>
+      // Earliest-possible error capture, registered BEFORE the app bundle's
+      // <script> so a bundle that fails to load, or throws during module
+      // evaluation, still reaches barrekeep.log (module-level handlers in
+      // main.tsx would register too late for those). Capture phase because
+      // resource-load errors don't bubble. These handlers stay active for the
+      // app's whole lifetime — main.tsx does not register duplicates.
+      // Best-effort: a no-op outside Tauri (browser-only dev preview).
+      (function () {
+        function report(message) {
+          try {
+            var t = window.__TAURI_INTERNALS__;
+            if (!t || !t.invoke) return;
+            // Swallow the rejection: a failed invoke would otherwise fire
+            // unhandledrejection and re-enter report() forever.
+            var p = t.invoke("log_frontend_error", { message: message });
+            if (p && p.catch) p.catch(function () {});
+          } catch (_) {}
+        }
+        window.addEventListener(
+          "error",
+          function (e) {
+            var el = e.target;
+            if (el && el !== window && (el.src || el.href)) {
+              report("resource failed to load: " + (el.src || el.href));
+              return;
+            }
+            report(
+              "window.onerror: " + (e.message || "error") +
+                " @ " + (e.filename || "?") + ":" + (e.lineno || 0) + ":" + (e.colno || 0) +
+                (e.error && e.error.stack ? "\n" + e.error.stack : "")
+            );
+          },
+          true
+        );
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          report("unhandledrejection: " + ((r && (r.stack || r.message)) || String(r)));
+        });
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

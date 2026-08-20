@@ -82,7 +82,7 @@ pub fn open_login_window(app: AppHandle) -> Result<()> {
             .find(|(k, _)| k == "t")
             .map(|(_, v)| v.into_owned())
         else {
-            eprintln!("[sling_login] sentinel URL had no 't' query param");
+            crate::logging::write_line("sling_login", "sentinel URL had no 't' query param");
             return false;
         };
         // Store the in-memory token now — this is a cheap, non-blocking mutex
@@ -131,7 +131,10 @@ pub fn open_login_window(app: AppHandle) -> Result<()> {
             // Persist off the UI thread (Stronghold save = disk I/O + crypto).
             if let Some(secrets) = app_deferred.try_state::<crate::secrets::Secrets>() {
                 if let Err(e) = secrets.set(crate::secrets::KEY_SLING_TOKEN, &token) {
-                    eprintln!("[sling_login] failed to persist token: {e}");
+                    crate::logging::write_line(
+                        "sling_login",
+                        &format!("failed to persist token: {e}"),
+                    );
                 }
             }
         });

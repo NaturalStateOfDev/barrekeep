@@ -27,7 +27,13 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // File logging + panic hook before anything else. Plugin initialization
+    // and the event-loop/webview bootstrap all run BEFORE the setup hook, so
+    // a failure there would otherwise die with nothing in the log (Windows
+    // discards stderr).
+    logging::early_init();
+
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_stronghold::Builder::new(|password| {
             // Stronghold vault encryption key. v1 uses a static derivation
@@ -40,69 +46,18 @@ pub fn run() {
             hasher.finalize().to_vec()
         }).build())
         .setup(|app| {
-            // First: file logging + panic hook, so any failure below (DB open,
-            // migrations) is recorded even though Windows discards stderr.
+            // First: confirm the log path now that an AppHandle exists (the
+            // panic hook is already installed by early_init).
             logging::init(app.handle());
-            #[cfg(desktop)]
-            {
-                app.handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())?;
-                app.handle().plugin(tauri_plugin_process::init())?;
+            let result = setup_app(app);
+            // A setup error aborts startup — record it here, because the
+            // generic "failed to setup" surfaced by Tauri never reaches the
+            // log on Windows.
+            match &result {
+                Ok(()) => logging::write_line("startup", "setup complete; creating main window"),
+                Err(e) => logging::write_line("startup", &format!("setup FAILED: {e}")),
             }
-            let db = db::Db::open(app.handle())?;
-            {
-                let conn = db.0.lock().expect("db poisoned at startup");
-                let path = db::db_path(app.handle())?;
-                if let Some(backup) = migrations::backup_if_pending(&conn, &path)? {
-                    eprintln!("[migration] backed up database to {}", backup.display());
-                }
-                migrations::run(&conn)?;
-                seed::run_if_empty(&conn)?;
-                // Tidy old algorithm script versions (spec: >3 versions
-                // behind AND unused >3 months → algorithms/archive/).
-                match algorithm::algorithms_dir(app.handle()) {
-                    Ok(dir) => match algorithm::archive_sweep(&conn, &dir) {
-                        Ok(moved) => {
-                            for f in moved {
-                                eprintln!("[algorithm] archived old script {f}");
-                            }
-                        }
-                        Err(e) => eprintln!("[algorithm] archive sweep failed: {e}"),
-                    },
-                    Err(e) => eprintln!("[algorithm] no algorithms dir: {e}"),
-                }
-            }
-            app.manage(db);
-
-            // Open the Stronghold-backed secrets vault and preload the
-            // Sling token (if any). If the vault can't be opened for any
-            // reason, log and continue with no token rather than killing
-            // app startup.
-            let (secrets, initial_token, initial_anthropic) =
-                match secrets::Secrets::open(&app.handle()) {
-                    Ok(s) => {
-                        let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
-                            eprintln!("[secrets] failed to read sling_token: {e}");
-                            None
-                        });
-                        let anthropic = s.get(secrets::KEY_ANTHROPIC).unwrap_or_else(|e| {
-                            eprintln!("[secrets] failed to read anthropic_key: {e}");
-                            None
-                        });
-                        (Some(s), tok, anthropic)
-                    }
-                    Err(e) => {
-                        eprintln!("[secrets] failed to open vault: {e}");
-                        (None, None, None)
-                    }
-                };
-            if let Some(s) = secrets {
-                app.manage(s);
-            }
-            app.manage(AnthropicKey(Mutex::new(initial_anthropic)));
-            app.manage(SlingToken(Mutex::new(initial_token)));
-            app.manage(SlingOrgHint(Mutex::new(None)));
-            Ok(())
+            result
         })
         .invoke_handler(tauri::generate_handler![
             logging::log_frontend_error,
@@ -146,6 +101,83 @@ pub fn run() {
             commands::push_proposal_dry_run,
             commands::push_proposal_execute,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    // Covers failures outside setup: plugin init, window/webview creation,
+    // event-loop errors. `.expect()` alone would print to the discarded
+    // stderr on Windows.
+    if let Err(e) = result {
+        logging::write_line("fatal", &format!("tauri run failed: {e}"));
+        std::process::exit(1);
+    }
+}
+
+/// Everything the app wires up at startup, with a log line per stage so the
+/// last "startup" line in barrekeep.log names the stage that died.
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(desktop)]
+    {
+        logging::write_line("startup", "registering updater + process plugins");
+        app.handle()
+            .plugin(tauri_plugin_updater::Builder::new().build())?;
+        app.handle().plugin(tauri_plugin_process::init())?;
+    }
+    let path = db::db_path(app.handle())?;
+    logging::write_line("startup", &format!("opening database at {}", path.display()));
+    let db = db::Db::open(app.handle())?;
+    {
+        let conn = db.0.lock().expect("db poisoned at startup");
+        if let Some(backup) = migrations::backup_if_pending(&conn, &path)? {
+            logging::write_line("migration", &format!("backed up database to {}", backup.display()));
+        }
+        logging::write_line("startup", "running migrations");
+        migrations::run(&conn)?;
+        seed::run_if_empty(&conn)?;
+        logging::write_line("startup", "migrations + seed complete; algorithm archive sweep");
+        // Tidy old algorithm script versions (spec: >3 versions
+        // behind AND unused >3 months → algorithms/archive/).
+        match algorithm::algorithms_dir(app.handle()) {
+            Ok(dir) => match algorithm::archive_sweep(&conn, &dir) {
+                Ok(moved) => {
+                    for f in moved {
+                        logging::write_line("algorithm", &format!("archived old script {f}"));
+                    }
+                }
+                Err(e) => logging::write_line("algorithm", &format!("archive sweep failed: {e}")),
+            },
+            Err(e) => logging::write_line("algorithm", &format!("no algorithms dir: {e}")),
+        }
+    }
+    app.manage(db);
+
+    // Open the Stronghold-backed secrets vault and preload the
+    // Sling token (if any). If the vault can't be opened for any
+    // reason, log and continue with no token rather than killing
+    // app startup.
+    logging::write_line("startup", "opening secrets vault");
+    let (secrets, initial_token, initial_anthropic) =
+        match secrets::Secrets::open(&app.handle()) {
+            Ok(s) => {
+                let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
+                    logging::write_line("secrets", &format!("failed to read sling_token: {e}"));
+                    None
+                });
+                let anthropic = s.get(secrets::KEY_ANTHROPIC).unwrap_or_else(|e| {
+                    logging::write_line("secrets", &format!("failed to read anthropic_key: {e}"));
+                    None
+                });
+                (Some(s), tok, anthropic)
+            }
+            Err(e) => {
+                logging::write_line("secrets", &format!("failed to open vault: {e}"));
+                (None, None, None)
+            }
+        };
+    if let Some(s) = secrets {
+        app.manage(s);
+    }
+    app.manage(AnthropicKey(Mutex::new(initial_anthropic)));
+    app.manage(SlingToken(Mutex::new(initial_token)));
+    app.manage(SlingOrgHint(Mutex::new(None)));
+    Ok(())
 }

@@ -86,7 +86,7 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         if applied.contains(&m.version) {
             continue;
         }
-        eprintln!("[migration] applying {} — {}", m.version, m.label);
+        crate::logging::write_line("migration", &format!("applying {} — {}", m.version, m.label));
         conn.execute_batch(m.sql)?;
         conn.execute(
             "INSERT INTO _migrations (version, label) VALUES (?, ?)",
