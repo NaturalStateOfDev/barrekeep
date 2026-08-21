@@ -113,6 +113,18 @@ When you (Claude) edit code in this repo:
   `1.1MMPP` = libduckdb `1.MM.PP`) because engine bumps change the on-disk
   format and are not backward-readable — bump deliberately, via the
   dependabot PR.
+- **Windows file locks are mandatory; never touch `scheduler.duckdb` on disk
+  while a connection is open.** Copying, moving, or deleting the database
+  file (or its WAL) while any DuckDB connection holds it fails on Windows
+  with "being used by another process (os error 32)". Linux locks are
+  advisory, so the identical code passes on the dev machine and in any
+  Linux test run — "works on Linux" is no evidence for file-handling code.
+  This was the v0.2.0–0.2.2 instant-crash-at-startup: the pre-migration
+  backup copied the file while the app's own connection was open, on every
+  launch, and the schema never advanced. Pattern: open a short-lived
+  connection, `CHECKPOINT`, explicitly `close()` it, then do the file op
+  (see `migrations::backup_if_pending`). The Rust tests only reproduce
+  this on a Windows runner.
 - **Creating a webview window (the Sling login) must NOT happen on the UI
   thread on Windows.** `WebviewWindowBuilder::build()` blocks until WebView2's
   controller-ready notification arrives, and that only fires from the event
