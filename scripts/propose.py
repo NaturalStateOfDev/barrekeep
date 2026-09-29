@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 from collections import defaultdict, Counter
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, tzinfo
 import csv, os
 
 parser = argparse.ArgumentParser()
@@ -88,7 +88,61 @@ POSITION_NAMES = {29470407: "Empower", 29470419: "Focus", 29470489: "Breaking Do
                   29303958: "Align", 29303965: "Classic", 29304030: "Define",
                   29304197: "Reform", 29303535: "Teacher", 29303536: "Sales Rep"}
 NAME_TO_PID = {v: k for k, v in POSITION_NAMES.items()}
-TZ = timezone(timedelta(hours=-5))
+class _USCentral(tzinfo):
+    """America/Chicago under the current (2007+) US rules: CDT (UTC-5) from
+    the second Sunday of March 02:00 to the first Sunday of November 02:00,
+    CST (UTC-6) otherwise. Hand-rolled because zoneinfo needs the third-party
+    tzdata package on Windows, and this script is stdlib-only. Mirrors the
+    USTimeZone example in the datetime docs (fold-aware). Checked hour by
+    hour against zoneinfo in scripts/tests/test_propose_rules.py."""
+    _HOUR = timedelta(hours=1)
+    _STD = timedelta(hours=-6)
+
+    @staticmethod
+    def _dst_range(year):
+        def first_sunday_on_or_after(d):
+            return d + timedelta(days=(6 - d.weekday()) % 7)
+        return (first_sunday_on_or_after(datetime(year, 3, 8, 2)),
+                first_sunday_on_or_after(datetime(year, 11, 1, 2)))
+
+    def tzname(self, dt):
+        return 'CDT' if self.dst(dt) else 'CST'
+
+    def utcoffset(self, dt):
+        return self._STD + self.dst(dt)
+
+    def dst(self, dt):
+        if dt is None or dt.tzinfo is None:
+            return timedelta(0)
+        start, end = self._dst_range(dt.year)
+        naive = dt.replace(tzinfo=None)
+        if start + self._HOUR <= naive < end - self._HOUR:
+            return self._HOUR
+        if end - self._HOUR <= naive < end:      # repeated 01:00 hour
+            return timedelta(0) if dt.fold else self._HOUR
+        if start <= naive < start + self._HOUR:  # skipped 02:00 hour
+            return self._HOUR if dt.fold else timedelta(0)
+        return timedelta(0)
+
+    def fromutc(self, dt):
+        start, end = self._dst_range(dt.year)
+        start = start.replace(tzinfo=self)
+        end = end.replace(tzinfo=self)
+        std_time = dt + self._STD
+        dst_time = std_time + self._HOUR
+        if end <= dst_time < end + self._HOUR:
+            return std_time.replace(fold=1)
+        if std_time < start or dst_time >= end:
+            return std_time
+        return dst_time
+
+    def __repr__(self):
+        return 'America/Chicago'
+
+
+# Studio time. Was a fixed -05:00 (right only during CDT), which shifted every
+# CST availability block and class slot by an hour.
+TZ = _USCentral()
 WD = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 # ============================================================

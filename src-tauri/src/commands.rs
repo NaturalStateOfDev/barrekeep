@@ -379,8 +379,8 @@ fn build_propose_payload(
                 let pid: i32 = r.get(4)?;
                 Ok(serde_json::json!({
                     "type": "shift",
-                    "dtstart": format!("{date}T{start}:00-05:00"),
-                    "dtend": format!("{date}T{end}:00-05:00"),
+                    "dtstart": crate::sling::shift_iso(&date, &start),
+                    "dtend": crate::sling::shift_iso(&date, &end),
                     "user": uid.map(|u| serde_json::json!({"id": u})),
                     "position": {"id": pid},
                     "location": {"id": studio_cfg.home_location_id},
@@ -414,8 +414,8 @@ fn build_propose_payload(
                 let pid: i32 = r.get(4)?;
                 Ok(serde_json::json!({
                     "type": "shift",
-                    "dtstart": format!("{date}T{start}:00-05:00"),
-                    "dtend": format!("{date}T{end}:00-05:00"),
+                    "dtstart": crate::sling::shift_iso(&date, &start),
+                    "dtend": crate::sling::shift_iso(&date, &end),
                     "user": uid.map(|u| serde_json::json!({"id": u})),
                     "position": {"id": pid},
                     "location": {"id": studio_cfg.home_location_id},

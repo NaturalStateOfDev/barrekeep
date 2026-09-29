@@ -5,6 +5,7 @@ Run from anywhere: python3 scripts/tests/test_propose_rules.py
 Guards the schedule-algorithm invariant that versioned rules (payload key
 "rules") leave v9 output untouched when empty, and actually bite when set.
 """
+import ast
 import copy
 import json
 import pathlib
@@ -84,5 +85,55 @@ assert mon9, "Mon 09:00 slots must still be reported (as dropped)"
 assert all(s["sling_user_id"] != lead_uid for s in mon9), \
     "lead overflow must not assign the lead to a slot-blocklisted slot"
 assert all(s["is_dropped"] for s in mon9), [s["generation_reason"] for s in mon9]
+
+# 7. Studio timezone (_USCentral) matches IANA America/Chicago hour by hour,
+#    including fold handling, 2026-2028. zoneinfo is only used here (tests
+#    run on Linux); propose.py stays stdlib-only for Windows.
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_src = (ROOT / "scripts" / "propose.py").read_text()
+_node = next(n for n in ast.parse(_src).body
+             if isinstance(n, ast.ClassDef) and n.name == "_USCentral")
+_ns = {}
+exec("from datetime import datetime, timedelta, tzinfo\n"
+     + ast.get_source_segment(_src, _node), _ns)
+central = _ns["_USCentral"]()
+chicago = ZoneInfo("America/Chicago")
+t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+while t < datetime(2029, 1, 1, tzinfo=timezone.utc):
+    ours, ref = t.astimezone(central), t.astimezone(chicago)
+    assert ours.replace(tzinfo=None) == ref.replace(tzinfo=None), (t, ours, ref)
+    assert ours.utcoffset() == ref.utcoffset(), (t, ours.utcoffset(), ref.utcoffset())
+    assert ours.fold == ref.fold, (t, ours.fold, ref.fold)
+    t += timedelta(minutes=30)
+# Wall-clock -> offset (what date.replace(hour=...) relies on).
+for y, mo, d, h in [(2026, 11, 1, 0), (2026, 11, 1, 9), (2026, 10, 31, 23),
+                    (2027, 3, 14, 1), (2027, 3, 14, 5), (2027, 3, 13, 9)]:
+    w = datetime(y, mo, d, h)
+    assert w.replace(tzinfo=central).utcoffset() == w.replace(tzinfo=chicago).utcoffset(), w
+
+# 8. End to end across fall-back: CST-offset history keeps its wall-clock
+#    slot (09:00, not 08:00), and a CST availability block given in UTC
+#    blocks the 09:00 class it overlaps.
+def shift(date, off, uid=501):
+    return {"type": "shift", "dtstart": f"{date}T09:00:00{off}",
+            "dtend": f"{date}T10:00:00{off}", "user": {"id": uid},
+            "position": {"id": 29303965}, "location": {"id": 901}}
+
+winter = copy.deepcopy(payload)
+winter["target_month"] = "2026-12"
+winter["history_events"] = [shift(d, "-05:00") for d in ("2026-10-05", "2026-10-12", "2026-10-19")] \
+    + [shift(d, "-06:00") for d in ("2026-11-02", "2026-11-09", "2026-11-16")]
+winter["month_events"] = [{"type": "leave", "dtstart": "2026-12-07T15:00:00Z",
+                           "dtend": "2026-12-07T16:00:00Z", "user": {"id": 501}}]
+w_out = json.loads(run(winter))
+mon = [s for s in w_out["shifts"] if s["weekday"] == "Mon"]
+assert mon and all(s["start_time"] == "09:00" for s in mon), \
+    [(s["shift_date"], s["start_time"]) for s in mon]
+dec7 = [s for s in mon if s["shift_date"] == "2026-12-07"]
+assert dec7 and all(s["sling_user_id"] != 501 or s["is_dropped"] for s in dec7), dec7
+assert any(s["sling_user_id"] == 501 for s in mon if s["shift_date"] == "2026-12-14"), \
+    "501 should keep the unblocked Mondays"
 
 print("OK")

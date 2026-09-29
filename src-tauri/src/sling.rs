@@ -386,7 +386,7 @@ pub fn fetch_groups(token: &str) -> Result<Vec<SlingGroup>> {
 }
 
 /// Fetch the target month's calendar events (for push dedupe). Mirrors the
-/// pull's calendar GET: -05:00 offset, percent-encoded dates, nonce.
+/// pull's calendar GET: studio-offset dates, percent-encoded, nonce.
 pub fn fetch_calendar(token: &str, cfg: &StudioConfig, month: &str) -> Result<Vec<CalendarEvent>> {
     let (start, end) = month_range(month)?;
     let url = format!("{BASE_URL}/{}/calendar/{}/users/{}", cfg.org_id, cfg.org_id, cfg.acting_user_id);
@@ -399,49 +399,90 @@ pub fn fetch_calendar(token: &str, cfg: &StudioConfig, month: &str) -> Result<Ve
     Ok(arr.iter().filter_map(|e| serde_json::from_value(e.clone()).ok()).collect())
 }
 
-/// Returns (startISO, endISO) for the target month, last day of month at 23:59,
-/// with a -05:00 offset. Matches scripts/sling_extract.py:82-85 — Sling
-/// returns empty on historical /calendar queries when the offset is omitted.
-///
-/// Known limitation: -05:00 is correct for Central Daylight Time only.
-/// DST handling is the same TODO that's already noted in CLAUDE.md.
-pub fn month_range(target_month: &str) -> Result<(String, String)> {
+/// The studio's timezone. Every offset this app sends to Sling is derived
+/// from it — never a fixed "-05:00", which is only right for CDT.
+pub const STUDIO_TZ: chrono_tz::Tz = chrono_tz::America::Chicago;
+
+/// Resolve a studio-local wall time to an aware datetime. Ambiguous times
+/// (the repeated 1 AM hour at fall-back) take the earlier (CDT) instant;
+/// nonexistent ones (the skipped 2 AM hour at spring-forward) are shifted
+/// forward an hour. Neither occurs for midnight / 23:59:59 boundaries.
+pub fn studio_local(ndt: chrono::NaiveDateTime) -> chrono::DateTime<chrono_tz::Tz> {
+    use chrono::TimeZone;
+    match STUDIO_TZ.from_local_datetime(&ndt) {
+        chrono::LocalResult::Single(dt) => dt,
+        chrono::LocalResult::Ambiguous(early, _) => early,
+        chrono::LocalResult::None => {
+            let shifted = ndt + chrono::Duration::hours(1);
+            STUDIO_TZ.from_local_datetime(&shifted).earliest()
+                .unwrap_or_else(|| STUDIO_TZ.from_utc_datetime(&ndt))
+        }
+    }
+}
+
+/// "YYYY-MM-DDTHH:MM:SS-05:00" (colon offset) for a studio-local wall time,
+/// using that instant's own offset (-05:00 CDT / -06:00 CST).
+pub fn studio_iso(ndt: chrono::NaiveDateTime) -> String {
+    studio_local(ndt).format("%Y-%m-%dT%H:%M:%S%:z").to_string()
+}
+
+/// studio_iso for a DB-style date ("YYYY-MM-DD") + "HH:MM" pair — the shape
+/// external_sling_shifts stores. None if either part fails to parse.
+pub fn studio_iso_hm(date: &str, hhmm: &str) -> Option<String> {
+    let d = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let t = chrono::NaiveTime::parse_from_str(hhmm, "%H:%M").ok()?;
+    Some(studio_iso(d.and_time(t)))
+}
+
+/// Offset-bearing dtstart/dtend for a stored shift (date + "HH:MM"), as fed
+/// to propose.py. Falls back to the unparsed naive form if the stored values
+/// are malformed (never expected: they come from DATE + split_dt).
+pub fn shift_iso(date: &str, hhmm: &str) -> String {
+    studio_iso_hm(date, hhmm).unwrap_or_else(|| format!("{date}T{hhmm}:00"))
+}
+
+fn parse_month(target_month: &str) -> Result<(chrono::NaiveDate, chrono::NaiveDate)> {
     let parts: Vec<&str> = target_month.split('-').collect();
     if parts.len() != 2 { return Err(anyhow!("bad target_month: {target_month}")); }
     let year: i32 = parts[0].parse()?;
     let month: u32 = parts[1].parse()?;
-    let start = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)
         .ok_or_else(|| anyhow!("invalid date"))?;
-    let next = if month == 12 {
+    let next_first = if month == 12 {
         chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
     } else {
         chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
     }.ok_or_else(|| anyhow!("invalid date"))?;
+    Ok((first, next_first))
+}
+
+/// Returns (startISO, endISO) for the target month: the 1st at 00:00 through
+/// the last day at 23:59:59, studio time. Each boundary carries its OWN
+/// offset — November 2026 is "2026-11-01T00:00:00-05:00" (still CDT) to
+/// "2026-11-30T23:59:59-06:00" (CST). Sling returns empty on historical
+/// /calendar queries when the offset is omitted (scripts/sling_extract.py).
+pub fn month_range(target_month: &str) -> Result<(String, String)> {
+    let (start, next) = parse_month(target_month)?;
     let end = next.pred_opt().unwrap();
-    Ok((format!("{start}T00:00:00-05:00"), format!("{end}T23:59:59-05:00")))
+    let midnight = chrono::NaiveTime::MIN;
+    let last_sec = chrono::NaiveTime::from_hms_opt(23, 59, 59).unwrap();
+    Ok((studio_iso(start.and_time(midnight)), studio_iso(end.and_time(last_sec))))
 }
 
 /// POST viewdates/cachedates windows for the target month. These are
 /// cache-invalidation hints Sling's server uses; we reproduce the web
 /// client's padding (prev day .. first-of-next-month + 4 days, cachedates
 /// one day wider each side). NB: offset is "-0500" (no colon) here, unlike
-/// the calendar `dates=` param which uses "-05:00". Matches
-/// scripts/push_to_sling.py VIEWDATES/CACHEDATES for June 2026.
+/// the calendar `dates=` param which uses "-05:00". Each date uses its own
+/// studio offset ("-0600" in CST). Matches scripts/push_to_sling.py
+/// VIEWDATES/CACHEDATES for June 2026.
 pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
-    let parts: Vec<&str> = month.split('-').collect();
-    if parts.len() != 2 { return Err(anyhow!("bad month: {month}")); }
-    let year: i32 = parts[0].parse()?;
-    let mon: u32 = parts[1].parse()?;
-    let first = chrono::NaiveDate::from_ymd_opt(year, mon, 1)
-        .ok_or_else(|| anyhow!("invalid date"))?;
-    let next_first = if mon == 12 {
-        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
-    } else {
-        chrono::NaiveDate::from_ymd_opt(year, mon + 1, 1)
-    }.ok_or_else(|| anyhow!("invalid date"))?;
-    // NB: "-0500" (no colon) — Sling's viewdates/cachedates format. Do NOT
-    // change to "-05:00"; that colon-form is only for the calendar dates= param.
-    let fmt = |d: chrono::NaiveDate| format!("{d}T00:00:00-0500");
+    let (first, next_first) = parse_month(month)?;
+    // NB: "%z" = "-0500" (no colon) — Sling's viewdates/cachedates format. Do
+    // NOT change to "%:z"; that colon-form is only for the calendar dates= param.
+    let fmt = |d: chrono::NaiveDate| {
+        studio_local(d.and_time(chrono::NaiveTime::MIN)).format("%Y-%m-%dT%H:%M:%S%z").to_string()
+    };
     let view_start = first - chrono::Duration::days(1);
     let view_end = next_first + chrono::Duration::days(4);
     let cache_start = view_start - chrono::Duration::days(1);
@@ -450,6 +491,16 @@ pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
         format!("{}/{}", fmt(view_start), fmt(view_end)),
         format!("{}/{}", fmt(cache_start), fmt(cache_end)),
     ))
+}
+
+/// Start of the trailing-history window: the 1st of the month three months
+/// before `target_month`, 00:00 studio time, with that date's own offset.
+pub fn history_start_iso(target_month: &str) -> Result<String> {
+    let (first, _) = parse_month(target_month)?;
+    let hist = first
+        .checked_sub_months(chrono::Months::new(3))
+        .ok_or_else(|| anyhow!("invalid date"))?;
+    Ok(studio_iso(hist.and_time(chrono::NaiveTime::MIN)))
 }
 
 /// Split a Sling dtstart ("2026-06-01T05:45:00-05:00") into (date, "HH:MM").
@@ -575,19 +626,9 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
         "[sling] month /calendar {dates_param}: {raw_month_total} raw events"
     );
 
-    let (h_start_y, h_start_m) = {
-        let (y, m): (i32, u32) = {
-            let p: Vec<&str> = target_month.split('-').collect();
-            (p[0].parse()?, p[1].parse()?)
-        };
-        let mut y2 = y;
-        let mut m2 = m as i32 - 3;
-        while m2 < 1 { m2 += 12; y2 -= 1; }
-        (y2, m2 as u32)
-    };
-    // -05:00 offset matches month_range() / scripts/sling_extract.py; without
-    // it, Sling returns empty for historical /calendar queries.
-    let hist_start_iso = format!("{h_start_y:04}-{h_start_m:02}-01T00:00:00-05:00");
+    // Offset matters: without it Sling returns empty for historical
+    // /calendar queries (scripts/sling_extract.py).
+    let hist_start_iso = history_start_iso(target_month)?;
     let hist_end_iso = start.clone();
     let nonce2 = chrono::Utc::now().timestamp_millis();
     let hist_url = format!("{BASE_URL}/{org_id}/calendar/{org_id}/users/{acting_user_id}");
@@ -740,8 +781,8 @@ mod tests {
         assert_eq!(s, "2026-06-01T00:00:00-05:00");
         assert_eq!(e, "2026-06-30T23:59:59-05:00");
         let (s2, e2) = month_range("2026-12").unwrap();
-        assert_eq!(s2, "2026-12-01T00:00:00-05:00");
-        assert_eq!(e2, "2026-12-31T23:59:59-05:00");
+        assert_eq!(s2, "2026-12-01T00:00:00-06:00");
+        assert_eq!(e2, "2026-12-31T23:59:59-06:00");
     }
 
     #[test]
@@ -793,8 +834,76 @@ mod tests {
     #[test]
     fn view_cache_dates_handles_december_year_rollover() {
         let (view, cache) = view_cache_dates("2026-12").unwrap();
-        assert_eq!(view, "2026-11-30T00:00:00-0500/2027-01-05T00:00:00-0500");
-        assert_eq!(cache, "2026-11-29T00:00:00-0500/2027-01-06T00:00:00-0500");
+        assert_eq!(view, "2026-11-30T00:00:00-0600/2027-01-05T00:00:00-0600");
+        assert_eq!(cache, "2026-11-29T00:00:00-0600/2027-01-06T00:00:00-0600");
+    }
+
+    // --- DST boundaries (America/Chicago). 2026: CDT ends Sun Nov 1 02:00.
+    // 2027: CDT starts Sun Mar 14 02:00. ---
+
+    #[test]
+    fn month_range_october_2026_is_all_cdt() {
+        let (s, e) = month_range("2026-10").unwrap();
+        assert_eq!(s, "2026-10-01T00:00:00-05:00");
+        assert_eq!(e, "2026-10-31T23:59:59-05:00");
+    }
+
+    #[test]
+    fn month_range_november_2026_uses_each_boundarys_offset() {
+        let (s, e) = month_range("2026-11").unwrap();
+        // Nov 1 midnight is still CDT (fall-back is at 02:00 that morning).
+        assert_eq!(s, "2026-11-01T00:00:00-05:00");
+        assert_eq!(e, "2026-11-30T23:59:59-06:00");
+    }
+
+    #[test]
+    fn month_range_march_2027_spans_spring_forward() {
+        let (s, e) = month_range("2027-03").unwrap();
+        assert_eq!(s, "2027-03-01T00:00:00-06:00");
+        assert_eq!(e, "2027-03-31T23:59:59-05:00");
+        let (s, e) = month_range("2027-02").unwrap();
+        assert_eq!(s, "2027-02-01T00:00:00-06:00");
+        assert_eq!(e, "2027-02-28T23:59:59-06:00");
+    }
+
+    #[test]
+    fn view_cache_dates_across_fall_back() {
+        // October window pads into November: Oct 30/Nov 5 straddle Nov 1.
+        let (view, cache) = view_cache_dates("2026-10").unwrap();
+        assert_eq!(view, "2026-09-30T00:00:00-0500/2026-11-05T00:00:00-0600");
+        assert_eq!(cache, "2026-09-29T00:00:00-0500/2026-11-06T00:00:00-0600");
+        let (view, _) = view_cache_dates("2026-11").unwrap();
+        assert_eq!(view, "2026-10-31T00:00:00-0500/2026-12-05T00:00:00-0600");
+    }
+
+    #[test]
+    fn view_cache_dates_across_spring_forward() {
+        let (view, cache) = view_cache_dates("2027-03").unwrap();
+        assert_eq!(view, "2027-02-28T00:00:00-0600/2027-04-05T00:00:00-0500");
+        assert_eq!(cache, "2027-02-27T00:00:00-0600/2027-04-06T00:00:00-0500");
+    }
+
+    #[test]
+    fn history_start_uses_its_own_offset() {
+        assert_eq!(history_start_iso("2026-11").unwrap(), "2026-08-01T00:00:00-05:00");
+        assert_eq!(history_start_iso("2027-03").unwrap(), "2026-12-01T00:00:00-06:00");
+        assert_eq!(history_start_iso("2027-02").unwrap(), "2026-11-01T00:00:00-05:00");
+        assert_eq!(history_start_iso("2026-01").unwrap(), "2025-10-01T00:00:00-05:00");
+    }
+
+    #[test]
+    fn studio_iso_hm_handles_transition_days_and_edge_hours() {
+        // Class times on the transition days themselves.
+        assert_eq!(studio_iso_hm("2026-11-01", "09:00").unwrap(), "2026-11-01T09:00:00-06:00");
+        assert_eq!(studio_iso_hm("2026-10-31", "09:00").unwrap(), "2026-10-31T09:00:00-05:00");
+        assert_eq!(studio_iso_hm("2027-03-14", "05:45").unwrap(), "2027-03-14T05:45:00-05:00");
+        assert_eq!(studio_iso_hm("2027-03-13", "05:45").unwrap(), "2027-03-13T05:45:00-06:00");
+        // Ambiguous 01:30 on fall-back day resolves to the earlier (CDT) instant.
+        assert_eq!(studio_iso_hm("2026-11-01", "01:30").unwrap(), "2026-11-01T01:30:00-05:00");
+        // Nonexistent 02:30 on spring-forward day is shifted to 03:30 CDT.
+        assert_eq!(studio_iso_hm("2027-03-14", "02:30").unwrap(), "2027-03-14T03:30:00-05:00");
+        assert!(studio_iso_hm("2026-13-01", "09:00").is_none());
+        assert!(studio_iso_hm("2026-11-01", "9am").is_none());
     }
 
     #[test]

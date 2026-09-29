@@ -40,6 +40,10 @@ tauri-plugin-stronghold = "2"
 # SHA-256 for deriving the Stronghold vault encryption key at startup.
 sha2 = "0.11"
 chrono = "0.4"
+# IANA America/Chicago rules for Sling date-range params: the studio observes
+# US Central Time and a fixed -05:00 offset is wrong for every CST boundary
+# (Nov 1 2026 falls in a scheduled month). Pure-Rust, compiled-in tz data.
+chrono-tz = "0.10"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
