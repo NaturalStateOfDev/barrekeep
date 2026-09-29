@@ -451,7 +451,7 @@ fn build_propose_payload(
 /// on stdin; parse its JSON output. Returns (parsed output, stderr tail).
 fn spawn_propose(
     script_path: &std::path::Path,
-    project_root: &std::path::Path,
+    workdir: &std::path::Path,
     payload_json: &serde_json::Value,
     target_month: &str,
 ) -> Result<(ProposeOutput, String), String> {
@@ -464,7 +464,7 @@ fn spawn_propose(
         .ok_or_else(|| "script path is not valid UTF-8".to_string())?;
     let mut child = Command::new(python_bin)
         .args([script, "--json-out", "--from-stdin", "--target-month", target_month])
-        .current_dir(project_root)
+        .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -501,7 +501,7 @@ pub fn generate_proposal(
     // Step 1: build the payload and resolve the active algorithm version
     // (rules + script). cwd stays at project root so the baseline script's
     // relative paths keep resolving in dev mode.
-    let project_root = find_project_root().map_err(err)?;
+    let project_root = find_project_root(&app).map_err(err)?;
     let (payload_json, script_path) = {
         let conn = db.0.lock().map_err(err)?;
         let mut payload = build_propose_payload(&conn, &target_month)?;
@@ -520,7 +520,7 @@ pub fn generate_proposal(
     };
 
     let (payload, stderr_tail) =
-        spawn_propose(&script_path, &project_root, &payload_json, &target_month)?;
+        spawn_propose(&script_path, &script_workdir(&app).map_err(err)?, &payload_json, &target_month)?;
 
     // Step 2: write the proposal + shifts to DuckDB in a single transaction.
     let mut conn = db.0.lock().map_err(err)?;
@@ -1640,6 +1640,7 @@ fn persist_claude_run(
 
 #[tauri::command]
 pub fn claude_edit_proposal(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     key: State<'_, AnthropicKey>,
     proposal_id: i64,
@@ -1664,7 +1665,7 @@ pub fn claude_edit_proposal(
         )
     };
 
-    let system = crate::editor::editor_system_prompt(find_project_root().ok().as_deref());
+    let system = crate::editor::editor_system_prompt(find_project_root(&app).ok().as_deref());
     let result = crate::editor::run_editor(&api_key, &model, &system, &user_payload).map_err(err)?;
 
     let conn = db.0.lock().map_err(err)?;
@@ -1781,7 +1782,7 @@ pub fn claude_draft_code_change(
             .clone()
             .ok_or_else(|| "Anthropic API key is not set — add it in Settings".to_string())?
     };
-    let project_root = find_project_root().map_err(err)?;
+    let project_root = find_project_root(&app).map_err(err)?;
 
     let (user_payload, model) = {
         let conn = db.0.lock().map_err(err)?;
@@ -1856,8 +1857,6 @@ pub fn validate_code_draft(
     db: State<'_, Db>,
     script_content: String,
 ) -> Result<DraftValidation, String> {
-    let project_root = find_project_root().map_err(err)?;
-
     let (month, payload, baseline) = {
         let conn = db.0.lock().map_err(err)?;
         let month: String = conn
@@ -1902,7 +1901,8 @@ pub fn validate_code_draft(
     let candidate_path = dir.join("candidate_draft.py");
     std::fs::write(&candidate_path, &script_content).map_err(err)?;
 
-    let spawn_result = spawn_propose(&candidate_path, &project_root, &payload, &month);
+    let workdir = script_workdir(&app).map_err(err)?;
+    let spawn_result = spawn_propose(&candidate_path, &workdir, &payload, &month);
     let _ = std::fs::remove_file(&candidate_path);
 
     match spawn_result {
@@ -2836,21 +2836,44 @@ pub fn delete_algorithm_script(
 // helpers
 // ============================================================
 
-/// Walk up from the current working directory until we find package.json.
-/// Used to launch python sidecars from the project root no matter where
-/// Tauri's binary was invoked from.
-fn find_project_root() -> anyhow::Result<PathBuf> {
-    let mut cwd = std::env::current_dir()?;
-    loop {
-        if cwd.join("package.json").exists() {
-            return Ok(cwd);
-        }
-        if !cwd.pop() {
-            anyhow::bail!(
-                "could not find project root — no package.json found walking up from cwd"
-            );
-        }
+/// Directory that contains the shipped `scripts/` and `prompts/` folders.
+///
+/// Dev (`tauri dev`, debug build): the repo root, known at compile time from
+/// CARGO_MANIFEST_DIR (src-tauri/..). This no longer depends on the process's
+/// working directory.
+///
+/// Installed (release build): Tauri's resource dir, where `bundle.resources`
+/// in tauri.conf.json copies scripts/propose.py and prompts/*.md.
+fn find_project_root(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    if cfg!(debug_assertions) {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        return Ok(manifest.parent().unwrap_or(manifest).to_path_buf());
     }
+    use tauri::Manager;
+    let dir = app.path().resource_dir()?;
+    if dir.join("scripts").join("propose.py").exists() {
+        Ok(dir)
+    } else {
+        anyhow::bail!(
+            "bundled scripts not found in {} — reinstall Barrekeep",
+            dir.display()
+        )
+    }
+}
+
+/// Working directory for the Python process. The install folder
+/// (under Program Files) is read-only, and propose.py writes
+/// data/output/proposed.csv relative to its cwd, so installed builds run it
+/// from the per-user app-data dir instead. Dev builds keep the repo root so
+/// fixture-relative paths still resolve.
+fn script_workdir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    if cfg!(debug_assertions) {
+        return find_project_root(app);
+    }
+    use tauri::Manager;
+    let dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 /// Last N lines of `text`, joined with newlines. Used to keep stderr blurbs
