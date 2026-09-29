@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GitBranchPlus } from "lucide-react";
 import { api } from "../../lib/api";
-import { diffLines, ruleDiffLabel } from "../../lib/rules";
+import { confirmLabel, diffLines, ruleDiffLabel, unexpectedSlots } from "../../lib/rules";
 import { LoadingBlock } from "../ui/LoadingBlock";
 import type {
   CandidatePreview,
@@ -35,8 +35,9 @@ function changeLabel(c: SlotChange): string {
 /** A proposed algorithm version (rules or code). Before Adopt it shows the
  *  rules diff and script diff against the ACTIVE version and re-runs the
  *  most recent month with both ("reproduce last month"); Adopt stays
- *  disabled on errors and unexplained slot changes, and needs an explicit
- *  confirm when too many assignments change. */
+ *  disabled on errors, and needs an explicit confirm (naming what is being
+ *  accepted) when too many assignments change or slots appear/disappear
+ *  with no time-shift rule to explain them. */
 export function VersionProposalCard({ proposal, runId, scriptContent, teachers, onAdopted }: Props) {
   const [nextVersion, setNextVersion] = useState<number | null>(null);
   const [preview, setPreview] = useState<CandidatePreview | null>(null);
@@ -110,6 +111,7 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
 
   const removed = preview?.rules_diff.filter((e) => e.kind === "removed") ?? [];
   const v = preview?.validation;
+  const unexpected = v ? unexpectedSlots(v) : { added: [], removed: [] };
 
   return (
     <div className="suggestion" style={{ marginTop: 14 }}>
@@ -202,15 +204,33 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
             <div className="error" style={{ marginTop: 0 }}>{v.error}</div>
           ) : (
             <>
-              <div className={v.status === "pass" ? "ok" : v.status === "fail" ? "error" : "bk-warn"} style={{ marginTop: 0 }}>
+              <div className={v.status === "pass" ? "ok" : "bk-warn"} style={{ marginTop: 0 }}>
                 {v.changed_count} of {v.slot_count} assignments change
                 {v.added_count + v.removed_count > 0 &&
                   ` · +${v.added_count}/−${v.removed_count} slots${v.unexpected_count === 0 ? " (explained by time shifts)" : ""}`}
                 {v.reasons.map((r, i) => (
                   <div key={i}>{r}</div>
                 ))}
-                {v.status === "fail" && <div>Adopt is disabled: fix the candidate and re-check.</div>}
               </div>
+              {unexpected.added.length + unexpected.removed.length > 0 && (
+                <div className="bk-slot-alert" role="alert">
+                  <strong>
+                    This version changes which classes exist in {v.month}: no time-shift rule
+                    explains these slots.
+                  </strong>
+                  <ul className="bk-change-list">
+                    {unexpected.added.map((c, i) => (
+                      <li key={`a${i}`} className="bk-change-added">+ {changeLabel(c)}</li>
+                    ))}
+                    {unexpected.removed.map((c, i) => (
+                      <li key={`r${i}`} className="bk-change-removed">− {changeLabel(c)}</li>
+                    ))}
+                  </ul>
+                  <div style={{ marginTop: 6 }}>
+                    Adopt only if the change is meant to add or remove these classes.
+                  </div>
+                </div>
+              )}
               {v.changes.length > 0 && (
                 <>
                   <button className="disclosure" style={{ marginTop: 8, marginBottom: 0 }} onClick={() => setShowChanges(!showChanges)}>
@@ -241,7 +261,7 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
                     checked={confirmAnyway}
                     onChange={(e) => setConfirmAnyway(e.target.checked)}
                   />
-                  I've reviewed the {v.changed_count} changed assignments — adopt anyway
+                  {confirmLabel(v)}
                 </label>
               )}
             </>
@@ -262,7 +282,7 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
                 canAdopt
                   ? ""
                   : status === "needs_confirm"
-                    ? "Confirm the changed assignments first"
+                    ? "Tick the confirmation above first"
                     : "The candidate must reproduce the last month first"
               }
             >

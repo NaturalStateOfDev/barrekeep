@@ -1918,10 +1918,10 @@ pub struct SlotChange {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct CandidateValidation {
-    /// "pass" | "needs_confirm" (too many changed assignments — adopt only
-    /// after explicit confirmation) | "fail" (slots appeared/disappeared that
-    /// no rule change explains) | "error" (a script failed or the rules don't
-    /// validate — never adoptable)
+    /// "pass" | "needs_confirm" (too many changed assignments and/or slots
+    /// that appeared/disappeared with no time-shift rule change to explain
+    /// them — adopt only after explicit confirmation) | "error" (a script
+    /// failed or the rules don't validate — never adoptable)
     pub status: String,
     pub error: Option<String>,
     pub reasons: Vec<String>,
@@ -2101,21 +2101,22 @@ fn compare_runs(
     let slot_count = baseline.len() as i64;
     let changed_pct = changed as f64 / slot_count.max(1) as f64;
     let mut reasons = Vec::new();
-    let status = if unexpected > 0 {
+    // Both unexplained slot changes and a large share of changed assignments
+    // are adoptable only after an explicit confirm (a code change may add or
+    // remove a class on purpose); script errors never are.
+    if unexpected > 0 {
         reasons.push(format!(
             "{unexpected} slot(s) appeared or disappeared that no time-shift rule change explains"
         ));
-        "fail"
-    } else if changed_pct > CHANGE_THRESHOLD {
+    }
+    if changed_pct > CHANGE_THRESHOLD {
         reasons.push(format!(
             "{changed} of {slot_count} assignments change ({:.0}% — more than {:.0}%)",
             changed_pct * 100.0,
             CHANGE_THRESHOLD * 100.0
         ));
-        "needs_confirm"
-    } else {
-        "pass"
-    };
+    }
+    let status = if reasons.is_empty() { "pass" } else { "needs_confirm" };
     CandidateValidation {
         status: status.to_string(),
         error: None,
@@ -3456,12 +3457,18 @@ mod tests {
             && c.class_after.as_deref() == Some("Classic")));
         assert!(v.changes.iter().any(|c| c.teacher_after.as_deref() == Some("Dropped")));
 
-        // A slot that vanishes and one that appears: fail (unexpected).
+        // A slot that vanishes and one that appears: unexplained, so it needs
+        // an explicit confirm (flagged per slot), even with 0% reassigned.
         let mut moved = base.clone();
         moved.remove(3);
         moved.push(rs("2026-08-05", "10:00", 101, "Classic", Some(503)));
         let v = compare_runs("2026-08", &base, &moved, &names(), &no_moves());
-        assert_eq!((v.status.as_str(), v.added_count, v.removed_count, v.unexpected_count), ("fail", 1, 1, 2));
+        assert_eq!(
+            (v.status.as_str(), v.changed_count, v.added_count, v.removed_count, v.unexpected_count),
+            ("needs_confirm", 0, 1, 1, 2)
+        );
+        assert!(v.reasons[0].contains("2 slot(s) appeared or disappeared"), "{:?}", v.reasons);
+        assert!(v.changes.iter().all(|c| !c.expected));
     }
 
     #[test]
@@ -3496,7 +3503,8 @@ mod tests {
         // The same move on a Sunday is not explained by a Saturday rule.
         let base = vec![rs("2026-08-09", "08:00", 101, "Classic", Some(501))];
         let after = vec![rs("2026-08-09", "08:30", 101, "Classic", Some(501))];
-        assert_eq!(compare_runs("2026-08", &base, &after, &names(), &moves).status, "fail");
+        let v = compare_runs("2026-08", &base, &after, &names(), &moves);
+        assert_eq!((v.status.as_str(), v.unexpected_count), ("needs_confirm", 2));
     }
 
     /// End-to-end "reproduce last month" on the fixture payload with the real

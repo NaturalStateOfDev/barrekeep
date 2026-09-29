@@ -289,7 +289,7 @@ export interface SlotChange {
   expected: boolean;
 }
 
-export type ValidationStatus = "pass" | "needs_confirm" | "fail" | "error";
+export type ValidationStatus = "pass" | "needs_confirm" | "error";
 
 export interface CandidateValidation {
   status: ValidationStatus;

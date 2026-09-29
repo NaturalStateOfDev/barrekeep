@@ -904,6 +904,17 @@ code {
   margin-top: var(--space-3);
 }
 
+/* Unexplained slot additions/removals: louder than .bk-warn on purpose. */
+.bk-slot-alert {
+  border: 2px solid var(--color-danger-stroke);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+  margin-top: var(--space-3);
+}
+
 .bk-badge-muted {
   background: var(--surface-sunken);
   color: var(--text-muted);

@@ -2,7 +2,7 @@
 // src-tauri/src/algorithm.rs) and their diffs, plus unified-diff parsing
 // for the script diff view.
 
-import type { ReviewSuggestion, RuleDiffEntry } from "../types";
+import type { CandidateValidation, ReviewSuggestion, RuleDiffEntry, SlotChange } from "../types";
 
 /** The editor instruction that turns a Claude-review suggestion into a rule
  *  proposal (flows into the same validate → diff → adopt card). */
@@ -68,6 +68,37 @@ export function ruleDiffLabel(e: RuleDiffEntry, teacher: TeacherName): string {
     return `${ruleEntryLabel(e.rule_key, e.identity, e.before, teacher)} → ${ruleEntryLabel(e.rule_key, e.identity, e.after, teacher)}`;
   }
   return ruleEntryLabel(e.rule_key, e.identity, e.kind === "removed" ? e.before : e.after, teacher);
+}
+
+/** Slots that appear/disappear with no time-shift rule change explaining them. */
+export function unexpectedSlots(v: CandidateValidation): { added: SlotChange[]; removed: SlotChange[] } {
+  return {
+    added: v.changes.filter((c) => c.kind === "added" && !c.expected),
+    removed: v.changes.filter((c) => c.kind === "removed" && !c.expected),
+  };
+}
+
+/** Text of the explicit "adopt anyway" confirm, naming exactly what is
+ *  being accepted. */
+export function confirmLabel(v: CandidateValidation, threshold = 0.25): string {
+  const { added, removed } = unexpectedSlots(v);
+  const parts: string[] = [];
+  if (added.length || removed.length) {
+    const what = [
+      added.length ? `add ${added.length}` : null,
+      removed.length ? `remove ${removed.length}` : null,
+    ]
+      .filter(Boolean)
+      .join(" / ");
+    const n = added.length + removed.length;
+    parts.push(`I intend to ${what} class slot${n === 1 ? "" : "s"}`);
+  }
+  if (v.changed_pct > threshold) {
+    parts.push(
+      `${parts.length ? "accept" : "I've reviewed and accept"} the ${v.changed_count} changed assignments`,
+    );
+  }
+  return parts.join(" and ");
 }
 
 export type DiffLineKind = "add" | "del" | "hunk" | "meta" | "ctx";
