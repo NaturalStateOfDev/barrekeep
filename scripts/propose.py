@@ -650,15 +650,16 @@ for uid in sorted(TEACHERS, key=lambda x: str(TEACHERS.get(x, x))):
     tgt, mx = TARGETS.get(uid, ('?', '?'))
     print(f"  {str(TEACHERS.get(uid, uid)):25s}  {prop_load.get(uid, 0):>3}  cap {tgt}/{mx}")
 
-os.makedirs('data/output', exist_ok=True)
-with open('data/output/proposed.csv', 'w', newline='') as f:
-    w = csv.DictWriter(f, fieldnames=['date', 'weekday', 'start', 'end', 'class', 'proposed_teacher', 'reason', 'flag'])
-    w.writeheader()
-    for date, wd_name, st, en, cls, pid, prop_uid, reason, flag, coteach in sorted(proposed):
-        teacher_display = coteach if coteach else (TEACHERS.get(prop_uid, 'DROPPED') if prop_uid else 'DROPPED')
-        w.writerow({'date': str(date), 'weekday': wd_name, 'start': st, 'end': en, 'class': cls,
-                    'proposed_teacher': teacher_display, 'reason': reason, 'flag': flag})
-print("\nFile: proposed.csv")
+if not JSON_OUT:  # dev/standalone only; the app reads JSON from stdout
+    os.makedirs('data/output', exist_ok=True)
+    with open('data/output/proposed.csv', 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['date', 'weekday', 'start', 'end', 'class', 'proposed_teacher', 'reason', 'flag'])
+        w.writeheader()
+        for date, wd_name, st, en, cls, pid, prop_uid, reason, flag, coteach in sorted(proposed):
+            teacher_display = coteach if coteach else (TEACHERS.get(prop_uid, 'DROPPED') if prop_uid else 'DROPPED')
+            w.writerow({'date': str(date), 'weekday': wd_name, 'start': st, 'end': en, 'class': cls,
+                        'proposed_teacher': teacher_display, 'reason': reason, 'flag': flag})
+    print("\nFile: proposed.csv")
 
 if JSON_OUT:
     payload = {
