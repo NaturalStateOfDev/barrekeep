@@ -174,5 +174,5 @@ fn build_creds_preamble(app: &AppHandle) -> String {
     // serde_json::to_string emits a JSON string literal — safe for direct
     // embedding in a JS source as long as it isn't followed by </script>,
     // which can't appear here (no <script> tags in capture flow).
-    format!("window.__BK_CREDS = {};", json)
+    format!("window.__BK_CREDS = {json};")
 }

@@ -1,8 +1,25 @@
-# Build and publish a signed Windows MSI on tag push.
+# Build, smoke-test, and publish a signed Windows MSI on tag push.
 #
-# Trigger: push a tag matching v*.*.* (e.g. `git tag v0.1.0 && git push --tags`).
+# Trigger: push a tag matching v*.*.* (see "Cutting a release" in SETUP.md).
 # Output: a GitHub Release with the MSI, its .sig, and latest.json. The app's
-# updater plugin (see tauri.conf.json) reads latest.json on launch.
+# updater plugin (see tauri.conf.json) reads
+# releases/latest/download/latest.json on launch.
+#
+# Flow (each step gates the next):
+#   1. Gate: the tag's commit must have a green `ci` run on main. That run
+#      also saved the Rust cache for this exact commit, so step 4 restores it
+#      instead of recompiling DuckDB from C++ (~25 min).
+#   2. The tag must match the version in all five version files
+#      (scripts/bump-version.mjs --check).
+#   3. tauri-action builds + signs the MSI and uploads it to a DRAFT release.
+#      Drafts are invisible to the updater (not "latest"). latest.json's URLs
+#      are API asset URLs (…/releases/assets/<id>), which stay valid when the
+#      draft is published, so nothing needs rewriting afterwards.
+#   4. Smoke test: silently install the MSI and run the INSTALLED propose.py
+#      (scripts/tests/smoke_installed.py).
+#   5. Publish: flip the draft to a published, latest release.
+# If 3-5 fail, the draft is left behind for inspection. Delete it
+# (`gh release delete vX.Y.Z --yes`, keeping the tag) before re-running.
 #
 # Required repo secrets:
 #   - TAURI_SIGNING_PRIVATE_KEY           (output of `npx tauri signer generate`)
@@ -17,26 +34,71 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
+  workflow_dispatch: # run from the Actions UI with a v*.*.* TAG selected as the ref
 
 jobs:
   build:
     permissions:
-      contents: write
+      contents: write # create/publish the release
+      actions: read # look up the ci run for the tagged commit
     runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Require a green, cache-warmed ci run for this commit
+        # Fails fast (before checkout/build) unless `ci` succeeded on main for
+        # the exact tagged commit. If that run is still going (tag pushed right
+        # after the merge), wait for it rather than failing.
+        timeout-minutes: 60
+        run: |
+          if ($env:GITHUB_REF -notlike 'refs/tags/v*') {
+            Write-Output "::error::Releases must run on a vX.Y.Z tag (got $env:GITHUB_REF)."
+            exit 1
+          }
+          $sha = $env:GITHUB_SHA
+          $fields = 'databaseId,status,conclusion,event,url'
+          $runs = gh run list --repo $env:GITHUB_REPOSITORY --workflow ci.yml --branch main --commit $sha --limit 20 --json $fields | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error::gh run list failed"; exit 1 }
+          $ok = @($runs | Where-Object { $_.conclusion -eq 'success' })
+          if ($ok.Count -eq 0) {
+            $pending = @($runs | Where-Object { $_.status -ne 'completed' }) | Select-Object -First 1
+            if ($pending) {
+              Write-Output "ci run $($pending.url) is still $($pending.status); waiting for it..."
+              gh run watch $pending.databaseId --repo $env:GITHUB_REPOSITORY --exit-status --interval 30 | Out-Null
+              if ($LASTEXITCODE -eq 0) { $ok = @($pending) }
+            }
+          }
+          if ($ok.Count -eq 0) {
+            $seen = ($runs | ForEach-Object { "  $($_.event): $($_.status)/$($_.conclusion) $($_.url)" }) -join "`n"
+            if (-not $seen) { $seen = '  (none)' }
+            Write-Output "::error::No successful 'ci' run on main for $sha. Releases must be tagged on a commit that is on main and has passed ci (which also warms the build cache). Merge to main, wait for ci to go green, then tag that commit (or re-run this workflow)."
+            Write-Output "ci runs found for this commit on main:`n$seen"
+            exit 1
+          }
+          Write-Output "ci passed for $sha`: $($ok[0].url)"
+
       - uses: actions/checkout@v7
+
+      - name: Tag matches the app version everywhere
+        run: node scripts/bump-version.mjs --check $env:GITHUB_REF_NAME
 
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
           node-version: 22
 
-      - name: Setup Rust
-        # Pinned to a commit SHA (supply-chain hardening): this workflow has
-        # access to the code-signing key, so a moved/compromised tag on a
-        # third-party action could exfiltrate it. Bump via Dependabot.
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-06-03
+      - name: Setup Python (for the smoke test)
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust (from rust-toolchain.toml)
+        # rustup is preinstalled on GitHub's Windows images; with no argument
+        # this installs the toolchain pinned in rust-toolchain.toml. (No
+        # third-party toolchain action: this job holds the signing key.)
+        run: |
+          rustup toolchain install
+          rustc --version
 
       - name: Cache cargo registry/build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -44,13 +106,20 @@ jobs:
           workspaces: src-tauri -> target
           # Stable key shared with ci.yml's main-branch warmer so tag/release
           # builds restore the compiled DuckDB + deps from the default-branch
-          # cache instead of recompiling from C++ source each time.
+          # cache instead of recompiling from C++ source each time. The key
+          # also hashes the rustc version and Cargo.lock/Cargo.toml, all of
+          # which match the green main run the gate above found.
           shared-key: "barrekeep"
+          # Restore only. A cache saved from a tag run is scoped to that tag,
+          # so nothing can ever restore it — it would just burn ~800 MB of the
+          # repo's 10 GB cache quota and risk evicting main's cache.
+          save-if: false
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build, sign, and publish
+      - name: Build, sign, and upload to a draft release
+        id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,5 +129,58 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Barrekeep ${{ github.ref_name }}
           releaseBody: "Barrekeep ${{ github.ref_name }}. Installed apps offer this update on next launch, or via Settings → Check for updates."
-          releaseDraft: false
+          # Draft until the smoke test passes (published in the last step).
+          releaseDraft: true
           prerelease: false
+
+      - name: Smoke test — install the MSI and run the bundled propose.py
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          $msi = @($env:ARTIFACT_PATHS | ConvertFrom-Json | Where-Object { $_ -like '*.msi' }) | Select-Object -First 1
+          if (-not $msi) {
+            $msi = Get-ChildItem src-tauri\target\release\bundle\msi\*.msi | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $msi -or -not (Test-Path $msi)) { Write-Output "::error::No MSI found (artifactPaths: $env:ARTIFACT_PATHS)"; exit 1 }
+          Write-Output "Installing $msi"
+
+          $installDir = 'C:\barrekeep-smoke'
+          $log = Join-Path $env:RUNNER_TEMP 'install.log'
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`"", "INSTALLDIR=`"$installDir`""
+          )
+          # 3010 = success, reboot required.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            Get-Content $log -Tail 80
+            Write-Output "::error::msiexec failed with exit code $($p.ExitCode)"
+            exit 1
+          }
+
+          if (-not (Test-Path (Join-Path $installDir 'scripts\propose.py'))) {
+            # INSTALLDIR override not honored? Fall back to the default location.
+            $fallback = Get-ChildItem 'C:\Program Files', 'C:\Program Files (x86)', "$env:LOCALAPPDATA\Programs" -Directory -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path (Join-Path $_.FullName 'scripts\propose.py') } | Select-Object -First 1
+            if ($fallback) {
+              Write-Output "::warning::INSTALLDIR was not honored; MSI installed to $($fallback.FullName)"
+              $installDir = $fallback.FullName
+            }
+          }
+          Write-Output "Install dir contents:"
+          Get-ChildItem -Recurse $installDir -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+
+          python scripts\tests\smoke_installed.py $installDir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Smoke test failed; the release stays a draft. Delete it (gh release delete $env:GITHUB_REF_NAME --yes) before re-running."
+            exit 1
+          }
+
+      - name: Upload install log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-install-log
+          path: ${{ runner.temp }}/install.log
+          if-no-files-found: ignore
+
+      - name: Publish the release (draft -> latest)
+        run: gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --draft=false --latest

@@ -159,7 +159,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // app startup.
     logging::write_line("startup", "opening secrets vault");
     let (secrets, initial_token, initial_anthropic) =
-        match secrets::Secrets::open(&app.handle()) {
+        match secrets::Secrets::open(app.handle()) {
             Ok(s) => {
                 let tok = s.get(secrets::KEY_SLING_TOKEN).unwrap_or_else(|e| {
                     logging::write_line("secrets", &format!("failed to read sling_token: {e}"));

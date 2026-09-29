@@ -1,13 +1,25 @@
-# Cache warmer + smoke build on the default branch.
+# Tests + cache warmer on the default branch.
 #
-# Why: the release workflow runs on tags, and tag-triggered runs can only fall
-# back to the DEFAULT branch's Actions cache. Nothing else builds on main, so
-# every release recompiled DuckDB from C++ source (~25 min). This job compiles
-# src-tauri on each push to main and saves the cache under the same
-# `shared-key` the release workflow uses, so releases restore the compiled
-# DuckDB + deps instead of rebuilding them (~25 min -> a few min once warm).
+# Two jobs in one:
+#
+# 1. Checks: frontend build + vitest, the propose.py rules regression, the
+#    Rust unit tests, and clippy. Runs on every PR and push to main.
+#
+# 2. Cache warmer: the release workflow runs on tags, and tag-triggered runs
+#    can only restore caches saved from the DEFAULT branch. This job compiles
+#    src-tauri in release mode on each push to main and saves the cache under
+#    the same `shared-key` release.yml uses, so releases restore the compiled
+#    DuckDB + deps instead of rebuilding them (~25 min -> a few min once warm).
+#    The weekly `schedule` keeps that cache alive: GitHub evicts caches not
+#    accessed for 7 days, and releases are roughly monthly.
+#
+# release.yml refuses to build a tag whose commit has no successful run of
+# this workflow, which also guarantees the cache for that exact commit has
+# been saved before the release starts.
 #
 # windows-latest matches the release runner so the cached artifacts apply.
+# The Rust toolchain comes from rust-toolchain.toml (pinned, so the cache key
+# doesn't change every time a new stable ships).
 
 name: ci
 
@@ -16,10 +28,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Mondays 09:17 UTC. Refreshes the main-branch cache's last-access time.
+    - cron: "17 9 * * 1"
   workflow_dispatch:
 
 jobs:
-  warm-cache:
+  check:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,8 +44,19 @@ jobs:
         with:
           node-version: 22
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-06-03
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust (from rust-toolchain.toml)
+        # rustup is preinstalled on GitHub's Windows images; with no argument
+        # `rustup toolchain install` installs the toolchain + components named
+        # in rust-toolchain.toml.
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo clippy --version
 
       - name: Cache cargo registry/build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -47,5 +73,29 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Frontend tests (vitest)
+        run: npm test
+
+      - name: propose.py rules regression
+        run: python scripts/tests/test_propose_rules.py
+
+      - name: Release smoke-test script (against the repo layout)
+        # release.yml runs this against the installed MSI; running it here on
+        # the repo (same scripts/ + prompts/ layout) keeps the script itself
+        # exercised on Windows between releases.
+        run: python scripts/tests/smoke_installed.py .
+
       - name: Compile Rust (release) — warms the DuckDB/deps cache
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust tests
+        # --release so the test build reuses the release-profile DuckDB/deps
+        # artifacts compiled (and cached) above instead of a second debug build.
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Clippy
+        # Non-blocking for now: 6 known lints remain in commands.rs /
+        # algorithm.rs, which a follow-up PR is rewriting. Drop
+        # continue-on-error once that lands and clippy is clean.
+        continue-on-error: true
+        run: cargo clippy --release --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings

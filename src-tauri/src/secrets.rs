@@ -39,8 +39,8 @@ impl Secrets {
 
         // Ensure a client exists. load_client succeeds only if the snapshot
         // already contained one; otherwise we create a fresh client.
-        if s.load_client(CLIENT_PATH.to_vec()).is_err() {
-            s.create_client(CLIENT_PATH.to_vec())
+        if s.load_client(CLIENT_PATH).is_err() {
+            s.create_client(CLIENT_PATH)
                 .context("create stronghold client")?;
         }
         Ok(Self(Mutex::new(s)))
@@ -49,7 +49,7 @@ impl Secrets {
     pub fn get(&self, key: &[u8]) -> Result<Option<String>> {
         let s = self.0.lock().map_err(|_| anyhow!("secrets poisoned"))?;
         let client = s
-            .get_client(CLIENT_PATH.to_vec())
+            .get_client(CLIENT_PATH)
             .context("get stronghold client")?;
         let raw = client.store().get(key).context("stronghold store.get")?;
         Ok(raw.map(|b| String::from_utf8_lossy(&b).into_owned()))
@@ -58,13 +58,13 @@ impl Secrets {
     pub fn set(&self, key: &[u8], value: &str) -> Result<()> {
         let s = self.0.lock().map_err(|_| anyhow!("secrets poisoned"))?;
         let client = s
-            .get_client(CLIENT_PATH.to_vec())
+            .get_client(CLIENT_PATH)
             .context("get stronghold client")?;
         client
             .store()
             .insert(key.to_vec(), value.as_bytes().to_vec(), None)
             .context("stronghold store.insert")?;
-        s.write_client(CLIENT_PATH.to_vec())
+        s.write_client(CLIENT_PATH)
             .context("write client to snapshot")?;
         s.save().context("commit snapshot")?;
         Ok(())
@@ -73,13 +73,13 @@ impl Secrets {
     pub fn remove(&self, key: &[u8]) -> Result<()> {
         let s = self.0.lock().map_err(|_| anyhow!("secrets poisoned"))?;
         let client = s
-            .get_client(CLIENT_PATH.to_vec())
+            .get_client(CLIENT_PATH)
             .context("get stronghold client")?;
         client
             .store()
             .delete(key)
             .context("stronghold store.delete")?;
-        s.write_client(CLIENT_PATH.to_vec())
+        s.write_client(CLIENT_PATH)
             .context("write client to snapshot")?;
         s.save().context("commit snapshot")?;
         Ok(())

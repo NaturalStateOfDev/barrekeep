@@ -12,7 +12,7 @@ Install mise once (https://mise.jdx.dev/getting-started.html), then in the repo 
 
 ```sh
 mise install
-mise exec -- rustc --version   # 1.83
+mise exec -- rustc --version   # 1.88 (also pinned in rust-toolchain.toml)
 mise exec -- node --version    # v22.x
 mise exec -- python --version  # 3.12
 ```
@@ -84,14 +84,36 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 ### Cutting a release
 
-```sh
-# Bump versions in package.json and src-tauri/tauri.conf.json (keep them aligned)
-git commit -am "Release v0.1.0"
-git tag v0.1.0
-git push origin main --tags
-```
+1. Bump the version everywhere it lives (package.json, package-lock.json,
+   tauri.conf.json, Cargo.toml, Cargo.lock) in a PR and merge it to main:
 
-The `release` workflow (.github/workflows/release.yml) picks up the tag, builds on a Windows runner, signs the MSI, and creates a public GitHub Release with:
+   ```sh
+   npm run bump -- 0.3.0
+   git commit -am "chore: bump version to 0.3.0"
+   ```
+
+2. **Wait for the `ci` run on main to go green** for the merge commit. That
+   run also saves the Rust build cache the release restores.
+3. Tag that exact commit and push the tag:
+
+   ```sh
+   git pull && git tag v0.3.0 && git push origin v0.3.0
+   ```
+
+The `release` workflow (.github/workflows/release.yml) then:
+
+- refuses to run unless `ci` succeeded on main for the tagged commit (it waits
+  if that run is still in progress);
+- checks the tag matches all five version files
+  (`node scripts/bump-version.mjs --check v0.3.0`);
+- builds and signs the MSI into a **draft** release;
+- installs the MSI silently and smoke-tests the installed `propose.py`
+  (`scripts/tests/smoke_installed.py`);
+- only then publishes the release as latest.
+
+If a step after the build fails, the draft release is left for inspection —
+delete it (`gh release delete v0.3.0 --yes`) before re-running the workflow.
+The published release contains:
 
 - `the barre studio Scheduler_0.1.0_x64_en-US.msi` — the installer
 - `the barre studio Scheduler_0.1.0_x64_en-US.msi.sig` — signature
