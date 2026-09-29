@@ -157,8 +157,39 @@ const ALGO_VERSIONS: AlgorithmVersion[] = [
     last_used_month: "2026-08",
     script_archived: false,
     script_missing: false,
+    baseline_sha256: null,
+    baseline_outdated: false,
+    is_active: true,
   },
 ];
+/** Mirrors app_settings.active_algorithm_version (9 = shipped baseline). */
+let activeAlgoVersion = 10;
+
+const MOCK_SCRIPT = [
+  "# propose.py (dev mock excerpt)",
+  "def try_assign(slot_start, slot_end_, week_key_str, cls, wd, st):",
+  "    tiers = get_candidates(cls, wd, st)",
+  "    for tier in tiers:",
+  "        ...",
+  "    return None, None",
+].join("\n");
+const MOCK_DRAFT_SCRIPT = MOCK_SCRIPT.replace(
+  "    for tier in tiers:",
+  "    if back_to_back_evening(wd, st):\n        return None, None\n    for tier in tiers:",
+);
+
+function mockDiffRules(active: Record<string, any>, cand: Record<string, any>) {
+  const out: { rule_key: string; identity: string; kind: string; before: unknown; after: unknown }[] = [];
+  const keys = new Set([...Object.keys(active), ...Object.keys(cand)]);
+  for (const k of keys) {
+    const a = JSON.stringify(active[k] ?? null);
+    const c = JSON.stringify(cand[k] ?? null);
+    if (a === c) continue;
+    const kind = active[k] == null ? "added" : cand[k] == null ? "removed" : "changed";
+    out.push({ rule_key: k, identity: "", kind, before: active[k] ?? null, after: cand[k] ?? null });
+  }
+  return out;
+}
 
 const REVIEWS = [
   {
@@ -463,7 +494,7 @@ export function installDevMock() {
             },
           },
           needs_code_change: null,
-          model: APP_SETTINGS.get("claude_model") ?? "claude-opus-4-8",
+          model: APP_SETTINGS.get("claude_model") ?? "claude-opus-5-5",
           cost_usd: 0.11,
           duration_ms: 4200,
         };
@@ -473,43 +504,86 @@ export function installDevMock() {
         return {
           run_id: 43,
           description: "v-next — never assign back-to-back evening classes",
-          script: "#!/usr/bin/env python3\n# (dev mock) full drafted script would appear here\nprint('draft')\n",
-          model: APP_SETTINGS.get("claude_model") ?? "claude-opus-4-8",
-          cost_usd: 0.34,
+          script: MOCK_DRAFT_SCRIPT,
+          diff:
+            "--- active/propose.py\n+++ draft/propose.py\n@@ -2,4 +2,6 @@\n" +
+            " def try_assign(slot_start, slot_end_, week_key_str, cls, wd, st):\n" +
+            "     tiers = get_candidates(cls, wd, st)\n" +
+            "+    if back_to_back_evening(wd, st):\n+        return None, None\n" +
+            "     for tier in tiers:\n         ...\n",
+          edit_count: 1,
+          rules: ALGO_VERSIONS.find((v) => v.version === activeAlgoVersion)?.rules ?? {},
+          model: APP_SETTINGS.get("claude_model") ?? "claude-opus-5-5",
+          cost_usd: 0.09,
           duration_ms: 9100,
         };
-      case "validate_code_draft":
+      case "preview_algorithm_candidate": {
         await sleep(900);
+        const active = ALGO_VERSIONS.find((v) => v.version === activeAlgoVersion);
+        const rulesDiff = mockDiffRules((active?.rules as Record<string, any>) ?? {}, args.rules ?? {});
+        const isCode = args.scriptContent != null;
+        const changes = [
+          { date: "2026-08-04", weekday: "Tue", start: "17:30", kind: "changed", class_before: "Reform", class_after: "Reform", teacher_before: "Casey Diaz", teacher_after: "Priya Shah", expected: false },
+          { date: "2026-08-11", weekday: "Tue", start: "17:30", kind: "changed", class_before: "Reform", class_after: "Reform", teacher_before: "Casey Diaz", teacher_after: "Kayla Moore", expected: false },
+        ];
         return {
-          ok: true,
-          error: null,
-          shift_count: 114,
-          changed_assignments: 6,
-          added_slots: 0,
-          removed_slots: 0,
-          month: "2026-08",
+          active_version: activeAlgoVersion,
+          rules_diff: rulesDiff,
+          script_diff: isCode
+            ? "--- active/propose.py\n+++ candidate/propose.py\n@@ -3,2 +3,4 @@\n     tiers = get_candidates(cls, wd, st)\n+    if back_to_back_evening(wd, st):\n+        return None, None\n     for tier in tiers:\n"
+            : null,
+          validation: {
+            // Code drafts demo the "adopt anyway" confirm path.
+            status: isCode ? "needs_confirm" : "pass",
+            error: null,
+            reasons: isCode ? ["31 of 114 assignments change (27% — more than 25%)"] : [],
+            month: "2026-08",
+            slot_count: 114,
+            candidate_slot_count: 114,
+            changed_count: isCode ? 31 : changes.length,
+            added_count: 0,
+            removed_count: 0,
+            unexpected_count: 0,
+            changed_pct: isCode ? 0.27 : changes.length / 114,
+            changes,
+          },
         };
+      }
       case "list_algorithm_versions":
-        return [...ALGO_VERSIONS].sort((x, y) => y.version - x.version);
+        return [...ALGO_VERSIONS]
+          .map((v) => ({ ...v, is_active: v.version === activeAlgoVersion }))
+          .sort((x, y) => y.version - x.version);
       case "adopt_algorithm_version": {
         const version = Math.max(9, ...ALGO_VERSIONS.map((v) => v.version)) + 1;
+        const active = ALGO_VERSIONS.find((v) => v.version === activeAlgoVersion);
         ALGO_VERSIONS.push({
           version,
           description: args.description,
           rules: args.rules ?? {},
-          script_file: args.scriptContent ? `propose_v${version}.py` : null,
+          // Rules-only adoptions keep the active version's script.
+          script_file: args.scriptContent ? `propose_v${version}.py` : active?.script_file ?? null,
           created_by: args.claudeRunId != null ? "claude" : "user",
           adopted_at: "2026-07-06 12:00:00",
           last_used_month: null,
           script_archived: false,
           script_missing: false,
+          baseline_sha256: null,
+          baseline_outdated: false,
+          is_active: true,
         });
+        activeAlgoVersion = version;
         return version;
+      }
+      case "set_active_algorithm_version": {
+        if (args.version !== 9 && !ALGO_VERSIONS.some((v) => v.version === args.version))
+          throw new Error(`version v${args.version} does not exist`);
+        activeAlgoVersion = args.version;
+        return null;
       }
       case "delete_algorithm_script": {
         const v = ALGO_VERSIONS.find((x) => x.version === args.version);
         if (!v) throw new Error(`version v${args.version} not found`);
-        if (v.version === Math.max(...ALGO_VERSIONS.map((x) => x.version)))
+        if (v.version === activeAlgoVersion)
           throw new Error("cannot delete the active version's script");
         v.script_missing = true;
         return null;

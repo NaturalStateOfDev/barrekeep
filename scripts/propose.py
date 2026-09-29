@@ -581,7 +581,11 @@ for date in june_dates:
 
         lead_overflow = lead_over_cap = False
         if not chosen and LEAD_UID in TARGETS:
-            if (not is_blocked(LEAD_UID, slot_start, slot_end_dt)
+            # Overflow ignores caps, never the manager's slot/date blocklists
+            # (rules.teacher_slot_blocklist): "never at this slot" wins.
+            if (teacher_slot_allowed(LEAD_UID, wd, st)
+                and teacher_date_allowed(LEAD_UID, slot_start.date(), st)
+                and not is_blocked(LEAD_UID, slot_start, slot_end_dt)
                 and not is_double_booked(LEAD_UID, slot_start, slot_end_dt)
                 and passes_special(LEAD_UID, slot_start, slot_end_dt, weekly_assignments)
                 and teacher_qualified(LEAD_UID, cls)):

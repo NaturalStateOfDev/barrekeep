@@ -29,8 +29,9 @@ serde_json = "1"
 duckdb = { version = "~1.10504", features = ["bundled"] }
 thiserror = "2"
 anyhow = "1"
-# HTTP client for the Anthropic API. Sync (blocking) is fine — Tauri commands
-# run on a worker thread pool so blocking calls don't stall the main thread.
+# HTTP client for the Anthropic API. Sync (blocking) is fine as long as the
+# calling command is `#[tauri::command(async)]` — Tauri 2 runs plain sync
+# commands on the main thread, where a blocking call would freeze the UI.
 # Using ureq instead of reqwest to keep compile time and binary size down.
 ureq = { version = "3", features = ["json"] }
 # Persistent secret storage (OS keychain on macOS/Windows, in-process vault on Linux).

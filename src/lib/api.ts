@@ -4,9 +4,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AlgorithmVersion,
+  CandidatePreview,
   ClaudeEditResult,
   CodeDraft,
-  DraftValidation,
   Teacher,
   StudioConfig,
   Position,
@@ -108,8 +108,13 @@ export const api = {
       instruction,
       rationale,
     }),
-  validateCodeDraft: (scriptContent: string) =>
-    invoke<DraftValidation>("validate_code_draft", { scriptContent }),
+  previewAlgorithmCandidate: (rules: Record<string, unknown>, scriptContent?: string) =>
+    invoke<CandidatePreview>("preview_algorithm_candidate", {
+      rules,
+      scriptContent: scriptContent ?? null,
+    }),
+  setActiveAlgorithmVersion: (version: number) =>
+    invoke<void>("set_active_algorithm_version", { version }),
   listAlgorithmVersions: () =>
     invoke<AlgorithmVersion[]>("list_algorithm_versions"),
   adoptAlgorithmVersion: (

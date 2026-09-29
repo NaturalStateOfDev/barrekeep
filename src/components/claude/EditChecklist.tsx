@@ -9,12 +9,14 @@ interface Props {
   detail: ProposalDetail;
   positions: Position[];
   teachers: Teacher[];
+  /** Past month: show the edits but never apply them. */
+  readonly?: boolean;
   onProposalChanged: () => void;
 }
 
 /** One row per proposed edit with per-row Apply and Apply-selected — the
  *  fast path the spec calls for while keeping every change reviewable. */
-export function EditChecklist({ edits, detail, positions, teachers, onProposalChanged }: Props) {
+export function EditChecklist({ edits, detail, positions, teachers, readonly = false, onProposalChanged }: Props) {
   const [selected, setSelected] = useState<Set<number>>(
     () => new Set(edits.filter((e) => e.valid).map((_, i) => i).filter((i) => edits[i].valid)),
   );
@@ -55,6 +57,7 @@ export function EditChecklist({ edits, detail, positions, teachers, onProposalCh
   };
 
   const run = async (indexes: number[]) => {
+    if (readonly || busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -82,7 +85,7 @@ export function EditChecklist({ edits, detail, positions, teachers, onProposalCh
             <input
               type="checkbox"
               style={{ accentColor: "var(--accent)" }}
-              disabled={!e.valid || isApplied || busy}
+              disabled={readonly || !e.valid || isApplied || busy}
               checked={e.valid && !isApplied && selected.has(i)}
               onChange={(ev) => {
                 setSelected((prev) => {
@@ -104,7 +107,7 @@ export function EditChecklist({ edits, detail, positions, teachers, onProposalCh
             </div>
             <button
               className="btn-ghost btn-sm"
-              disabled={!e.valid || isApplied || busy}
+              disabled={readonly || !e.valid || isApplied || busy}
               onClick={() => run([i])}
             >
               {isApplied ? "Applied" : "Apply"}
@@ -115,7 +118,7 @@ export function EditChecklist({ edits, detail, positions, teachers, onProposalCh
       <div className="row" style={{ marginTop: 10 }}>
         <button
           className="btn-primary"
-          disabled={busy || pending.length === 0}
+          disabled={readonly || busy || pending.length === 0}
           onClick={() => run(pending)}
         >
           {busy ? "Applying…" : `Apply selected (${pending.length})`}

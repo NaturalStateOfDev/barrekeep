@@ -360,6 +360,18 @@ CREATE TABLE algorithm_versions (
   script_file   VARCHAR,
   created_by    VARCHAR NOT NULL,      -- 'claude' | 'user'
   claude_run_id BIGINT,                -- provenance into claude_runs (app-enforced)
-  adopted_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  adopted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  baseline_sha256 VARCHAR              -- migration 0011: sha256 of the shipped propose.py at adoption
 );
 ```
+
+A rules-only adoption reuses the **active** version's `script_file` (and its
+`baseline_sha256`) — it never silently falls back to the shipped script, so an
+adopted code change survives later rule tweaks. Several rows may therefore
+point at the same script file.
+
+**Active version.** Which version `generate_proposal` runs is stored in
+`app_settings` under `active_algorithm_version` (an integer; `9` = the shipped
+baseline). Adopting a version makes it active; "Make active" in the Algorithm
+card rolls back/forward without touching `algorithm_versions` rows. When the
+key is unset or names a version that no longer exists, the newest row wins.

@@ -844,6 +844,77 @@ code {
   opacity: 0.55;
 }
 
+/* Unified diff view (script diff before Adopt). One span per line. */
+.bk-diff {
+  white-space: normal;
+  padding: 6px 0;
+}
+
+.bk-diff > span {
+  display: block;
+  white-space: pre;
+  padding: 0 12px;
+}
+
+.bk-diff-add {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.bk-diff-del {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.bk-diff-hunk {
+  color: var(--color-info);
+}
+
+/* Rules diff + per-slot change list. */
+.bk-change-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 13px;
+}
+
+.bk-change-list li {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.bk-change-list li:last-child {
+  border-bottom: 0;
+}
+
+.bk-change-removed {
+  color: var(--color-danger);
+}
+
+.bk-change-added {
+  color: var(--color-success);
+}
+
+.bk-warn {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  margin-top: var(--space-3);
+}
+
+.bk-badge-muted {
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  border: 1px solid var(--border-card);
+}
+
+.bk-badge-warn {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
 .bk-code-scroll {
   max-height: 320px;
   overflow: auto;

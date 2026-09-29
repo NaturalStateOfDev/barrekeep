@@ -268,14 +268,15 @@ struct ProposeOutput {
     shifts: Vec<ProposeShift>,
 }
 
-// class_name is also in the JSON payload but we don't read it here — class
-// names come from a JOIN on positions in the read paths. serde silently
-// ignores unknown fields, so dropping it is safe.
+// class_name is only read by candidate validation (per-slot diff labels);
+// stored proposals get class names from a JOIN on positions.
 #[derive(Deserialize)]
 struct ProposeShift {
     shift_date: String,
     start_time: String,
     end_time: String,
+    #[serde(default)]
+    class_name: String,
     sling_position_id: i32,
     sling_user_id: Option<i32>,
     generation_reason: String,
@@ -492,30 +493,30 @@ fn spawn_propose(
     Ok((parsed, stderr_tail))
 }
 
-#[tauri::command]
+// `async` attribute: Tauri 2 runs plain sync commands on the main (UI)
+// thread. Everything that spawns python, does HTTP, or otherwise takes
+// seconds is marked `#[tauri::command(async)]` so it runs on the async
+// runtime's thread pool instead and the window keeps painting.
+#[tauri::command(async)]
 pub fn generate_proposal(
     app: tauri::AppHandle,
     db: State<'_, Db>,
     target_month: String,
 ) -> Result<GenerateResult, String> {
-    // Step 1: build the payload and resolve the active algorithm version
-    // (rules + script). cwd stays at project root so the baseline script's
-    // relative paths keep resolving in dev mode.
+    // Step 1: build the payload and resolve the ACTIVE algorithm version
+    // (rules + script; app_settings pointer, see algorithm.rs).
     let project_root = find_project_root(&app).map_err(err)?;
     let (payload_json, script_path) = {
         let conn = db.0.lock().map_err(err)?;
         let mut payload = build_propose_payload(&conn, &target_month)?;
         let active = crate::algorithm::active_version(&conn)?;
-        let script = match &active {
-            Some(v) => {
-                let dir = crate::algorithm::algorithms_dir(&app)?;
-                payload["rules"] = v.rules.clone();
-                payload["version_label"] =
-                    serde_json::Value::String(format!("v{}", v.version));
-                crate::algorithm::resolve_script(&dir, v, &project_root)?
-            }
-            None => project_root.join("scripts").join("propose.py"),
-        };
+        if let Some(v) = &active {
+            payload["rules"] = v.rules.clone();
+            payload["version_label"] = serde_json::Value::String(format!("v{}", v.version));
+        }
+        let dir = crate::algorithm::algorithms_dir(&app)?;
+        let script =
+            crate::algorithm::resolve_active_script(&dir, active.as_ref(), &project_root)?;
         (payload, script)
     };
 
@@ -1017,10 +1018,11 @@ pub fn list_edits_for_proposal(
 // Anthropic key management + app settings
 // ============================================================
 
-/// Model allowlist for the Claude features. Exact ids only — an unknown
-/// stored value falls back to the default at call time.
-pub const CLAUDE_MODELS: &[&str] = &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"];
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
+/// Model allowlist for the Claude features. Exact ids only — an unknown or
+/// retired stored value (e.g. an older claude-opus-4-8 setting) falls back
+/// to the default at call time. Keep in sync with SettingsScreen.tsx.
+pub const CLAUDE_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"];
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 pub fn claude_model(conn: &duckdb::Connection) -> String {
     let stored: Option<String> = conn
@@ -1059,7 +1061,7 @@ pub fn set_app_setting(db: State<'_, Db>, key: String, value: String) -> Result<
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_anthropic_key(
     key: State<'_, AnthropicKey>,
     secrets: State<'_, crate::secrets::Secrets>,
@@ -1124,7 +1126,7 @@ pub struct ReviewRunSummary {
     pub overall_assessment: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn review_proposal(
     db: State<'_, Db>,
     key: State<'_, AnthropicKey>,
@@ -1498,9 +1500,22 @@ fn build_editor_payload(
         .map(|v| v.rules)
         .unwrap_or_else(|| json!({}));
 
+    // Every class name a rule may reference (rules are validated against
+    // this list — see algorithm::validate_rules_in_context).
+    let class_names: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT class_name FROM positions ORDER BY class_name")
+            .map_err(err)?;
+        stmt.query_map([], |r| r.get(0))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?
+    };
+
     Ok(json!({
         "proposal": { "id": proposal_id, "target_month": target_month, "shifts": shifts },
         "roster": roster,
+        "class_names": class_names,
         "qualifications": qualifications,
         "availability_blocks": blocks,
         "edit_history": edit_history,
@@ -1638,7 +1653,7 @@ fn persist_claude_run(
     .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn claude_edit_proposal(
     app: tauri::AppHandle,
     db: State<'_, Db>,
@@ -1672,11 +1687,13 @@ pub fn claude_edit_proposal(
     let mut payload = result.payload;
     validate_claude_edits(&conn, proposal_id, &mut payload.edits)?;
 
-    // A rule proposal that doesn't validate is downgraded to a summary note
-    // rather than shown with a broken Adopt button.
+    // A rule proposal that doesn't validate (schema, HH:MM, unknown teacher
+    // ids or class names) is downgraded to a summary note rather than shown
+    // with a broken Adopt button.
     let mut summary = payload.summary.clone();
+    let rule_ctx = crate::algorithm::load_rule_context(&conn)?;
     let ruleset_proposal = match payload.ruleset_proposal {
-        Some(rp) => match crate::algorithm::validate_rules(&rp.rules) {
+        Some(rp) => match crate::algorithm::validate_rules_in_context(&rp.rules, &rule_ctx) {
             Ok(_) => Some(rp),
             Err(e) => {
                 summary.push_str(&format!(
@@ -1714,60 +1731,37 @@ pub fn claude_edit_proposal(
 }
 
 // ============================================================
-// Code drafts (tier 3): draft via Claude, validate against the most
-// recent month before Adopt is possible.
+// Candidate algorithms: code drafts (tier 3), plus the shared
+// "reproduce last month" validation + diffs that every candidate — rules
+// or code — goes through before Adopt (schedule-algorithm skill).
 // ============================================================
+
+/// Read a script with line endings normalised to \n, so Claude's
+/// search/replace edits and the diff view don't trip over CRLF checkouts.
+fn read_script(path: &std::path::Path) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map(|s| s.replace("\r\n", "\n"))
+        .map_err(|e| format!("could not read {}: {e}", path.display()))
+}
 
 #[derive(Serialize)]
 pub struct CodeDraft {
     pub run_id: i64,
     pub description: String,
+    /// The full resulting script (active script with Claude's edits applied).
     pub script: String,
+    /// Unified diff: active script → draft.
+    pub diff: String,
+    pub edit_count: usize,
+    /// The active rules at draft time — carried into the code version on
+    /// adopt so adopting code never drops the standing rule set.
+    pub rules: serde_json::Value,
     pub model: String,
     pub cost_usd: f64,
     pub duration_ms: u32,
 }
 
-#[derive(Serialize)]
-pub struct DraftValidation {
-    pub ok: bool,
-    pub error: Option<String>,
-    pub shift_count: i64,
-    pub changed_assignments: i64,
-    pub added_slots: i64,
-    pub removed_slots: i64,
-    pub month: String,
-}
-
-/// Compare two schedules keyed by (date, start, position): how many slots
-/// kept the key but changed teacher, and how many keys were added/removed.
-fn diff_schedules(
-    baseline: &[(String, String, i32, Option<i32>)],
-    candidate: &[(String, String, i32, Option<i32>)],
-) -> (i64, i64, i64) {
-    use std::collections::HashMap;
-    let b: HashMap<(&str, &str, i32), Option<i32>> = baseline
-        .iter()
-        .map(|(d, t, p, u)| ((d.as_str(), t.as_str(), *p), *u))
-        .collect();
-    let c: HashMap<(&str, &str, i32), Option<i32>> = candidate
-        .iter()
-        .map(|(d, t, p, u)| ((d.as_str(), t.as_str(), *p), *u))
-        .collect();
-    let mut changed = 0i64;
-    let mut added = 0i64;
-    for (k, u) in &c {
-        match b.get(k) {
-            Some(bu) if bu != u => changed += 1,
-            Some(_) => {}
-            None => added += 1,
-        }
-    }
-    let removed = b.keys().filter(|k| !c.contains_key(*k)).count() as i64;
-    (changed, added, removed)
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 pub fn claude_draft_code_change(
     app: tauri::AppHandle,
     db: State<'_, Db>,
@@ -1783,8 +1777,9 @@ pub fn claude_draft_code_change(
             .ok_or_else(|| "Anthropic API key is not set — add it in Settings".to_string())?
     };
     let project_root = find_project_root(&app).map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
 
-    let (user_payload, model) = {
+    let (user_payload, model, current_script, active_rules) = {
         let conn = db.0.lock().map_err(err)?;
         let model = claude_model(&conn);
         let target_month: String = conn
@@ -1795,159 +1790,511 @@ pub fn claude_draft_code_change(
             )
             .map_err(|e| format!("proposal {proposal_id} not found: {e:#}"))?;
         let active = crate::algorithm::active_version(&conn)?;
-        let (script_path, active_rules) = match &active {
-            Some(v) => {
-                let dir = crate::algorithm::algorithms_dir(&app)?;
-                (
-                    crate::algorithm::resolve_script(&dir, v, &project_root)?,
-                    v.rules.clone(),
-                )
-            }
-            None => (
-                project_root.join("scripts").join("propose.py"),
-                serde_json::json!({}),
-            ),
-        };
-        let current_script = std::fs::read_to_string(&script_path)
-            .map_err(|e| format!("could not read {}: {e}", script_path.display()))?;
+        let script_path =
+            crate::algorithm::resolve_active_script(&dir, active.as_ref(), &project_root)?;
+        let current_script = read_script(&script_path)?;
+        let active_rules = active.map(|v| v.rules).unwrap_or_else(|| json!({}));
         (
-            serde_json::json!({
+            json!({
                 "target_month": target_month,
-                "current_script": current_script,
                 "active_rules": active_rules,
                 "instruction": instruction,
                 "rationale": rationale,
             }),
             model,
+            current_script,
+            active_rules,
         )
     };
 
-    let result = crate::editor::run_code_draft(&api_key, &model, &user_payload).map_err(err)?;
+    let result = crate::editor::run_code_draft(&api_key, &model, &current_script, &user_payload)
+        .map_err(err)?;
 
-    let conn = db.0.lock().map_err(err)?;
-    let run_id = persist_claude_run(
-        &conn,
-        proposal_id,
-        &result.model,
-        result.input_tokens,
-        result.output_tokens,
-        &result.raw_input,
-        &result.raw_output,
-        result.cost_usd,
-        result.duration_ms,
-    )?;
-    let _ = conn.execute("CHECKPOINT", []);
+    // Log the run (cost audit) before applying: a failed apply still cost money.
+    let run_id = {
+        let conn = db.0.lock().map_err(err)?;
+        let id = persist_claude_run(
+            &conn,
+            proposal_id,
+            &result.model,
+            result.input_tokens,
+            result.output_tokens,
+            &result.raw_input,
+            &result.raw_output,
+            result.cost_usd,
+            result.duration_ms,
+        )?;
+        let _ = conn.execute("CHECKPOINT", []);
+        id
+    };
+
+    let script = crate::editor::apply_edit_blocks(&current_script, &result.payload.edits)
+        .map_err(|e| {
+            format!(
+                "Claude's edits could not be applied to the active script: {e}\n\
+                 (Logged as Claude run #{run_id}; drafting again usually fixes this.)"
+            )
+        })?;
+    let diff = crate::textdiff::unified_diff(
+        &current_script,
+        &script,
+        "active/propose.py",
+        "draft/propose.py",
+        3,
+    );
 
     Ok(CodeDraft {
         run_id,
         description: result.payload.description,
-        script: result.payload.script,
+        script,
+        diff,
+        edit_count: result.payload.edits.len(),
+        rules: active_rules,
         model: result.model,
         cost_usd: result.cost_usd,
         duration_ms: result.duration_ms,
     })
 }
 
-/// Run a candidate script against the most recent generated month and diff
-/// its output vs. that month's proposal (the schedule-algorithm skill's
-/// reproduce-last-month rule). Adoption stays disabled until this passes.
-#[tauri::command]
-pub fn validate_code_draft(
+/// One shift of a propose.py run, reduced to what the per-slot diff needs.
+#[derive(Debug, Clone)]
+struct RunShift {
+    date: String,
+    start: String,
+    position_id: i32,
+    class_name: String,
+    user_id: Option<i32>,
+    coteach_label: String,
+    dropped: bool,
+}
+
+impl RunShift {
+    fn from_output(s: &ProposeShift) -> Self {
+        RunShift {
+            date: s.shift_date.clone(),
+            start: s.start_time.clone(),
+            position_id: s.sling_position_id,
+            class_name: s.class_name.clone(),
+            user_id: s.sling_user_id,
+            coteach_label: s.coteach_label.clone(),
+            dropped: s.is_dropped,
+        }
+    }
+
+    /// Who teaches it. A co-teach row is identified by its label (both
+    /// teachers), so a change of either co-teacher counts as a change.
+    fn assignee(&self) -> (bool, &str, Option<i32>) {
+        (self.dropped, self.coteach_label.as_str(), self.user_id)
+    }
+
+    fn teacher_label(&self, names: &std::collections::HashMap<i32, String>) -> String {
+        if self.dropped {
+            "Dropped".to_string()
+        } else if !self.coteach_label.is_empty() {
+            self.coteach_label.clone()
+        } else {
+            match self.user_id {
+                Some(u) => names.get(&u).cloned().unwrap_or_else(|| format!("teacher {u}")),
+                None => "Unassigned".to_string(),
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct SlotChange {
+    pub date: String,
+    pub weekday: String,
+    pub start: String,
+    /// "changed" (same slot, different class and/or teacher) | "added" | "removed"
+    pub kind: String,
+    pub class_before: Option<String>,
+    pub class_after: Option<String>,
+    pub teacher_before: Option<String>,
+    pub teacher_after: Option<String>,
+    /// Added/removed slots explained by a time-shift rule change.
+    pub expected: bool,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CandidateValidation {
+    /// "pass" | "needs_confirm" (too many changed assignments — adopt only
+    /// after explicit confirmation) | "fail" (slots appeared/disappeared that
+    /// no rule change explains) | "error" (a script failed or the rules don't
+    /// validate — never adoptable)
+    pub status: String,
+    pub error: Option<String>,
+    pub reasons: Vec<String>,
+    pub month: String,
+    pub slot_count: i64,
+    pub candidate_slot_count: i64,
+    pub changed_count: i64,
+    pub added_count: i64,
+    pub removed_count: i64,
+    pub unexpected_count: i64,
+    pub changed_pct: f64,
+    pub changes: Vec<SlotChange>,
+}
+
+/// Share of slots whose assignment may change before adoption needs an
+/// explicit "adopt anyway".
+const CHANGE_THRESHOLD: f64 = 0.25;
+
+impl CandidateValidation {
+    fn error(month: &str, message: String) -> Self {
+        CandidateValidation {
+            status: "error".to_string(),
+            error: Some(message),
+            reasons: Vec::new(),
+            month: month.to_string(),
+            slot_count: 0,
+            candidate_slot_count: 0,
+            changed_count: 0,
+            added_count: 0,
+            removed_count: 0,
+            unexpected_count: 0,
+            changed_pct: 0.0,
+            changes: Vec::new(),
+        }
+    }
+}
+
+fn weekday_of(date: &str) -> String {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| d.format("%a").to_string())
+        .unwrap_or_default()
+}
+
+/// Start times (per weekend day) whose slots may legitimately appear or
+/// disappear because the candidate changes a sat/sun time-shift entry.
+fn expected_moves(
+    active: &serde_json::Value,
+    candidate: &serde_json::Value,
+) -> std::collections::HashMap<&'static str, std::collections::HashSet<String>> {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    let mut out: HashMap<&'static str, HashSet<String>> = HashMap::new();
+    for (key, day) in [("sat_time_shifts", "Sat"), ("sun_time_shifts", "Sun")] {
+        let read = |v: &serde_json::Value| -> BTreeMap<String, String> {
+            v.get(key)
+                .and_then(|m| m.as_object())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (a, c) = (read(active), read(candidate));
+        let set = out.entry(day).or_default();
+        for k in a.keys().chain(c.keys()) {
+            if a.get(k) != c.get(k) {
+                set.insert(k.clone());
+                set.extend(a.get(k).cloned());
+                set.extend(c.get(k).cloned());
+            }
+        }
+    }
+    out
+}
+
+/// Per-slot diff of two runs on the same payload. Slots are keyed by
+/// (date, start); within a slot, rows pair up by identical assignment
+/// first, then by position (teacher change), then in order (class change).
+/// Co-teach rows keep their own identity (the label), never collapsed.
+fn compare_runs(
+    month: &str,
+    baseline: &[RunShift],
+    candidate: &[RunShift],
+    names: &std::collections::HashMap<i32, String>,
+    moves: &std::collections::HashMap<&'static str, std::collections::HashSet<String>>,
+) -> CandidateValidation {
+    use std::collections::BTreeMap;
+    type Side<'a> = (Vec<&'a RunShift>, Vec<&'a RunShift>);
+    let mut slots: BTreeMap<(String, String), Side<'_>> = BTreeMap::new();
+    for b in baseline {
+        slots.entry((b.date.clone(), b.start.clone())).or_default().0.push(b);
+    }
+    for c in candidate {
+        slots.entry((c.date.clone(), c.start.clone())).or_default().1.push(c);
+    }
+
+    let mut changes = Vec::new();
+    let (mut changed, mut added, mut removed, mut unexpected) = (0i64, 0i64, 0i64, 0i64);
+    for ((date, start), (mut bs, mut cs)) in slots {
+        let weekday = weekday_of(&date);
+        // 1. Identical rows are unchanged.
+        bs.retain(|b| {
+            match cs
+                .iter()
+                .position(|c| c.position_id == b.position_id && c.assignee() == b.assignee())
+            {
+                Some(i) => {
+                    cs.remove(i);
+                    false
+                }
+                None => true,
+            }
+        });
+        // 2. Same class, different teacher; 3. anything left pairs in order.
+        let mut pairs: Vec<(&RunShift, &RunShift)> = Vec::new();
+        bs.retain(|b| match cs.iter().position(|c| c.position_id == b.position_id) {
+            Some(i) => {
+                pairs.push((*b, cs.remove(i)));
+                false
+            }
+            None => true,
+        });
+        while !bs.is_empty() && !cs.is_empty() {
+            pairs.push((bs.remove(0), cs.remove(0)));
+        }
+        let expected = moves.get(weekday.as_str()).is_some_and(|s| s.contains(&start));
+        for (b, c) in pairs {
+            changed += 1;
+            changes.push(SlotChange {
+                date: date.clone(),
+                weekday: weekday.clone(),
+                start: start.clone(),
+                kind: "changed".to_string(),
+                class_before: Some(b.class_name.clone()),
+                class_after: Some(c.class_name.clone()),
+                teacher_before: Some(b.teacher_label(names)),
+                teacher_after: Some(c.teacher_label(names)),
+                expected: false,
+            });
+        }
+        for b in bs {
+            removed += 1;
+            if !expected {
+                unexpected += 1;
+            }
+            changes.push(SlotChange {
+                date: date.clone(),
+                weekday: weekday.clone(),
+                start: start.clone(),
+                kind: "removed".to_string(),
+                class_before: Some(b.class_name.clone()),
+                class_after: None,
+                teacher_before: Some(b.teacher_label(names)),
+                teacher_after: None,
+                expected,
+            });
+        }
+        for c in cs {
+            added += 1;
+            if !expected {
+                unexpected += 1;
+            }
+            changes.push(SlotChange {
+                date: date.clone(),
+                weekday: weekday.clone(),
+                start: start.clone(),
+                kind: "added".to_string(),
+                class_before: None,
+                class_after: Some(c.class_name.clone()),
+                teacher_before: None,
+                teacher_after: Some(c.teacher_label(names)),
+                expected,
+            });
+        }
+    }
+
+    let slot_count = baseline.len() as i64;
+    let changed_pct = changed as f64 / slot_count.max(1) as f64;
+    let mut reasons = Vec::new();
+    let status = if unexpected > 0 {
+        reasons.push(format!(
+            "{unexpected} slot(s) appeared or disappeared that no time-shift rule change explains"
+        ));
+        "fail"
+    } else if changed_pct > CHANGE_THRESHOLD {
+        reasons.push(format!(
+            "{changed} of {slot_count} assignments change ({:.0}% — more than {:.0}%)",
+            changed_pct * 100.0,
+            CHANGE_THRESHOLD * 100.0
+        ));
+        "needs_confirm"
+    } else {
+        "pass"
+    };
+    CandidateValidation {
+        status: status.to_string(),
+        error: None,
+        reasons,
+        month: month.to_string(),
+        slot_count,
+        candidate_slot_count: candidate.len() as i64,
+        changed_count: changed,
+        added_count: added,
+        removed_count: removed,
+        unexpected_count: unexpected,
+        changed_pct,
+        changes,
+    }
+}
+
+/// Run the active (script + rules) and the candidate (script + rules) on the
+/// same stdin payload, in parallel, and diff them per slot. The baseline is
+/// a fresh run of the active algorithm — not the stored (possibly hand-
+/// edited) proposal — so only the candidate's own effect shows up.
+#[allow(clippy::too_many_arguments)]
+fn validate_candidate(
+    month: &str,
+    payload: &serde_json::Value,
+    workdir: &std::path::Path,
+    active_script: &std::path::Path,
+    active_rules: &serde_json::Value,
+    candidate_script: &std::path::Path,
+    candidate_rules: &serde_json::Value,
+    names: &std::collections::HashMap<i32, String>,
+) -> CandidateValidation {
+    let with_rules = |rules: &serde_json::Value, label: &str| {
+        let mut p = payload.clone();
+        p["rules"] = rules.clone();
+        p["version_label"] = json!(label);
+        p
+    };
+    let (pa, pc) = (with_rules(active_rules, "active"), with_rules(candidate_rules, "candidate"));
+    let (ra, rc) = std::thread::scope(|s| {
+        let ha = s.spawn(|| spawn_propose(active_script, workdir, &pa, month));
+        let hc = s.spawn(|| spawn_propose(candidate_script, workdir, &pc, month));
+        let join = |h: std::thread::ScopedJoinHandle<'_, Result<(ProposeOutput, String), String>>| {
+            h.join().unwrap_or_else(|_| Err("the propose run panicked".to_string()))
+        };
+        (join(ha), join(hc))
+    });
+    let candidate_out = match rc {
+        Ok((out, _)) => out,
+        Err(e) => {
+            return CandidateValidation::error(
+                month,
+                format!("The candidate failed when re-running {month}: {e}"),
+            )
+        }
+    };
+    let active_out = match ra {
+        Ok((out, _)) => out,
+        Err(e) => {
+            return CandidateValidation::error(
+                month,
+                format!("The active algorithm failed on {month}, so there is no baseline to compare against: {e}"),
+            )
+        }
+    };
+    let base: Vec<RunShift> = active_out.shifts.iter().map(RunShift::from_output).collect();
+    let cand: Vec<RunShift> = candidate_out.shifts.iter().map(RunShift::from_output).collect();
+    compare_runs(month, &base, &cand, names, &expected_moves(active_rules, candidate_rules))
+}
+
+#[derive(Serialize)]
+pub struct CandidatePreview {
+    pub active_version: i32,
+    pub rules_diff: Vec<crate::algorithm::RuleDiffEntry>,
+    /// Unified diff vs the active script; None for rules-only candidates.
+    pub script_diff: Option<String>,
+    pub validation: CandidateValidation,
+}
+
+/// Everything the Adopt card shows before Adopt: rules diff and script diff
+/// vs the ACTIVE version, and a "reproduce last month" run of both on the
+/// most recently generated month. `script_content` None = rules-only
+/// candidate (runs on the active script, as adoption would).
+#[tauri::command(async)]
+pub fn preview_algorithm_candidate(
     app: tauri::AppHandle,
     db: State<'_, Db>,
-    script_content: String,
-) -> Result<DraftValidation, String> {
-    let (month, payload, baseline) = {
+    rules: serde_json::Value,
+    script_content: Option<String>,
+) -> Result<CandidatePreview, String> {
+    let project_root = find_project_root(&app).map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+
+    let (active, rules_check, month, payload, names) = {
         let conn = db.0.lock().map_err(err)?;
-        let month: String = conn
+        let active = crate::algorithm::active_version(&conn)?;
+        let ctx = crate::algorithm::load_rule_context(&conn)?;
+        let rules_check = crate::algorithm::validate_rules_in_context(&rules, &ctx).map(|_| ());
+        let month: Option<String> = conn
             .query_row(
                 "SELECT target_month FROM proposals ORDER BY generated_at DESC LIMIT 1",
                 [],
                 |r| r.get(0),
             )
-            .map_err(|_| "no proposals yet — generate one first so there is a month to validate against".to_string())?;
-        let baseline_id: i64 = conn
-            .query_row(
-                "SELECT id FROM proposals WHERE target_month = ?
-                 ORDER BY is_current DESC, generated_at DESC LIMIT 1",
-                duckdb::params![&month],
-                |r| r.get(0),
-            )
-            .map_err(err)?;
-        let mut payload = build_propose_payload(&conn, &month)?;
-        if let Some(v) = crate::algorithm::active_version(&conn)? {
-            payload["rules"] = v.rules;
-        }
-        payload["version_label"] = serde_json::Value::String("candidate".to_string());
-
-        let baseline: Vec<(String, String, i32, Option<i32>)> = {
+            .ok();
+        let payload = month.as_ref().map(|m| build_propose_payload(&conn, m));
+        let names: std::collections::HashMap<i32, String> = {
             let mut stmt = conn
-                .prepare(
-                    "SELECT CAST(shift_date AS VARCHAR), start_time, sling_position_id, sling_user_id
-                     FROM proposal_shifts WHERE proposal_id = ? AND NOT is_dropped",
-                )
+                .prepare("SELECT sling_user_id, display_name FROM teachers")
                 .map_err(err)?;
-            stmt.query_map(duckdb::params![baseline_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-            .map_err(err)?
-            .collect::<Result<_, _>>()
-            .map_err(err)?
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(err)?
+                .collect::<Result<_, _>>()
+                .map_err(err)?
         };
-        (month, payload, baseline)
+        (active, rules_check, month, payload, names)
     };
 
-    let dir = crate::algorithm::algorithms_dir(&app)?;
-    let candidate_path = dir.join("candidate_draft.py");
-    std::fs::write(&candidate_path, &script_content).map_err(err)?;
+    let active_rules = active.as_ref().map(|v| v.rules.clone()).unwrap_or_else(|| json!({}));
+    let active_script_path =
+        crate::algorithm::resolve_active_script(&dir, active.as_ref(), &project_root)?;
+    let active_script = read_script(&active_script_path)?;
+    let candidate_script = script_content.map(|s| s.replace("\r\n", "\n"));
 
-    let workdir = script_workdir(&app).map_err(err)?;
-    let spawn_result = spawn_propose(&candidate_path, &workdir, &payload, &month);
-    let _ = std::fs::remove_file(&candidate_path);
+    let rules_diff = crate::algorithm::diff_rules(&active_rules, &rules);
+    let script_diff = candidate_script.as_ref().map(|s| {
+        crate::textdiff::unified_diff(&active_script, s, "active/propose.py", "candidate/propose.py", 3)
+    });
 
-    match spawn_result {
-        Err(e) => Ok(DraftValidation {
-            ok: false,
-            error: Some(e),
-            shift_count: 0,
-            changed_assignments: 0,
-            added_slots: 0,
-            removed_slots: 0,
-            month,
-        }),
-        Ok((out, _stderr)) => {
-            let candidate: Vec<(String, String, i32, Option<i32>)> = out
-                .shifts
-                .iter()
-                .filter(|s| !s.is_dropped)
-                .map(|s| {
-                    (
-                        s.shift_date.clone(),
-                        s.start_time.clone(),
-                        s.sling_position_id,
-                        s.sling_user_id,
-                    )
-                })
-                .collect();
-            let (changed, added, removed) = diff_schedules(&baseline, &candidate);
-            Ok(DraftValidation {
-                ok: true,
-                error: None,
-                shift_count: candidate.len() as i64,
-                changed_assignments: changed,
-                added_slots: added,
-                removed_slots: removed,
-                month,
-            })
+    let month_label = month.clone().unwrap_or_default();
+    let validation = match (rules_check, payload) {
+        (Err(e), _) => CandidateValidation::error(&month_label, format!("The rules don't validate: {e}")),
+        (Ok(()), None) => CandidateValidation::error(
+            &month_label,
+            "No proposals yet — generate one first so there is a month to reproduce.".to_string(),
+        ),
+        (Ok(()), Some(Err(e))) => CandidateValidation::error(&month_label, e),
+        (Ok(()), Some(Ok(payload))) => {
+            let workdir = script_workdir(&app).map_err(err)?;
+            // Unique temp name: two previews may run at once.
+            let temp = candidate_script.as_ref().map(|_| {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default();
+                dir.join(format!("candidate_{}_{nanos}.py", std::process::id()))
+            });
+            if let (Some(path), Some(content)) = (&temp, &candidate_script) {
+                std::fs::write(path, content).map_err(err)?;
+            }
+            let v = validate_candidate(
+                &month_label,
+                &payload,
+                &workdir,
+                &active_script_path,
+                &active_rules,
+                temp.as_deref().unwrap_or(&active_script_path),
+                &rules,
+                &names,
+            );
+            if let Some(path) = &temp {
+                let _ = std::fs::remove_file(path);
+            }
+            v
         }
-    }
+    };
+
+    Ok(CandidatePreview {
+        active_version: active.map(|v| v.version).unwrap_or(crate::algorithm::BASELINE_VERSION),
+        rules_diff,
+        script_diff,
+        validation,
+    })
 }
 
 // ============================================================
 // Sling token (in-memory cache; Stronghold is the persistence layer)
 // ============================================================
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_sling_token(
     token: State<'_, SlingToken>,
     secrets: State<'_, crate::secrets::Secrets>,
@@ -1991,7 +2338,7 @@ pub fn has_sling_token(token: State<'_, SlingToken>) -> Result<bool, String> {
 // login webview's init script via sling_login.rs.
 // ============================================================
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_sling_credentials(
     secrets: State<'_, crate::secrets::Secrets>,
     email: String,
@@ -2203,7 +2550,7 @@ fn sync_roster(
     Ok(RosterSyncSummary { teachers_active, teachers_deactivated, positions_active, positions_deactivated, qualifications })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pull_month_from_sling(
     db: State<'_, Db>,
     token: State<'_, SlingToken>,
@@ -2447,7 +2794,7 @@ fn build_specs_for_proposal(
     Ok((specs, studio_cfg, target_month))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push_proposal_dry_run(
     db: State<'_, Db>,
     token: State<'_, SlingToken>,
@@ -2494,7 +2841,7 @@ const PUSH_BATCH_SIZE: usize = 10;
 const PUSH_INTRA_DELAY_SECS: u64 = 1;
 const PUSH_INTER_DELAY_SECS: u64 = 10;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push_proposal_execute(
     app: tauri::AppHandle,
     db: State<'_, Db>,
@@ -2710,7 +3057,7 @@ pub async fn open_sling_login_window(app: tauri::AppHandle) -> Result<(), String
     crate::sling_login::open_login_window(app).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discover_studio_config(
     token: State<'_, SlingToken>,
     org_hint: State<'_, SlingOrgHint>,
@@ -2727,7 +3074,7 @@ pub fn discover_studio_config(
 // Standalone roster refresh — sync roster without pulling a month
 // ============================================================
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn refresh_roster_from_sling(
     db: State<'_, Db>,
     token: State<'_, SlingToken>,
@@ -2764,12 +3111,18 @@ pub fn list_algorithm_versions(
     app: tauri::AppHandle,
     db: State<'_, Db>,
 ) -> Result<Vec<crate::algorithm::AlgorithmVersion>, String> {
+    let shipped = find_project_root(&app)
+        .ok()
+        .and_then(|root| crate::algorithm::shipped_script_sha(&root));
     let conn = db.0.lock().map_err(err)?;
     let dir = crate::algorithm::algorithms_dir(&app)?;
-    crate::algorithm::list_versions(&conn, &dir)
+    crate::algorithm::list_versions(&conn, &dir, shipped.as_deref())
 }
 
-#[tauri::command]
+/// Adopt a version and make it active. Rules are re-validated against the
+/// DB (teacher ids, class names); a rules-only adoption keeps the active
+/// version's script (algorithm::adopt_version).
+#[tauri::command(async)]
 pub fn adopt_algorithm_version(
     app: tauri::AppHandle,
     db: State<'_, Db>,
@@ -2778,18 +3131,40 @@ pub fn adopt_algorithm_version(
     script_content: Option<String>,
     claude_run_id: Option<i64>,
 ) -> Result<i32, String> {
+    let shipped = find_project_root(&app)
+        .ok()
+        .and_then(|root| crate::algorithm::shipped_script_sha(&root));
     let conn = db.0.lock().map_err(err)?;
+    let ctx = crate::algorithm::load_rule_context(&conn)?;
+    crate::algorithm::validate_rules_in_context(&rules, &ctx)?;
     let dir = crate::algorithm::algorithms_dir(&app)?;
     let v = crate::algorithm::adopt_version(
         &conn,
         &dir,
         &description,
         &rules,
-        script_content.as_deref(),
+        script_content.map(|s| s.replace("\r\n", "\n")).as_deref(),
         claude_run_id,
+        shipped.as_deref(),
     )?;
     let _ = conn.execute("CHECKPOINT", []);
     Ok(v)
+}
+
+/// Roll back / forward: make an existing version (or 9 = the shipped
+/// baseline) the one generate_proposal runs. No algorithm_versions row is
+/// touched — the pointer lives in app_settings.
+#[tauri::command]
+pub fn set_active_algorithm_version(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    version: i32,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(err)?;
+    let dir = crate::algorithm::algorithms_dir(&app)?;
+    crate::algorithm::set_active_version(&conn, &dir, version)?;
+    let _ = conn.execute("CHECKPOINT", []);
+    Ok(())
 }
 
 /// Delete a non-active version's script file (from algorithms/ and
@@ -2802,10 +3177,8 @@ pub fn delete_algorithm_script(
     version: i32,
 ) -> Result<(), String> {
     let conn = db.0.lock().map_err(err)?;
-    let active = crate::algorithm::active_version(&conn)?
-        .map(|v| v.version)
-        .unwrap_or(crate::algorithm::BASELINE_VERSION);
-    if version == active {
+    let active = crate::algorithm::active_version(&conn)?;
+    if active.as_ref().map(|v| v.version) == Some(version) {
         return Err("cannot delete the active version's script".to_string());
     }
     let file: Option<String> = conn
@@ -2818,6 +3191,13 @@ pub fn delete_algorithm_script(
     let Some(file) = file else {
         return Err("that version runs the baseline script — nothing to delete".to_string());
     };
+    // Rules-only versions reuse their predecessor's script file.
+    if let Some(a) = active.as_ref().filter(|a| a.script_file.as_deref() == Some(file.as_str())) {
+        return Err(format!(
+            "{file} is also the active version v{}'s script — make another version active first",
+            a.version
+        ));
+    }
     let dir = crate::algorithm::algorithms_dir(&app)?;
     let mut removed = false;
     for candidate in [dir.join(&file), dir.join("archive").join(&file)] {
@@ -2914,11 +3294,16 @@ mod tests {
     #[test]
     fn claude_model_setting_roundtrip_and_fallback() {
         let conn = conn_with_schema();
-        assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unset -> default
+        assert_eq!(claude_model(&conn), "claude-opus-5-5"); // unset -> default
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-haiku-4-5')", []).unwrap();
         assert_eq!(claude_model(&conn), "claude-haiku-4-5");
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-sonnet-5-5')", []).unwrap();
+        assert_eq!(claude_model(&conn), "claude-sonnet-5-5");
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-9000')", []).unwrap();
-        assert_eq!(claude_model(&conn), "claude-opus-4-8"); // unknown -> default
+        assert_eq!(claude_model(&conn), "claude-opus-5-5"); // unknown -> default
+        // A setting saved by an older build (retired id) falls back too.
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('claude_model', 'claude-opus-4-8')", []).unwrap();
+        assert_eq!(claude_model(&conn), "claude-opus-5-5");
     }
 
     #[test]
@@ -3014,24 +3399,147 @@ mod tests {
         assert!(edits[6].validation_note.as_deref().unwrap().contains("not in this proposal"));
     }
 
+    fn rs(d: &str, t: &str, p: i32, class: &str, u: Option<i32>) -> RunShift {
+        RunShift {
+            date: d.to_string(),
+            start: t.to_string(),
+            position_id: p,
+            class_name: class.to_string(),
+            user_id: u,
+            coteach_label: String::new(),
+            dropped: u.is_none(),
+        }
+    }
+
+    fn names() -> std::collections::HashMap<i32, String> {
+        [(501, "Alex".to_string()), (502, "Kay".to_string()), (503, "Cee".to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    fn no_moves() -> std::collections::HashMap<&'static str, std::collections::HashSet<String>> {
+        Default::default()
+    }
+
     #[test]
-    fn draft_validation_diff_counts() {
-        let s = |d: &str, t: &str, p: i32, u: Option<i32>| (d.to_string(), t.to_string(), p, u);
+    fn compare_runs_counts_and_labels() {
         let base = vec![
-            s("2026-08-03", "09:00", 101, Some(501)),
-            s("2026-08-03", "17:30", 102, Some(502)),
-            s("2026-08-04", "09:00", 101, None),
+            rs("2026-08-03", "09:00", 101, "Classic", Some(501)),
+            rs("2026-08-03", "17:30", 102, "Empower", Some(502)),
+            rs("2026-08-04", "09:00", 101, "Classic", Some(503)),
+            rs("2026-08-05", "09:00", 101, "Classic", Some(503)),
         ];
-        assert_eq!(diff_schedules(&base, &base), (0, 0, 0));
+        let same = compare_runs("2026-08", &base, &base, &names(), &no_moves());
+        assert_eq!((same.status.as_str(), same.changed_count, same.changes.len()), ("pass", 0, 0));
 
-        let mut reassigned = base.clone();
-        reassigned[0].3 = Some(502);
-        assert_eq!(diff_schedules(&base, &reassigned), (1, 0, 0));
+        // One teacher swap (25% — at the threshold, still passes).
+        let mut swapped = base.clone();
+        swapped[0].user_id = Some(502);
+        let v = compare_runs("2026-08", &base, &swapped, &names(), &no_moves());
+        assert_eq!((v.status.as_str(), v.changed_count), ("pass", 1));
+        let c = &v.changes[0];
+        assert_eq!(
+            (c.kind.as_str(), c.weekday.as_str(), c.teacher_before.as_deref(), c.teacher_after.as_deref()),
+            ("changed", "Mon", Some("Alex"), Some("Kay"))
+        );
 
-        let mut shifted = base.clone();
-        shifted.remove(2);
-        shifted.push(s("2026-08-05", "09:00", 101, Some(501)));
-        assert_eq!(diff_schedules(&base, &shifted), (0, 1, 1));
+        // Two changes = 50%: needs an explicit confirm. A format flex (new
+        // position at the same time) and a newly dropped slot both count as
+        // changed assignments, not added/removed slots.
+        let mut two = base.clone();
+        two[1] = rs("2026-08-03", "17:30", 101, "Classic", Some(502));
+        two[2].user_id = None;
+        two[2].dropped = true;
+        let v = compare_runs("2026-08", &base, &two, &names(), &no_moves());
+        assert_eq!((v.status.as_str(), v.changed_count, v.added_count), ("needs_confirm", 2, 0));
+        assert!(v.changes.iter().any(|c| c.class_before.as_deref() == Some("Empower")
+            && c.class_after.as_deref() == Some("Classic")));
+        assert!(v.changes.iter().any(|c| c.teacher_after.as_deref() == Some("Dropped")));
+
+        // A slot that vanishes and one that appears: fail (unexpected).
+        let mut moved = base.clone();
+        moved.remove(3);
+        moved.push(rs("2026-08-05", "10:00", 101, "Classic", Some(503)));
+        let v = compare_runs("2026-08", &base, &moved, &names(), &no_moves());
+        assert_eq!((v.status.as_str(), v.added_count, v.removed_count, v.unexpected_count), ("fail", 1, 1, 2));
+    }
+
+    #[test]
+    fn compare_runs_keeps_coteach_rows_distinct() {
+        let mut co = rs("2026-08-08", "10:00", 105, "Focus", Some(501));
+        co.coteach_label = "Alex + Kay".into();
+        let solo = rs("2026-08-08", "10:00", 101, "Classic", Some(503));
+        let base = vec![co.clone(), solo.clone()];
+        // Same two rows in a different order: no change.
+        let v = compare_runs("2026-08", &base, &[solo.clone(), co.clone()], &names(), &no_moves());
+        assert_eq!(v.changed_count, 0);
+        // A different co-teacher (same primary uid) is a change, labelled by pair.
+        let mut co2 = co.clone();
+        co2.coteach_label = "Alex + Cee".into();
+        let v = compare_runs("2026-08", &base, &[co2, solo], &names(), &no_moves());
+        assert_eq!(v.changed_count, 1);
+        assert_eq!(v.changes[0].teacher_before.as_deref(), Some("Alex + Kay"));
+        assert_eq!(v.changes[0].teacher_after.as_deref(), Some("Alex + Cee"));
+    }
+
+    #[test]
+    fn time_shift_changes_make_slot_moves_expected() {
+        let active = json!({});
+        let cand = json!({"sat_time_shifts": {"08:00": "08:30"}});
+        let moves = expected_moves(&active, &cand);
+        // 2026-08-08 is a Saturday.
+        let base = vec![rs("2026-08-08", "08:00", 101, "Classic", Some(501))];
+        let after = vec![rs("2026-08-08", "08:30", 101, "Classic", Some(501))];
+        let v = compare_runs("2026-08", &base, &after, &names(), &moves);
+        assert_eq!((v.status.as_str(), v.unexpected_count, v.added_count), ("pass", 0, 1));
+        assert!(v.changes.iter().all(|c| c.expected));
+        // The same move on a Sunday is not explained by a Saturday rule.
+        let base = vec![rs("2026-08-09", "08:00", 101, "Classic", Some(501))];
+        let after = vec![rs("2026-08-09", "08:30", 101, "Classic", Some(501))];
+        assert_eq!(compare_runs("2026-08", &base, &after, &names(), &moves).status, "fail");
+    }
+
+    /// End-to-end "reproduce last month" on the fixture payload with the real
+    /// scripts/propose.py (skipped when python3 isn't available).
+    #[test]
+    fn validate_candidate_runs_both_scripts() {
+        let python_ok = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !python_ok {
+            eprintln!("python not available — skipping");
+            return;
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let script = root.join("scripts/propose.py");
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("scripts/tests/fixture_payload.json")).unwrap(),
+        )
+        .unwrap();
+        let month = payload["target_month"].as_str().unwrap().to_string();
+
+        let v = validate_candidate(&month, &payload, &root, &script, &json!({}), &script, &json!({}), &names());
+        assert_eq!(v.status, "pass", "{:?}", v.error);
+        assert!(v.slot_count > 0);
+        assert_eq!(v.changed_count, 0);
+
+        // Blocking the lead from Mon 09:00 moves every Mon 09:00 class.
+        let rules = json!({"teacher_slot_blocklist": [
+            {"sling_user_id": 501, "weekday": "Mon", "time": "09:00"}]});
+        let v = validate_candidate(&month, &payload, &root, &script, &json!({}), &script, &rules, &names());
+        assert!(v.changed_count > 0);
+        assert!(v.changes.iter().all(|c| c.weekday == "Mon" && c.start == "09:00"));
+        assert!(v.changes.iter().all(|c| c.teacher_before.as_deref() == Some("Alex")));
+
+        // A broken candidate script is an error, never adoptable.
+        let bad = std::env::temp_dir().join(format!("bk-bad-{}.py", std::process::id()));
+        std::fs::write(&bad, "raise SystemExit('boom')\n").unwrap();
+        let v = validate_candidate(&month, &payload, &root, &script, &json!({}), &bad, &json!({}), &names());
+        let _ = std::fs::remove_file(&bad);
+        assert_eq!(v.status, "error");
+        assert!(v.error.unwrap().contains("candidate failed"));
     }
 
     /// The payload builder still fails loudly with no trailing history

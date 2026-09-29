@@ -7,12 +7,21 @@
 //! the user can tune wording without recompiling; the compile-time embed of
 //! the same file is the fallback (e.g. installed builds without the repo).
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::review::{call_anthropic, compute_cost, extract_json};
+use crate::review::{call_anthropic, compute_cost, extract_json, CallOptions, SystemBlock};
 
-const EDITOR_MAX_TOKENS: u32 = 8192;
+/// Adaptive thinking counts against max_tokens; 16k leaves room for it and
+/// the JSON answer while staying a reasonable non-streaming request.
+const EDITOR_MAX_TOKENS: u32 = 16_000;
+const EDITOR_TIMEOUT: Duration = Duration::from_secs(300);
+/// Code drafts return search/replace edits (not a whole script), so the same
+/// output budget fits; they think harder (effort high), so allow longer.
+const CODE_DRAFT_MAX_TOKENS: u32 = 16_000;
+const CODE_DRAFT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Compile-time copy of prompts/proposal-editor.md (the runtime file wins
 /// when present and non-empty).
@@ -95,7 +104,15 @@ pub fn run_editor(
         serde_json::to_string_pretty(user_payload)?
     );
 
-    let call = call_anthropic(api_key, model, system, &user_text, EDITOR_MAX_TOKENS)?;
+    // The editor prompt (with its rule-key reference) is well above the
+    // 512-token caching minimum on the 5.5 models — cache it.
+    let call = call_anthropic(
+        api_key,
+        model,
+        &[SystemBlock { text: system, cache: true }],
+        &user_text,
+        &CallOptions { max_tokens: EDITOR_MAX_TOKENS, timeout: EDITOR_TIMEOUT, effort: "medium" },
+    )?;
 
     let payload: EditorPayload =
         serde_json::from_str(extract_json(&call.raw_output)).map_err(|e| {
@@ -120,33 +137,52 @@ pub fn run_editor(
 }
 
 // ============================================================
-// Code drafts (tier 3) — second call that carries the script source.
+// Code drafts (tier 3) — a separate call whose system prompt carries the
+// active script. Claude returns search/replace edits; they are applied
+// locally so an unchanged 700-line script never round-trips as output.
 // ============================================================
 
-/// Appended to the editor system prompt for the code-drafting call.
-pub const CODE_DRAFT_PROMPT: &str = r#"You are drafting a new version of the studio's schedule-generation script.
-
-The user payload contains: the current script source (current_script), the
-active rules, the original instruction, and the rationale for why rules
-cannot express it.
+/// System prompt (instructions block) for the code-drafting call. The
+/// active script follows it as a second, cached system block.
+pub const CODE_DRAFT_PROMPT: &str = r#"You are drafting a change to the studio's schedule-generation script (Python). The script is in the next system block; the user message contains the active rules, the original instruction, and the rationale for why the rule keys cannot express it.
 
 Respond with ONLY valid JSON, no markdown fences:
 {"description": "v-next — <one line, what changed>",
- "script": "<the COMPLETE new python script>"}
+ "edits": [
+   {"search": "<exact text copied from the script>",
+    "replace": "<the text to put in its place>"}
+ ]}
 
-The script MUST:
+Edit rules:
+- Each "search" must be copied EXACTLY from the script (whitespace and
+  indentation included) and must occur exactly ONCE in it. Include enough
+  surrounding lines to make it unique, but keep it short.
+- Edits are applied in order; a later edit sees the result of earlier ones.
+- To insert code, search for the neighbouring lines and repeat them in
+  "replace" with the new lines added.
+- Never search for text that spans a region an earlier edit changed.
+
+The changed script MUST:
 - keep the same CLI: --json-out --from-stdin --target-month YYYY-MM
 - keep reading the same stdin payload schema, including the "rules" and
   "version_label" keys
 - keep emitting the same output JSON schema (algorithm_version echoes
   version_label, target_month, parameters, shifts[])
-- change only what the instruction requires; preserve all other behavior.
+- produce exactly the current output when the instruction's situation does
+  not arise — change only what the instruction requires.
 "#;
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct EditBlock {
+    pub search: String,
+    pub replace: String,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodeDraftPayload {
     pub description: String,
-    pub script: String,
+    #[serde(default)]
+    pub edits: Vec<EditBlock>,
 }
 
 pub struct CodeDraftCall {
@@ -160,24 +196,75 @@ pub struct CodeDraftCall {
     pub duration_ms: u32,
 }
 
+/// Apply search/replace edit blocks in order. Every search string must
+/// match exactly once in the script as it stands after the earlier edits.
+pub fn apply_edit_blocks(script: &str, edits: &[EditBlock]) -> Result<String, String> {
+    if edits.is_empty() {
+        return Err("Claude returned no edits — nothing to change".to_string());
+    }
+    let mut out = script.to_string();
+    for (i, e) in edits.iter().enumerate() {
+        let n = i + 1;
+        if e.search.is_empty() {
+            return Err(format!("edit {n}: empty search text"));
+        }
+        let hits = out.matches(e.search.as_str()).count();
+        let preview: String = e.search.lines().take(3).collect::<Vec<_>>().join("\n");
+        match hits {
+            1 => out = out.replacen(e.search.as_str(), &e.replace, 1),
+            0 => {
+                return Err(format!(
+                    "edit {n}: search text not found in the active script{} — starts:\n{preview}",
+                    if i > 0 { " (after the earlier edits)" } else { "" }
+                ))
+            }
+            k => {
+                return Err(format!(
+                    "edit {n}: search text matches {k} places — it must match exactly once. Starts:\n{preview}"
+                ))
+            }
+        }
+    }
+    if out == script {
+        return Err("the edits leave the script unchanged".to_string());
+    }
+    Ok(out)
+}
+
 pub fn run_code_draft(
     api_key: &str,
     model: &str,
+    current_script: &str,
     user_payload: &Value,
 ) -> anyhow::Result<CodeDraftCall> {
     let user_text = format!(
-        "Here is the current script and context as JSON. Draft the new script per your instructions.\n\n{}",
+        "Here is the context as JSON. Draft the change to the script per your instructions.\n\n{}",
         serde_json::to_string_pretty(user_payload)?
     );
+    let script_block = format!("The active script:\n\n{current_script}");
 
-    // Code drafts need room for a full script (~700 lines).
-    let call = call_anthropic(api_key, model, CODE_DRAFT_PROMPT, &user_text, 32_000)?;
+    // The script (~10k tokens) is the stable, cacheable prefix: a retry or
+    // a second draft within 5 minutes reads it from cache.
+    let call = call_anthropic(
+        api_key,
+        model,
+        &[
+            SystemBlock { text: CODE_DRAFT_PROMPT, cache: false },
+            SystemBlock { text: &script_block, cache: true },
+        ],
+        &user_text,
+        &CallOptions {
+            max_tokens: CODE_DRAFT_MAX_TOKENS,
+            timeout: CODE_DRAFT_TIMEOUT,
+            effort: "high",
+        },
+    )?;
 
     let payload: CodeDraftPayload =
         serde_json::from_str(extract_json(&call.raw_output)).map_err(|e| {
             anyhow::anyhow!(
                 "Claude did not return valid code-draft JSON: {e}\n---\n{}",
-                &call.raw_output[..call.raw_output.len().min(2000)]
+                call.raw_output.chars().take(2000).collect::<String>()
             )
         })?;
 
@@ -238,5 +325,58 @@ mod tests {
         let p = editor_system_prompt(Some(std::path::Path::new("/nonexistent")));
         assert!(p.contains("Escalation tiers"));
         assert_eq!(p, INLINE_PROMPT);
+    }
+
+    #[test]
+    fn prompt_documents_every_rule_key() {
+        for key in [
+            "teacher_class_blocklist",
+            "teacher_slot_blocklist",
+            "priority_slots",
+            "slot_class_overrides",
+            "variety_penalty_multiplier",
+            "variety_penalty_per_class",
+            "sat_time_shifts",
+            "sun_time_shifts",
+        ] {
+            assert!(INLINE_PROMPT.contains(&format!("`{key}`")), "{key} undocumented");
+        }
+    }
+
+    fn eb(s: &str, r: &str) -> EditBlock {
+        EditBlock { search: s.into(), replace: r.into() }
+    }
+
+    #[test]
+    fn apply_edit_blocks_in_order() {
+        let script = "a = 1\nb = 2\nc = 3\n";
+        let out = apply_edit_blocks(
+            script,
+            &[eb("b = 2\n", "b = 20\nb2 = 21\n"), eb("b2 = 21", "b2 = 22")],
+        )
+        .unwrap();
+        assert_eq!(out, "a = 1\nb = 20\nb2 = 22\nc = 3\n");
+    }
+
+    #[test]
+    fn apply_edit_blocks_errors_are_specific() {
+        let script = "x = 1\nx = 1\ny = 2\n";
+        let e = apply_edit_blocks(script, &[eb("x = 1", "x = 3")]).unwrap_err();
+        assert!(e.contains("edit 1") && e.contains("2 places"), "{e}");
+        let e = apply_edit_blocks(script, &[eb("y = 2", "y = 5"), eb("y = 2", "y = 6")])
+            .unwrap_err();
+        assert!(e.contains("edit 2") && e.contains("not found") && e.contains("earlier"), "{e}");
+        assert!(apply_edit_blocks(script, &[]).is_err());
+        assert!(apply_edit_blocks(script, &[eb("", "z")]).is_err());
+        assert!(apply_edit_blocks(script, &[eb("y = 2", "y = 2")]).is_err());
+    }
+
+    #[test]
+    fn parses_code_draft_payload() {
+        let p: CodeDraftPayload = serde_json::from_str(
+            r#"{"description": "v-next — x", "edits": [{"search": "a", "replace": "b"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.edits, vec![eb("a", "b")]);
     }
 }
