@@ -7,6 +7,8 @@ import type { PushPreview, PushProgress, PushSummary } from "../types";
 
 interface Props {
   proposalId: number;
+  /** The push draft's name (only the month's push draft can be pushed). */
+  draftName: string;
   monthLabel: string;
   onClose: () => void;
   onTokenExpired: () => void;
@@ -14,7 +16,7 @@ interface Props {
 
 type Phase = "loading" | "preview" | "pushing" | "done" | "error";
 
-export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: Props) {
+export function PushModal({ proposalId, draftName, monthLabel, onClose, onTokenExpired }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [preview, setPreview] = useState<PushPreview | null>(null);
   const [progress, setProgress] = useState<PushProgress | null>(null);
@@ -72,14 +74,14 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         {phase === "loading" && (
           <>
-            <h3>Push to Sling</h3>
+            <h3>Push “{draftName}” to Sling</h3>
             <p className="muted">Checking what's already in Sling…</p>
           </>
         )}
 
         {phase === "preview" && preview && (
           <>
-            <h3>Push to Sling</h3>
+            <h3>Push “{preview.draft_name}” to Sling</h3>
             <p className="muted" style={{ marginTop: 0 }}>
               This creates{" "}
               <strong style={{ color: "var(--text-body)" }}>
@@ -90,6 +92,15 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
                 <> <span className="muted">{preview.skipped_count} already in Sling (skipped).</span></>
               )}
             </p>
+            {preview.other_pushed_drafts.length > 0 && (
+              <div className="bk-warn" style={{ marginTop: 0, marginBottom: 12 }}>
+                {preview.other_pushed_drafts.map((n) => `“${n}”`).join(", ")}{" "}
+                {preview.other_pushed_drafts.length === 1 ? "was" : "were"} pushed for this month
+                before. Pushing “{preview.draft_name}” adds its differing shifts but does NOT
+                remove the earlier draft's shifts from Sling — delete those in Sling if they
+                should go.
+              </div>
+            )}
             {preview.to_create.length === 0 ? (
               <p className="ok">Everything is already in Sling — nothing to push.</p>
             ) : (
@@ -160,7 +171,7 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
 
         {phase === "error" && (
           <>
-            <h3>Push to Sling</h3>
+            <h3>Push “{draftName}” to Sling</h3>
             <div className="error">{error}</div>
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
               <button className="btn-ghost" onClick={onClose}>Close</button>

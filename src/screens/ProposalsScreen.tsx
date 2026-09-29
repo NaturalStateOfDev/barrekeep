@@ -17,9 +17,11 @@ import { AlgorithmCard } from "../components/claude/AlgorithmCard";
 import { VersionProposalCard } from "../components/claude/VersionProposalCard";
 import { SlingTokenModal } from "../components/SlingTokenModal";
 import { PushModal } from "../components/PushModal";
+import { DraftNameModal } from "../components/DraftNameModal";
+import { CompareView } from "../components/CompareView";
 import { MonthSelector } from "../components/MonthSelector";
 import { ProposalSwitcher, type MonthEntry } from "../components/ui/ProposalSwitcher";
-import { VersionSwitcher } from "../components/ui/VersionSwitcher";
+import { DraftSwitcher } from "../components/ui/DraftSwitcher";
 import { PageHead } from "../components/ui/PageHead";
 import { Kpi, CoverageRing } from "../components/ui/Kpi";
 import { Tabs } from "../components/ui/Tabs";
@@ -30,6 +32,7 @@ import { ClassChip } from "../components/ui/ClassChip";
 import { computeIssues, type Issue } from "../lib/issues";
 import { computeKpis } from "../lib/kpis";
 import { codifyInstruction } from "../lib/rules";
+import { draftsForMonth, pushDraftFor, representativeDraft } from "../lib/drafts";
 import {
   monthWindow,
   isReadOnlyMonth,
@@ -55,7 +58,7 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-const TABS = ["calendar", "list", "edits", "claude"] as const;
+const TABS = ["calendar", "list", "edits", "compare", "claude"] as const;
 type Tab = (typeof TABS)[number];
 
 export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) {
@@ -73,6 +76,10 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   const [pullResult, setPullResult] = useState<string | null>(null);
   const [slingExpiredModal, setSlingExpiredModal] = useState(false);
   const [pushOpen, setPushOpen] = useState(false);
+  // Viewing a draft that isn't the month's push draft and clicked Push.
+  const [pushGateOpen, setPushGateOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [nameModal, setNameModal] = useState<null | "generate" | "duplicate" | "rename">(null);
 
   const [newMonth, setNewMonth] = useState<string>(() => {
     const [y, m] = today.split("-").map(Number);
@@ -103,7 +110,8 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     api.hasSlingToken().then(setHasToken).catch(() => setHasToken(null));
     refreshProposals()
       .then((list) => {
-        const next = list[0]?.id ?? null;
+        // Newest month's push draft (the list is newest-created first).
+        const next = list[0] ? representativeDraft(list, list[0].target_month)?.id ?? null : null;
         setSelectedId(next);
         if (next == null) setMode("new");
       })
@@ -156,33 +164,41 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
 
   const kpis = useMemo(() => computeKpis(detail?.shifts ?? []), [detail]);
 
-  // One switcher entry per month (its current proposal), newest month first.
-  // The list arrives ordered generated_at DESC, so the first proposal seen
-  // per month is the newest; prefer the is_current one as representative.
+  // One switcher entry per month, newest month first. Picking a month opens
+  // its push draft (the draft Push sends), else its newest draft.
   const monthEntries = useMemo<MonthEntry[]>(() => {
-    const byMonth = new Map<string, { rep: ProposalSummary; count: number }>();
-    for (const p of proposals ?? []) {
-      const e = byMonth.get(p.target_month);
-      if (!e) byMonth.set(p.target_month, { rep: p, count: 1 });
-      else {
-        e.count += 1;
-        if (p.is_current && !e.rep.is_current) e.rep = p;
-      }
-    }
-    return [...byMonth.entries()]
-      .sort((a, b) => b[0].localeCompare(a[0]))
-      .map(([month, e]) => ({ month, proposalId: e.rep.id, draftCount: e.count }));
+    const months = [...new Set((proposals ?? []).map((p) => p.target_month))].sort((a, b) =>
+      b.localeCompare(a),
+    );
+    return months.map((month) => {
+      const all = (proposals ?? []).filter((p) => p.target_month === month);
+      return {
+        month,
+        proposalId: representativeDraft(all, month)!.id,
+        draftCount: all.filter((p) => !p.archived).length,
+      };
+    });
   }, [proposals]);
 
   const selectedSummary =
     selectedId != null ? proposals?.find((p) => p.id === selectedId) : undefined;
-  const monthVersions = useMemo(
+  const selectedMonth = selectedSummary?.target_month ?? null;
+  // Drafts listed in the switcher (archived only when shown, or when viewed).
+  const monthDrafts = useMemo(
     () =>
-      selectedSummary
-        ? (proposals ?? []).filter((p) => p.target_month === selectedSummary.target_month)
-        : [],
-    [proposals, selectedSummary],
+      selectedMonth ? draftsForMonth(proposals ?? [], selectedMonth, showArchived, selectedId) : [],
+    [proposals, selectedMonth, showArchived, selectedId],
   );
+  // Drafts a Claude prompt / Compare can target: never archived ones (but
+  // always the one on screen).
+  const activeMonthDrafts = useMemo(
+    () => (selectedMonth ? draftsForMonth(proposals ?? [], selectedMonth, false, selectedId) : []),
+    [proposals, selectedMonth, selectedId],
+  );
+  const archivedCount = selectedMonth
+    ? (proposals ?? []).filter((p) => p.target_month === selectedMonth && p.archived).length
+    : 0;
+  const pushDraft = selectedMonth ? pushDraftFor(proposals ?? [], selectedMonth) : undefined;
 
   const activeMonth = mode === "detail" && detail ? detail.summary.target_month : newMonth;
   const readonly = isReadOnlyMonth(activeMonth, today);
@@ -213,26 +229,91 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     }
   };
 
-  const onGenerate = async () => {
+  const onGenerate = async (name?: string) => {
     if (isReadOnlyMonth(activeMonth, today)) return;
     setError(null);
     setLastResult(null);
     setGenerating(true);
     try {
-      const result = await api.generateProposal(activeMonth);
+      const result = await api.generateProposal(activeMonth, name || undefined);
+      const list = await refreshProposals();
+      const made = list.find((p) => p.id === result.proposal_id);
+      const push = pushDraftFor(list, result.target_month);
       setLastResult(
-        `Generated proposal #${result.proposal_id} for ${result.target_month} ` +
+        `Generated “${made?.name ?? `Draft #${result.proposal_id}`}” for ${result.target_month} ` +
           `(${result.algorithm_version}, ${result.shift_count} shifts, ` +
-          `${result.dropped_count} dropped)`,
+          `${result.dropped_count} dropped)` +
+          (push && push.id !== result.proposal_id
+            ? `. The push draft is still “${push.name}” — use “Use for push” in the draft menu to change it.`
+            : ""),
       );
       setSelectedId(result.proposal_id);
       setMode("detail");
-      await refreshProposals();
     } catch (e) {
       setError(String(e));
     } finally {
       setGenerating(false);
     }
+  };
+
+  // ---- Draft actions (duplicate / rename / archive / use for push) ----
+  const runDraftAction = async (fn: () => Promise<void>) => {
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const onDuplicate = async (name: string) => {
+    if (!selectedSummary) return;
+    const id = await api.duplicateProposal(selectedSummary.id, name);
+    await refreshProposals();
+    setSelectedId(id);
+    setNameModal(null);
+    setLastResult(`Duplicated “${selectedSummary.name}” as “${name}”. Changes to the copy leave the original alone.`);
+  };
+
+  const onRename = async (name: string) => {
+    if (!selectedSummary) return;
+    await api.renameProposal(selectedSummary.id, name);
+    await onProposalChanged();
+    setNameModal(null);
+  };
+
+  const onArchiveToggle = () =>
+    runDraftAction(async () => {
+      if (!selectedSummary) return;
+      if (selectedSummary.archived) {
+        await api.unarchiveProposal(selectedSummary.id);
+        await onProposalChanged();
+      } else {
+        await api.archiveProposal(selectedSummary.id);
+        const list = await refreshProposals();
+        // Move off the archived draft unless archived drafts are shown.
+        if (!showArchived) {
+          const next = representativeDraft(
+            list.filter((p) => !p.archived),
+            selectedSummary.target_month,
+          );
+          if (next) setSelectedId(next.id);
+        }
+      }
+    });
+
+  const onUseForPush = (id: number) =>
+    runDraftAction(async () => {
+      const d = proposals?.find((p) => p.id === id);
+      if (!d) return;
+      await api.setPushCandidate(d.target_month, id);
+      await onProposalChanged();
+      setLastResult(`“${d.name}” is now the push draft for ${monthLabel(d.target_month)}.`);
+    });
+
+  const onPushClick = () => {
+    if (detail?.summary.is_push_candidate) setPushOpen(true);
+    else setPushGateOpen(true);
   };
 
   const onProposalChanged = async () => {
@@ -306,11 +387,20 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                 setLastResult(null);
               }}
             />
-            {mode === "detail" && selectedId != null && monthVersions.length > 0 && (
-              <VersionSwitcher
-                versions={monthVersions}
+            {mode === "detail" && selectedId != null && monthDrafts.length > 0 && (
+              <DraftSwitcher
+                drafts={monthDrafts}
+                archivedCount={archivedCount}
+                showArchived={showArchived}
+                onToggleArchived={() => setShowArchived((v) => !v)}
                 value={selectedId}
                 onChange={(id) => setSelectedId(id)}
+                readonly={readonly}
+                onDuplicate={() => setNameModal("duplicate")}
+                onRename={() => setNameModal("rename")}
+                onArchiveToggle={onArchiveToggle}
+                onUseForPush={() => onUseForPush(selectedId)}
+                onCompare={() => setTab("compare")}
               />
             )}
           </div>
@@ -322,16 +412,27 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
               <button className="btn-ghost" onClick={onPull} disabled={pulling || readonly} title={readonlyTitle}>
                 <Download size={15} /> {pulling ? "Pulling…" : "Pull"}
               </button>
-              <button className="btn-ghost" onClick={onGenerate} disabled={generating || readonly} title={readonlyTitle}>
-                <Sparkles size={15} /> {generating ? "Generating…" : "Generate"}
+              <button
+                className="btn-ghost"
+                onClick={() => setNameModal("generate")}
+                disabled={generating || readonly}
+                title={readonly ? readonlyTitle : "Generate another draft for this month"}
+              >
+                <Sparkles size={15} /> {generating ? "Generating…" : "New draft"}
               </button>
               <button
                 className="btn-primary"
-                onClick={() => setPushOpen(true)}
+                onClick={onPushClick}
                 disabled={readonly}
-                title={readonly ? readonlyTitle : "Push these shifts to Sling as planning shifts"}
+                title={
+                  readonly
+                    ? readonlyTitle
+                    : detail.summary.is_push_candidate
+                      ? `Push “${detail.summary.name}” to Sling as planning shifts`
+                      : `Push sends the push draft${pushDraft ? ` (“${pushDraft.name}”)` : ""}, not this one`
+                }
               >
-                <Upload size={15} /> Push to Sling
+                <Upload size={15} /> {detail.summary.is_push_candidate ? "Push to Sling" : "Push…"}
               </button>
             </>
           ) : undefined
@@ -375,7 +476,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                   title={`No proposal for ${monthLabel(newMonth)} yet`}
                   message="Pull the latest availability, then generate a first draft from your Sling roster and qualifications. Review and adjust it here before pushing."
                   actionLabel={`Generate proposal for ${newMonth}`}
-                  onAction={onGenerate}
+                  onAction={() => onGenerate()}
                 />
               )}
             </>
@@ -417,7 +518,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
               blocks={blocks}
               issues={issues}
               onProposalChanged={onProposalChanged}
-              onRegenerate={onGenerate}
+              onRegenerate={() => onGenerate()}
               onImportExternal={async (slingShiftId) => {
                 await api.importExternalShift(slingShiftId, detail.summary.id);
                 await onProposalChanged();
@@ -428,6 +529,16 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
           )}
           {tab === "list" && <ProposalShiftsTable detail={detail} />}
           {tab === "edits" && <EditHistory proposalId={detail.summary.id} />}
+          {tab === "compare" && (
+            <CompareView
+              drafts={activeMonthDrafts}
+              viewingId={detail.summary.id}
+              onOpenDraft={(id) => {
+                setSelectedId(id);
+                setTab("calendar");
+              }}
+            />
+          )}
           {tab === "claude" && (
             <>
               <ClaudeEditorPanel
@@ -436,7 +547,15 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                 teachers={teachers}
                 hasKey={hasAnthropicKey}
                 readonly={readonly}
+                monthDrafts={activeMonthDrafts}
                 onProposalChanged={onProposalChanged}
+                onDraftsChanged={() => {
+                  refreshProposals().catch((e) => setError(String(e)));
+                }}
+                onOpenDraft={(id) => {
+                  setSelectedId(id);
+                  setTab("calendar");
+                }}
                 onVersionAdopted={() => setAlgoRefresh((n) => n + 1)}
               />
               <ClaudeReviewSection
@@ -457,9 +576,96 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
           onCancel={() => setSlingExpiredModal(false)}
         />
       )}
+      {nameModal === "generate" && (
+        <DraftNameModal
+          title={`New draft for ${monthLabel(activeMonth)}`}
+          initial=""
+          optional
+          placeholder={`Draft ${(proposals ?? []).filter((p) => p.target_month === activeMonth).length + 1}`}
+          confirmLabel="Generate"
+          hint={
+            pushDraft ? (
+              <>
+                Runs the active algorithm again as a separate draft. The push draft stays “
+                {pushDraft.name}” until you choose “Use for push” on another draft.
+              </>
+            ) : undefined
+          }
+          onConfirm={async (name) => {
+            setNameModal(null);
+            await onGenerate(name);
+          }}
+          onCancel={() => setNameModal(null)}
+        />
+      )}
+      {nameModal === "duplicate" && selectedSummary && (
+        <DraftNameModal
+          title={`Duplicate “${selectedSummary.name}”`}
+          initial={`Copy of ${selectedSummary.name}`.slice(0, 60)}
+          confirmLabel="Duplicate"
+          hint="Copies every class and assignment (not the edit history). Try a what-if on the copy, then compare."
+          onConfirm={onDuplicate}
+          onCancel={() => setNameModal(null)}
+        />
+      )}
+      {nameModal === "rename" && selectedSummary && (
+        <DraftNameModal
+          title="Rename draft"
+          initial={selectedSummary.name}
+          confirmLabel="Rename"
+          onConfirm={onRename}
+          onCancel={() => setNameModal(null)}
+        />
+      )}
+      {pushGateOpen && detail && (
+        <div className="modal-backdrop" onClick={() => setPushGateOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Push sends the push draft</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              You're viewing “{detail.summary.name}”.{" "}
+              {pushDraft ? (
+                <>
+                  The push draft for {monthLabel(detail.summary.target_month)} is “{pushDraft.name}”.
+                </>
+              ) : (
+                <>{monthLabel(detail.summary.target_month)} has no push draft yet.</>
+              )}{" "}
+              Only one draft per month goes to Sling — pushing a second would add its differing
+              shifts on top of the first.
+            </p>
+            <div className="row" style={{ justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
+              <button className="btn-ghost" onClick={() => setPushGateOpen(false)}>
+                Cancel
+              </button>
+              {pushDraft && (
+                <button
+                  className="btn-ghost"
+                  onClick={() => {
+                    setPushGateOpen(false);
+                    setSelectedId(pushDraft.id);
+                  }}
+                >
+                  Switch to “{pushDraft.name}”
+                </button>
+              )}
+              <button
+                className="btn-primary"
+                onClick={async () => {
+                  setPushGateOpen(false);
+                  await onUseForPush(detail.summary.id);
+                  setPushOpen(true);
+                }}
+              >
+                Use “{detail.summary.name}” for push
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {pushOpen && detail && (
         <PushModal
           proposalId={detail.summary.id}
+          draftName={detail.summary.name}
           monthLabel={monthLabel(detail.summary.target_month)}
           onClose={() => {
             setPushOpen(false);

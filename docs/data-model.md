@@ -157,9 +157,72 @@ CREATE TABLE proposals (
   parameters         JSON NOT NULL,     -- variety_penalty, ranking_weights, etc.
   generated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   notes              VARCHAR,
-  is_current         BOOLEAN NOT NULL DEFAULT FALSE  -- only one current per target_month
+  is_current         BOOLEAN NOT NULL DEFAULT FALSE  -- newest GENERATED draft per month; kept for
+                                                      -- backward compat — "which draft gets pushed"
+                                                      -- lives in month_push_candidate (migration 0012)
 );
 CREATE SEQUENCE seq_proposals;
+```
+
+A month can hold several **drafts** side by side (generated or duplicated —
+e.g. a "what if Jane always teaches Tue 8:45" variant). Each proposal row is
+one draft. Draft metadata and the push choice live in side tables (migration
+0012) so `proposals` itself is never ALTERed or UPDATEd for them.
+
+### `proposal_drafts`
+
+Draft metadata, one row per proposal (migration 0012; backfilled "Draft 1",
+"Draft 2", … per month in creation order). PK-only, no FKs in or out, so the
+`name`/`archived` UPDATEs from rename/archive are safe under the DuckDB rules.
+
+```sql
+CREATE TABLE proposal_drafts (
+  proposal_id        BIGINT PRIMARY KEY,  -- logically references proposals(id)
+  name               VARCHAR NOT NULL,
+  parent_proposal_id BIGINT,              -- set when created by "Duplicate"
+  created_from       VARCHAR NOT NULL DEFAULT 'generate',  -- 'generate' | 'duplicate'
+  archived           BOOLEAN NOT NULL DEFAULT FALSE,       -- hidden by default; never the push draft
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Duplicating a draft copies the `proposals` row (keeping `generated_at`, so
+staleness vs the last pull carries over; `is_current = FALSE`) and every
+`proposal_shifts` row with fresh ids, remapping `coteach_partner_shift_id`.
+Edit history (`edits`) and push history are NOT copied.
+
+### `month_push_candidate`
+
+The single source of truth for "which draft is THE draft" for a month: the
+one Push sends to Sling. Push refuses any other draft (Sling dedupe matches
+date+time+teacher+position, so pushing a second draft would ADD its differing
+shifts on top of the first). Written with `INSERT OR REPLACE` (same pattern
+as `app_settings`). Generate sets it only when the month has none; the user
+changes it with "Use for push". Backfilled from the pushed / `is_current` /
+newest proposal per month.
+
+```sql
+CREATE TABLE month_push_candidate (
+  target_month VARCHAR PRIMARY KEY,
+  proposal_id  BIGINT NOT NULL,  -- logically references proposals(id)
+  set_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### `claude_run_targets`
+
+Links one Claude edit prompt to every draft it was applied to (append-only).
+A prompt sent to N drafts makes N `claude_runs` rows (one API call per draft —
+shift ids differ); `claude_run_id` here is the FIRST run of that prompt, with
+one row per targeted draft. Single-draft runs link to themselves. Backfilled
+from `claude_runs.proposal_id`.
+
+```sql
+CREATE TABLE claude_run_targets (
+  claude_run_id BIGINT NOT NULL,  -- the prompt's first claude_runs.id
+  proposal_id   BIGINT NOT NULL,
+  PRIMARY KEY (claude_run_id, proposal_id)
+);
 ```
 
 ### `proposal_shifts`
@@ -289,9 +352,11 @@ CREATE SEQUENCE seq_push_results;
 ## Common queries
 
 ```sql
--- Current proposal for a target month
-SELECT * FROM proposals
-WHERE target_month = '2026-07' AND is_current = TRUE;
+-- The push draft for a target month
+SELECT p.*, d.name FROM month_push_candidate m
+JOIN proposals p ON p.id = m.proposal_id
+LEFT JOIN proposal_drafts d ON d.proposal_id = p.id
+WHERE m.target_month = '2026-07';
 
 -- Full schedule for a proposal, with teacher and class names joined
 SELECT ps.shift_date, ps.start_time, ps.end_time,

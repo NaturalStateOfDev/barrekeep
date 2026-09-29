@@ -503,7 +503,12 @@ pub fn generate_proposal(
     app: tauri::AppHandle,
     db: State<'_, Db>,
     target_month: String,
+    name: Option<String>,
 ) -> Result<GenerateResult, String> {
+    // Fail fast on a bad draft name, before spending seconds in python.
+    let name = name
+        .map(|n| crate::drafts::clean_name(&n))
+        .transpose()?;
     // Step 1: build the payload and resolve the ACTIVE algorithm version
     // (rules + script; app_settings pointer, see algorithm.rs).
     let project_root = find_project_root(&app).map_err(err)?;
@@ -528,7 +533,9 @@ pub fn generate_proposal(
     let mut conn = db.0.lock().map_err(err)?;
     let tx = conn.transaction().map_err(err)?;
 
-    // Demote any prior "current" proposal for this month.
+    // Demote any prior "current" proposal for this month. is_current now only
+    // means "newest generated"; which draft gets pushed is the month's push
+    // draft (drafts.rs), which a new generate sets only if the month has none.
     tx.execute(
         "UPDATE proposals SET is_current = FALSE WHERE target_month = ?",
         duckdb::params![&payload.target_month],
@@ -550,6 +557,7 @@ pub fn generate_proposal(
             |r| r.get(0),
         )
         .map_err(err)?;
+    crate::drafts::record_generated(&tx, proposal_id, &payload.target_month, name.as_deref())?;
 
     let mut dropped_count = 0usize;
     for s in &payload.shifts {
@@ -606,6 +614,58 @@ pub struct ProposalSummary {
     pub shift_count: i64,
     pub dropped_count: i64,
     pub edit_count: i64,
+    /// Draft metadata (proposal_drafts, migration 0012).
+    pub name: String,
+    pub archived: bool,
+    pub parent_proposal_id: Option<i64>,
+    pub created_from: String,
+    /// The month's push draft (month_push_candidate) — the only draft Push sends.
+    pub is_push_candidate: bool,
+    /// At least one push to Sling is on record for this draft.
+    pub pushed: bool,
+}
+
+/// Shared SELECT for ProposalSummary rows (list + get). Callers append
+/// WHERE / ORDER BY.
+const PROPOSAL_SUMMARY_SQL: &str = "SELECT
+        p.id,
+        p.target_month,
+        p.algorithm_version,
+        CAST(p.generated_at AS VARCHAR),
+        p.is_current,
+        (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id) AS shift_count,
+        (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id AND ps.is_dropped) AS dropped_count,
+        (SELECT count(*) FROM edits e
+            JOIN proposal_shifts ps2 ON ps2.id = e.proposal_shift_id
+            WHERE ps2.proposal_id = p.id AND NOT e.reverted) AS edit_count,
+        COALESCE(d.name, 'Draft #' || CAST(p.id AS VARCHAR)),
+        COALESCE(d.archived, FALSE),
+        d.parent_proposal_id,
+        COALESCE(d.created_from, 'generate'),
+        (m.proposal_id IS NOT NULL),
+        EXISTS (SELECT 1 FROM pushes x WHERE x.proposal_id = p.id)
+     FROM proposals p
+     LEFT JOIN proposal_drafts d ON d.proposal_id = p.id
+     LEFT JOIN month_push_candidate m
+        ON m.target_month = p.target_month AND m.proposal_id = p.id";
+
+fn summary_from_row(r: &duckdb::Row<'_>) -> duckdb::Result<ProposalSummary> {
+    Ok(ProposalSummary {
+        id: r.get(0)?,
+        target_month: r.get(1)?,
+        algorithm_version: r.get(2)?,
+        generated_at: r.get(3)?,
+        is_current: r.get(4)?,
+        shift_count: r.get(5)?,
+        dropped_count: r.get(6)?,
+        edit_count: r.get(7)?,
+        name: r.get(8)?,
+        archived: r.get(9)?,
+        parent_proposal_id: r.get(10)?,
+        created_from: r.get(11)?,
+        is_push_candidate: r.get(12)?,
+        pushed: r.get(13)?,
+    })
 }
 
 #[derive(Serialize)]
@@ -636,37 +696,11 @@ pub struct ProposalDetail {
 #[tauri::command]
 pub fn list_proposals(db: State<'_, Db>) -> Result<Vec<ProposalSummary>, String> {
     let conn = db.0.lock().map_err(err)?;
+    // Newest CREATED first (a duplicate keeps its parent's generated_at).
     let mut stmt = conn
-        .prepare(
-            "SELECT
-                p.id,
-                p.target_month,
-                p.algorithm_version,
-                CAST(p.generated_at AS VARCHAR),
-                p.is_current,
-                (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id) AS shift_count,
-                (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id AND ps.is_dropped) AS dropped_count,
-                (SELECT count(*) FROM edits e
-                    JOIN proposal_shifts ps2 ON ps2.id = e.proposal_shift_id
-                    WHERE ps2.proposal_id = p.id AND NOT e.reverted) AS edit_count
-             FROM proposals p
-             ORDER BY p.generated_at DESC",
-        )
+        .prepare(&format!("{PROPOSAL_SUMMARY_SQL} ORDER BY p.id DESC"))
         .map_err(err)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(ProposalSummary {
-                id: r.get(0)?,
-                target_month: r.get(1)?,
-                algorithm_version: r.get(2)?,
-                generated_at: r.get(3)?,
-                is_current: r.get(4)?,
-                shift_count: r.get(5)?,
-                dropped_count: r.get(6)?,
-                edit_count: r.get(7)?,
-            })
-        })
-        .map_err(err)?;
+    let rows = stmt.query_map([], summary_from_row).map_err(err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
@@ -679,32 +713,9 @@ pub fn get_proposal(
 
     let summary: ProposalSummary = conn
         .query_row(
-            "SELECT
-                p.id,
-                p.target_month,
-                p.algorithm_version,
-                CAST(p.generated_at AS VARCHAR),
-                p.is_current,
-                (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id),
-                (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id AND ps.is_dropped),
-                (SELECT count(*) FROM edits e
-                    JOIN proposal_shifts ps2 ON ps2.id = e.proposal_shift_id
-                    WHERE ps2.proposal_id = p.id AND NOT e.reverted)
-             FROM proposals p
-             WHERE p.id = ?",
+            &format!("{PROPOSAL_SUMMARY_SQL} WHERE p.id = ?"),
             duckdb::params![proposal_id],
-            |r| {
-                Ok(ProposalSummary {
-                    id: r.get(0)?,
-                    target_month: r.get(1)?,
-                    algorithm_version: r.get(2)?,
-                    generated_at: r.get(3)?,
-                    is_current: r.get(4)?,
-                    shift_count: r.get(5)?,
-                    dropped_count: r.get(6)?,
-                    edit_count: r.get(7)?,
-                })
-            },
+            summary_from_row,
         )
         .map_err(err)?;
 
@@ -1623,6 +1634,15 @@ fn validate_claude_edits(
     Ok(())
 }
 
+fn record_run_target(conn: &duckdb::Connection, run_id: i64, proposal_id: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO claude_run_targets (claude_run_id, proposal_id) VALUES (?, ?)",
+        duckdb::params![run_id, proposal_id],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
 fn persist_claude_run(
     conn: &duckdb::Connection,
     proposal_id: i64,
@@ -1661,6 +1681,7 @@ pub fn claude_edit_proposal(
     key: State<'_, AnthropicKey>,
     proposal_id: i64,
     instruction: String,
+    group_run_id: Option<i64>,
 ) -> Result<ClaudeEditResult, String> {
     if instruction.trim().is_empty() {
         return Err("instruction is empty".to_string());
@@ -1717,6 +1738,9 @@ pub fn claude_edit_proposal(
         result.cost_usd,
         result.duration_ms,
     )?;
+    // One prompt sent to several drafts = one run per draft, all linked under
+    // the prompt's first run (group_run_id); a single-draft run links to itself.
+    record_run_target(&conn, group_run_id.unwrap_or(run_id), proposal_id)?;
     let _ = conn.execute("CHECKPOINT", []);
 
     Ok(ClaudeEditResult {
@@ -1825,6 +1849,7 @@ pub fn claude_draft_code_change(
             result.cost_usd,
             result.duration_ms,
         )?;
+        record_run_target(&conn, id, proposal_id)?;
         let _ = conn.execute("CHECKPOINT", []);
         id
     };
@@ -1859,14 +1884,14 @@ pub fn claude_draft_code_change(
 
 /// One shift of a propose.py run, reduced to what the per-slot diff needs.
 #[derive(Debug, Clone)]
-struct RunShift {
-    date: String,
-    start: String,
-    position_id: i32,
-    class_name: String,
-    user_id: Option<i32>,
-    coteach_label: String,
-    dropped: bool,
+pub(crate) struct RunShift {
+    pub(crate) date: String,
+    pub(crate) start: String,
+    pub(crate) position_id: i32,
+    pub(crate) class_name: String,
+    pub(crate) user_id: Option<i32>,
+    pub(crate) coteach_label: String,
+    pub(crate) dropped: bool,
 }
 
 impl RunShift {
@@ -1960,7 +1985,7 @@ impl CandidateValidation {
     }
 }
 
-fn weekday_of(date: &str) -> String {
+pub(crate) fn weekday_of(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
         .map(|d| d.format("%a").to_string())
         .unwrap_or_default()
@@ -2002,7 +2027,7 @@ fn expected_moves(
 /// (date, start); within a slot, rows pair up by identical assignment
 /// first, then by position (teacher change), then in order (class change).
 /// Co-teach rows keep their own identity (the label), never collapsed.
-fn compare_runs(
+pub(crate) fn compare_runs(
     month: &str,
     baseline: &[RunShift],
     candidate: &[RunShift],
@@ -2703,6 +2728,11 @@ pub struct PushPreview {
     pub total: i64,
     pub skipped_count: i64,
     pub to_create: Vec<PushPreviewItem>,
+    /// The draft being pushed (always the month's push draft).
+    pub draft_name: String,
+    /// Other drafts of this month with a push on record — their shifts may
+    /// already be in Sling and would NOT be removed by this push.
+    pub other_pushed_drafts: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -2732,6 +2762,8 @@ fn build_specs_for_proposal(
     conn: &duckdb::Connection,
     proposal_id: i64,
 ) -> Result<(Vec<crate::sling::PushSpec>, crate::sling::StudioConfig, String), String> {
+    // Only the month's push draft may be pushed (see drafts.rs).
+    crate::drafts::ensure_push_candidate(conn, proposal_id)?;
     let studio_cfg = load_studio_config(conn)?;
     if studio_cfg.org_id == 0 || studio_cfg.home_location_id == 0 {
         return Err(
@@ -2804,14 +2836,26 @@ pub fn push_proposal_dry_run(
     token: State<'_, SlingToken>,
     proposal_id: i64,
 ) -> Result<PushPreview, String> {
+    // Refuse a non-push draft before anything else (token, network).
+    {
+        let conn = db.0.lock().map_err(err)?;
+        crate::drafts::ensure_push_candidate(&conn, proposal_id)?;
+    }
     let token_str = {
         let t = token.0.lock().map_err(err)?;
         t.clone()
             .ok_or_else(|| "no Sling token — paste one in Settings".to_string())?
     };
-    let (specs, cfg, month) = {
+    let (specs, cfg, month, draft_name, other_pushed_drafts) = {
         let conn = db.0.lock().map_err(err)?;
-        build_specs_for_proposal(&conn, proposal_id)?
+        let (specs, cfg, month) = build_specs_for_proposal(&conn, proposal_id)?;
+        (
+            specs,
+            cfg,
+            month,
+            crate::drafts::draft_name(&conn, proposal_id),
+            crate::drafts::other_pushed_drafts(&conn, proposal_id)?,
+        )
     };
     let events =
         crate::sling::fetch_calendar(&token_str, &cfg, &month).map_err(err)?;
@@ -2838,6 +2882,8 @@ pub fn push_proposal_dry_run(
         total,
         skipped_count,
         to_create,
+        draft_name,
+        other_pushed_drafts,
     })
 }
 
@@ -2854,6 +2900,11 @@ pub fn push_proposal_execute(
 ) -> Result<PushSummary, String> {
     use tauri::{Emitter, Manager};
 
+    // Refuse a non-push draft before anything else (token, network).
+    {
+        let conn = db.0.lock().map_err(err)?;
+        crate::drafts::ensure_push_candidate(&conn, proposal_id)?;
+    }
     let token_str = {
         let t = token.0.lock().map_err(err)?;
         t.clone().ok_or_else(|| "no Sling token — paste one in Settings".to_string())?

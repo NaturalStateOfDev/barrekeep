@@ -68,6 +68,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "algorithm_versions.baseline_sha256",
         sql: include_str!("../migrations/0011_algorithm_baseline_sha.sql"),
     },
+    Migration {
+        version: 12,
+        label: "multi-draft: proposal_drafts, month_push_candidate, claude_run_targets",
+        sql: include_str!("../migrations/0012_multi_draft.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.
@@ -271,6 +276,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// Migration 0012 backfill: every pre-existing proposal gets a draft row
+    /// ("Draft N" per month in creation order), every month a push draft
+    /// (pushed > is_current > newest), every Claude run a target row — and
+    /// re-running the SQL (e.g. a crash between the batch and the
+    /// _migrations insert) changes nothing.
+    #[test]
+    fn migration_0012_backfill_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("open");
+        // Migrate up to 0011, seed history, then apply 0012.
+        conn.execute_batch(
+            "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, label VARCHAR NOT NULL,
+                 applied_at TIMESTAMPTZ NOT NULL DEFAULT now());",
+        )
+        .unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version < 12) {
+            conn.execute_batch(m.sql).unwrap();
+            conn.execute(
+                "INSERT INTO _migrations (version, label) VALUES (?, ?)",
+                duckdb::params![m.version, m.label],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO proposals (id, target_month, algorithm_version, parameters, generated_at, is_current) VALUES
+               (1, '2026-07', 'v9', '{}', TIMESTAMPTZ '2026-06-20 10:00:00+00', FALSE),
+               (2, '2026-07', 'v9', '{}', TIMESTAMPTZ '2026-06-21 10:00:00+00', TRUE),
+               (3, '2026-08', 'v9', '{}', TIMESTAMPTZ '2026-07-20 10:00:00+00', FALSE),
+               (4, '2026-08', 'v9', '{}', TIMESTAMPTZ '2026-07-21 10:00:00+00', TRUE),
+               (5, '2026-09', 'v9', '{}', TIMESTAMPTZ '2026-08-21 10:00:00+00', FALSE);
+             -- August's older draft was the one pushed: it wins over is_current.
+             INSERT INTO pushes (proposal_id) VALUES (3);
+             INSERT INTO claude_runs (proposal_id, model, input_tokens, output_tokens,
+                 input_text, output_text, cost_usd, duration_ms)
+               VALUES (2, 'm', 1, 1, 'i', 'o', 0.01, 5), (NULL, 'm', 1, 1, 'i', 'o', 0.01, 5);",
+        )
+        .unwrap();
+        run(&conn).expect("apply 0012");
+
+        let snapshot = |c: &Connection| -> (Vec<(i64, String)>, Vec<(String, i64)>, i64) {
+            let drafts = c
+                .prepare("SELECT proposal_id, name FROM proposal_drafts ORDER BY proposal_id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let cands = c
+                .prepare("SELECT target_month, proposal_id FROM month_push_candidate ORDER BY 1")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let targets: i64 = c
+                .query_row("SELECT count(*) FROM claude_run_targets", [], |r| r.get(0))
+                .unwrap();
+            (drafts, cands, targets)
+        };
+        let first = snapshot(&conn);
+        assert_eq!(
+            first.0,
+            vec![
+                (1, "Draft 1".to_string()),
+                (2, "Draft 2".to_string()),
+                (3, "Draft 1".to_string()),
+                (4, "Draft 2".to_string()),
+                (5, "Draft 1".to_string()),
+            ]
+        );
+        assert_eq!(
+            first.1,
+            vec![("2026-07".to_string(), 2), ("2026-08".to_string(), 3), ("2026-09".to_string(), 5)]
+        );
+        assert_eq!(first.2, 1);
+
+        // Re-running the migration SQL and the runner is a no-op.
+        conn.execute_batch(MIGRATIONS.iter().find(|m| m.version == 12).unwrap().sql)
+            .expect("0012 re-run");
+        run(&conn).expect("runner re-run");
+        assert_eq!(snapshot(&conn), first);
+
+        // A user rename survives a re-run (never renumbered).
+        conn.execute("UPDATE proposal_drafts SET name = 'Consistent days' WHERE proposal_id = 4", [])
+            .unwrap();
+        conn.execute_batch(MIGRATIONS.iter().find(|m| m.version == 12).unwrap().sql).unwrap();
+        let name: String = conn
+            .query_row("SELECT name FROM proposal_drafts WHERE proposal_id = 4", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Consistent days");
     }
 
     /// backup_if_pending: no-op when absent, fresh, or up to date; copies the

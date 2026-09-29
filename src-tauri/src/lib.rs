@@ -11,8 +11,9 @@
 mod algorithm;
 mod backup;
 mod commands;
-mod editor;
 mod db;
+mod drafts;
+mod editor;
 mod logging;
 mod migrations;
 mod python;
@@ -108,6 +109,12 @@ pub fn run() {
             commands::list_external_shifts_for_month,
             commands::push_proposal_dry_run,
             commands::push_proposal_execute,
+            drafts::duplicate_proposal,
+            drafts::rename_proposal,
+            drafts::archive_proposal,
+            drafts::unarchive_proposal,
+            drafts::set_push_candidate,
+            drafts::diff_proposals,
         ])
         .run(tauri::generate_context!());
 

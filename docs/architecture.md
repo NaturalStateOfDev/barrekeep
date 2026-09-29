@@ -52,7 +52,8 @@
 2. **Generate proposal.** User clicks "Generate proposal." Tauri runs the rule-based proposer (in Rust or Python sidecar) which reads from DuckDB and writes to a `proposals` table with a generation id.
 3. **Optional Claude pass.** User clicks "Have Claude review." App reads the proposal, sends it + the prompt from `prompts/verifier.md` to the Anthropic API, and writes Claude's suggestions to a `suggestions` table linked to the proposal.
 4. **Edit in calendar view.** User clicks cells, swaps teachers. Each edit becomes a row in the `edits` table (so we have full undo/redo and audit history).
-5. **Push to Sling.** User clicks "Push to Sling" on a proposal. The app builds the shift list from `proposal_shifts` in DuckDB, dedupes against shifts already in Sling, and POSTs the missing ones in-process (Rust, `sling.rs::push_shift`) as `status: "planning"`, batched + rate-limit-aware. A dry-run preview is shown for confirmation first; live progress streams via the `push-progress` event. Audit goes to the `pushes` and `push_results` tables. (The legacy `scripts/push_to_sling.py` is retained for reference only and is no longer invoked.)
+   A month can hold several **drafts** (generate again, or Duplicate a draft for a what-if); the draft menu next to the month title switches, renames, archives and duplicates them, the Compare tab diffs two drafts (changed slots + per-teacher weekday/time consistency), and a Claude prompt can target several drafts at once (one call per draft). See `src-tauri/src/drafts.rs`.
+5. **Push to Sling.** User clicks "Push to Sling" on the month's **push draft** (`month_push_candidate`; "Use for push" in the draft menu) — push refuses any other draft, because Sling dedupe would ADD a second draft's differing shifts on top of the first. The app builds the shift list from `proposal_shifts` in DuckDB, dedupes against shifts already in Sling, and POSTs the missing ones in-process (Rust, `sling.rs::push_shift`) as `status: "planning"`, batched + rate-limit-aware. A dry-run preview is shown for confirmation first; live progress streams via the `push-progress` event. Audit goes to the `pushes` and `push_results` tables. (The legacy `scripts/push_to_sling.py` is retained for reference only and is no longer invoked.)
 6. **Publish.** User goes to Sling's web UI to publish.
 
 ## DuckDB schema overview
@@ -62,7 +63,8 @@ See `docs/data-model.md` for full DDL. Tables:
 - `teachers` — roster + Sling user IDs + manager overrides
 - `positions` — Sling position IDs + class type names + duration
 - `availability_blocks` — pulled from Sling per month
-- `proposals` — one row per generation run, with metadata
+- `proposals` — one row per draft (generation run or duplicate), with metadata
+- `proposal_drafts` / `month_push_candidate` / `claude_run_targets` — draft names + archive flag, the month's push draft, and which drafts a Claude prompt targeted (migration 0012)
 - `proposal_shifts` — the actual generated schedule rows, FK to proposals
 - `edits` — every manual edit, with before/after, timestamp, reason
 - `prompts` — versioned prompt library (also mirrors prompts/*.md files)

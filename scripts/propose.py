@@ -205,6 +205,12 @@ SEVEN_AM_LAST_RESORT = True
 # the ranking score: penalty = current_assignments * VARIETY_PENALTY_PER_CLASS
 VARIETY_PENALTY_PER_CLASS = 0.3  # tuneable; higher = more rotation
 
+# Slot continuity ("Jane always teaches Tue 8:45"): ranking bonus per earlier
+# assignment of the same teacher to the same (weekday, start time) this
+# month. Teachers already holding the slot also join the exact-slot tier
+# (tier 1) for it. 0 = off: the baseline code path is untouched.
+SLOT_CONTINUITY_BONUS = 0.0
+
 # ============================================================
 # Rules-as-data (algorithm_versions): populate the override knobs from the
 # payload. Empty/absent rules leave every knob at its default — output must
@@ -228,6 +234,8 @@ for _uid, _mult in (_rules.get('variety_penalty_multiplier') or {}).items():
     VARIETY_PENALTY_MULTIPLIER[int(_uid)] = float(_mult)
 if 'variety_penalty_per_class' in _rules:
     VARIETY_PENALTY_PER_CLASS = float(_rules['variety_penalty_per_class'])
+if _rules.get('slot_continuity_bonus'):
+    SLOT_CONTINUITY_BONUS = float(_rules['slot_continuity_bonus'])
 SAT_TIME_SHIFTS.update(_rules.get('sat_time_shifts') or {})
 SUN_TIME_SHIFTS.update(_rules.get('sun_time_shifts') or {})
 
@@ -269,11 +277,14 @@ def teacher_date_allowed(uid, date, st):
     blocked = TEACHER_DATE_BLOCKLIST.get(uid, set())
     return (str(date), st) not in blocked
 
-def weighted_ranking(counter, total_assigned_lookup=None):
+def weighted_ranking(counter, total_assigned_lookup=None, continuity=None):
     """
-    Rank candidates by April experience * persistent weight - variety penalty.
+    Rank candidates by April experience * persistent weight - variety penalty
+    (+ slot continuity bonus when enabled).
     total_assigned_lookup: dict uid -> count of June assignments so far
     (variety penalty pushes heavily-loaded teachers down)
+    continuity: dict uid -> times already assigned this exact (weekday, time)
+    this month; only passed when SLOT_CONTINUITY_BONUS > 0.
     """
     items = []
     for uid, count in counter.items():
@@ -282,6 +293,8 @@ def weighted_ranking(counter, total_assigned_lookup=None):
         if total_assigned_lookup:
             penalty_mult = VARIETY_PENALTY_MULTIPLIER.get(uid, 1.0)
             score -= total_assigned_lookup.get(uid, 0) * VARIETY_PENALTY_PER_CLASS * penalty_mult
+        if continuity:
+            score += continuity.get(uid, 0) * SLOT_CONTINUITY_BONUS
         items.append((uid, score))
     items.sort(key=lambda x: -x[1])
     return items
@@ -458,6 +471,9 @@ weekly_count = defaultdict(lambda: defaultdict(int))
 weekly_assignments = defaultdict(list)
 proposed = []
 manual_slot_keys = set()
+# (weekday, start) -> Counter(uid -> assignments this month); feeds the
+# slot_continuity_bonus rule.
+slot_month_assignments = defaultdict(Counter)
 focus_dates_used = set()
 focus_weeks_used = set()
 
@@ -482,8 +498,21 @@ def try_assign(slot_start, slot_end_, week_key_str, cls, wd, st, exclude_uid=Fal
     # Compute monthly load for variety penalty
     monthly_load = {uid: sum(weekly_count[uid].values()) for uid in TEACHERS}
 
+    continuity = None
+    if SLOT_CONTINUITY_BONUS > 0:
+        continuity = Counter(slot_month_assignments.get((wd, st), {}))
+        if continuity:
+            # Teachers already holding this weekday+time compete in the
+            # exact-slot tier (count 0 = no extra history weight); the
+            # bonus then decides. Hard filters below still apply.
+            tier1 = Counter(tiers[0])
+            for uid in continuity:
+                tier1.setdefault(uid, 0)
+            tiers = [tier1] + [Counter({u: c for u, c in t.items() if u not in continuity})
+                               for t in tiers[1:]]
+
     for tier, label in zip(tiers, tier_labels):
-        cand_list = weighted_ranking(tier, monthly_load)
+        cand_list = weighted_ranking(tier, monthly_load, continuity)
         for under_fn, label2 in [(under_target, 'under target'), (under_max, 'under max')]:
             for cand_uid, _ in cand_list:
                 if cand_uid not in TEACHERS: continue
@@ -688,6 +717,7 @@ for date in june_dates:
 
         weekly_assignments[chosen].append((slot_start, slot_end_dt))
         weekly_count[chosen][week_key_str] += 1
+        slot_month_assignments[(wd, st)][chosen] += 1
         proposed.append((date.date(), WD[wd], st, en, cls, pid, chosen, reason, flag, ''))
 
 # Reporting
@@ -725,6 +755,7 @@ if JSON_OUT:
         'target_month': TARGET_MONTH,
         'parameters': {
             'variety_penalty_per_class': VARIETY_PENALTY_PER_CLASS,
+            **({'slot_continuity_bonus': SLOT_CONTINUITY_BONUS} if SLOT_CONTINUITY_BONUS > 0 else {}),
             'sat_time_shifts': SAT_TIME_SHIFTS,
             'sun_time_shifts': SUN_TIME_SHIFTS,
         },

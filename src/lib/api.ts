@@ -27,6 +27,7 @@ import type {
   PythonStatus,
   BackupsInfo,
   BackupEntry,
+  ProposalDiff,
 } from "../types";
 
 export const api = {
@@ -43,8 +44,17 @@ export const api = {
     invoke<void>("set_position_active", { slingPositionId, active }),
   refreshRosterFromSling: () => invoke<RosterSyncSummary>("refresh_roster_from_sling"),
   listQualifiedPairs: () => invoke<string[]>("list_qualified_pairs"),
-  generateProposal: (targetMonth: string) =>
-    invoke<GenerateResult>("generate_proposal", { targetMonth }),
+  generateProposal: (targetMonth: string, name?: string) =>
+    invoke<GenerateResult>("generate_proposal", { targetMonth, name: name ?? null }),
+  duplicateProposal: (proposalId: number, name?: string) =>
+    invoke<number>("duplicate_proposal", { proposalId, name: name ?? null }),
+  renameProposal: (proposalId: number, name: string) =>
+    invoke<void>("rename_proposal", { proposalId, name }),
+  archiveProposal: (proposalId: number) => invoke<void>("archive_proposal", { proposalId }),
+  unarchiveProposal: (proposalId: number) => invoke<void>("unarchive_proposal", { proposalId }),
+  setPushCandidate: (targetMonth: string, proposalId: number) =>
+    invoke<void>("set_push_candidate", { targetMonth, proposalId }),
+  diffProposals: (a: number, b: number) => invoke<ProposalDiff>("diff_proposals", { a, b }),
   listProposals: () => invoke<ProposalSummary[]>("list_proposals"),
   getProposal: (proposalId: number) =>
     invoke<ProposalDetail>("get_proposal", { proposalId }),
@@ -103,8 +113,14 @@ export const api = {
     invoke<PushPreview>("push_proposal_dry_run", { proposalId }),
   pushProposalExecute: (proposalId: number) =>
     invoke<PushSummary>("push_proposal_execute", { proposalId }),
-  claudeEditProposal: (proposalId: number, instruction: string) =>
-    invoke<ClaudeEditResult>("claude_edit_proposal", { proposalId, instruction }),
+  /** groupRunId: the first run of a prompt sent to several drafts — links
+   *  this run to it (claude_run_targets). */
+  claudeEditProposal: (proposalId: number, instruction: string, groupRunId?: number) =>
+    invoke<ClaudeEditResult>("claude_edit_proposal", {
+      proposalId,
+      instruction,
+      groupRunId: groupRunId ?? null,
+    }),
   claudeDraftCodeChange: (
     proposalId: number,
     instruction: string,

@@ -77,10 +77,20 @@ export interface ProposalSummary {
   target_month: string;
   algorithm_version: string;
   generated_at: string;
+  /** Newest generated draft of the month (legacy; see is_push_candidate). */
   is_current: boolean;
   shift_count: number;
   dropped_count: number;
   edit_count: number;
+  /** Draft metadata (migration 0012). */
+  name: string;
+  archived: boolean;
+  parent_proposal_id: number | null;
+  created_from: "generate" | "duplicate" | string;
+  /** The month's push draft — the only draft Push sends to Sling. */
+  is_push_candidate: boolean;
+  /** At least one push to Sling is on record for this draft. */
+  pushed: boolean;
 }
 
 export interface EditRow {
@@ -186,6 +196,58 @@ export interface PushPreview {
   total: number;
   skipped_count: number;
   to_create: PushPreviewItem[];
+  /** The draft being pushed (always the month's push draft). */
+  draft_name: string;
+  /** Other drafts of this month that were pushed before. */
+  other_pushed_drafts: string[];
+}
+
+export type DraftDiffKind = "teacher" | "format" | "format_teacher" | "only_a" | "only_b";
+
+export interface DraftSlotDiff {
+  date: string;
+  weekday: string;
+  start: string;
+  class_a: string | null;
+  class_b: string | null;
+  teacher_a: string | null;
+  teacher_b: string | null;
+  kind: DraftDiffKind;
+}
+
+export interface TeacherStats {
+  classes: number;
+  /** Distinct weekday+start-time slots taught this month (lower = steadier). */
+  distinct_slots: number;
+  /** Most common slot, e.g. "Tue 08:45". */
+  top_slot: string;
+  top_slot_count: number;
+  top_slot_share: number;
+}
+
+export interface TeacherConsistency {
+  sling_user_id: number;
+  name: string;
+  a: TeacherStats | null;
+  b: TeacherStats | null;
+}
+
+export interface DraftTotals {
+  classes: number;
+  distinct_slots: number;
+  classes_per_slot: number;
+}
+
+export interface ProposalDiff {
+  target_month: string;
+  a_id: number;
+  b_id: number;
+  a_name: string;
+  b_name: string;
+  changes: DraftSlotDiff[];
+  teachers: TeacherConsistency[];
+  totals_a: DraftTotals;
+  totals_b: DraftTotals;
 }
 
 export interface PushSummary {
