@@ -20,8 +20,10 @@ import type {
   PullResult,
   AvailabilityBlock,
   ExternalShiftRow,
-  PushPreview,
-  PushSummary,
+  SyncPreview,
+  SyncSummary,
+  DraftConflict,
+  AvailabilityRefreshResult,
   DiscoveredStudio,
   RosterSyncSummary,
   PythonStatus,
@@ -109,10 +111,23 @@ export const api = {
     invoke<AvailabilityBlock[]>("list_availability_blocks", { targetMonth }),
   listExternalShiftsForMonth: (targetMonth: string) =>
     invoke<ExternalShiftRow[]>("list_external_shifts_for_month", { targetMonth }),
-  pushProposalDryRun: (proposalId: number) =>
-    invoke<PushPreview>("push_proposal_dry_run", { proposalId }),
-  pushProposalExecute: (proposalId: number) =>
-    invoke<PushSummary>("push_proposal_execute", { proposalId }),
+  /** Re-pull availability/leave + roster for the current and future months
+   *  without regenerating any draft. */
+  refreshAvailabilityFromSling: () =>
+    invoke<AvailabilityRefreshResult>("refresh_availability_from_sling"),
+  /** Re-validate a draft against the latest pulled data (marks it checked). */
+  checkDraftConflicts: (proposalId: number) =>
+    invoke<DraftConflict[]>("check_draft_conflicts", { proposalId }),
+  /** Incremental push plan for the month's push draft. */
+  pushSyncPreview: (proposalId: number, cleanup: boolean) =>
+    invoke<SyncPreview>("push_sync_preview", { proposalId, cleanup }),
+  pushSyncExecute: (proposalId: number, cleanup: boolean, planKey: string) =>
+    invoke<SyncSummary>("push_sync_execute", { proposalId, cleanup, planKey }),
+  /** Plan removing a draft's (planning, unmodified) shifts from Sling. */
+  removeDraftFromSlingPreview: (proposalId: number) =>
+    invoke<SyncPreview>("remove_draft_from_sling_preview", { proposalId }),
+  removeDraftFromSlingExecute: (proposalId: number, planKey: string) =>
+    invoke<SyncSummary>("remove_draft_from_sling_execute", { proposalId, planKey }),
   /** groupRunId: the first run of a prompt sent to several drafts — links
    *  this run to it (claude_run_targets). */
   claudeEditProposal: (proposalId: number, instruction: string, groupRunId?: number) =>

@@ -28,6 +28,7 @@ function draft(over: Partial<ProposalSummary>): ProposalSummary {
     created_from: "generate",
     is_push_candidate: false,
     pushed: false,
+    sling_shift_count: 0,
     ...over,
   };
 }

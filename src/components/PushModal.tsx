@@ -1,49 +1,96 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Check, Upload } from "lucide-react";
+import { Check, Trash2, Upload } from "lucide-react";
 import { api } from "../lib/api";
+import { groupSyncActions, hasWork, shiftLabel, slingChangeCount, SYNC_KIND_LABEL, updateLabel } from "../lib/sync";
 import { ProgressBar } from "./ui/ProgressBar";
-import type { PushPreview, PushProgress, PushSummary } from "../types";
+import type { SyncAction, SyncPreview, SyncProgress, SyncSummary } from "../types";
 
 interface Props {
+  /** "push": sync the month's push draft. "remove": delete this draft's shifts from Sling. */
+  mode: "push" | "remove";
   proposalId: number;
-  /** The push draft's name (only the month's push draft can be pushed). */
   draftName: string;
   monthLabel: string;
   onClose: () => void;
   onTokenExpired: () => void;
 }
 
-type Phase = "loading" | "preview" | "pushing" | "done" | "error";
+type Phase = "loading" | "preview" | "running" | "done" | "error";
 
-export function PushModal({ proposalId, draftName, monthLabel, onClose, onTokenExpired }: Props) {
+function ActionRow({ a }: { a: SyncAction }) {
+  const main = a.after ?? a.before;
+  return (
+    <div className={`bk-push-row bk-sync-${a.kind}`}>
+      <span>{main ? shiftLabel(main) : `Sling shift ${a.sling_shift_id ?? ""}`}</span>
+      <span className="muted">
+        {a.kind === "update" ? updateLabel(a) : a.from_draft ? `from “${a.from_draft}”` : ""}
+        {a.kind === "skip" && a.reason}
+      </span>
+    </div>
+  );
+}
+
+function Section({ title, items, note }: { title: string; items: SyncAction[]; note?: string }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="bk-sync-section">
+      <div className="bk-sync-section-head">
+        {title} <span className="badge">{items.length}</span>
+        {note && <span className="muted"> — {note}</span>}
+      </div>
+      <div className="bk-push-list">
+        {items.map((a, i) => (
+          <ActionRow a={a} key={`${a.kind}-${a.proposal_shift_id}-${a.sling_shift_id ?? ""}-${i}`} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function PushModal({ mode, proposalId, draftName, monthLabel, onClose, onTokenExpired }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
-  const [preview, setPreview] = useState<PushPreview | null>(null);
-  const [progress, setProgress] = useState<PushProgress | null>(null);
-  const [summary, setSummary] = useState<PushSummary | null>(null);
+  const [preview, setPreview] = useState<SyncPreview | null>(null);
+  const [cleanup, setCleanup] = useState(false);
+  const [progress, setProgress] = useState<SyncProgress | null>(null);
+  const [summary, setSummary] = useState<SyncSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const unlisten = useRef<(() => void) | null>(null);
 
-  // Dry-run on mount.
+  const fail = (e: unknown) => {
+    if (String(e).includes("sling-401")) onTokenExpired();
+    else {
+      setError(String(e));
+      setPhase("error");
+    }
+  };
+
+  // Plan on mount, and again whenever the cleanup option changes (it changes
+  // what's deleted and therefore what counts as a duplicate).
   useEffect(() => {
     let cancelled = false;
-    api.pushProposalDryRun(proposalId)
-      .then((p) => { if (!cancelled) { setPreview(p); setPhase("preview"); } })
-      .catch((e) => {
+    setPhase("loading");
+    const req =
+      mode === "push" ? api.pushSyncPreview(proposalId, cleanup) : api.removeDraftFromSlingPreview(proposalId);
+    req
+      .then((p) => {
         if (!cancelled) {
-          if (String(e).includes("sling-401")) onTokenExpired();
-          else { setError(String(e)); setPhase("error"); }
+          setPreview(p);
+          setPhase("preview");
         }
+      })
+      .catch((e) => {
+        if (!cancelled) fail(e);
       });
-    return () => { cancelled = true; };
-  }, [proposalId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [proposalId, mode, cleanup]);
 
-  // Subscribe to progress before executing; clean up on unmount. If the
-  // modal unmounts before listen() resolves, unlisten immediately instead
-  // of leaking the subscription.
+  // Subscribe to progress before executing; clean up on unmount.
   useEffect(() => {
     let unmounted = false;
-    listen<PushProgress>("push-progress", (e) => setProgress(e.payload)).then((u) => {
+    listen<SyncProgress>("push-progress", (e) => setProgress(e.payload)).then((u) => {
       if (unmounted) u();
       else unlisten.current = u;
     });
@@ -54,88 +101,134 @@ export function PushModal({ proposalId, draftName, monthLabel, onClose, onTokenE
   }, []);
 
   const onConfirm = async () => {
-    setPhase("pushing");
+    if (!preview) return;
+    setPhase("running");
     setError(null);
     try {
-      const s = await api.pushProposalExecute(proposalId);
+      const s =
+        mode === "push"
+          ? await api.pushSyncExecute(proposalId, cleanup, preview.plan_key)
+          : await api.removeDraftFromSlingExecute(proposalId, preview.plan_key);
       setSummary(s);
       setPhase("done");
     } catch (e) {
-      if (String(e).includes("sling-401")) onTokenExpired();
-      else { setError(String(e)); setPhase("error"); }
+      fail(e);
     }
   };
 
-  const pct = progress && progress.total > 0
-    ? Math.round((progress.done / progress.total) * 100) : 0;
+  const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const title = mode === "push" ? `Push “${draftName}” to Sling` : `Remove “${draftName}” from Sling`;
 
   return (
-    <div className="modal-backdrop" onClick={phase === "pushing" ? undefined : onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" onClick={phase === "running" ? undefined : onClose}>
+      <div className="modal bk-sync-modal" onClick={(e) => e.stopPropagation()}>
         {phase === "loading" && (
           <>
-            <h3>Push “{draftName}” to Sling</h3>
-            <p className="muted">Checking what's already in Sling…</p>
+            <h3>{title}</h3>
+            <p className="muted">Checking what's in Sling…</p>
           </>
         )}
 
-        {phase === "preview" && preview && (
-          <>
-            <h3>Push “{preview.draft_name}” to Sling</h3>
-            <p className="muted" style={{ marginTop: 0 }}>
-              This creates{" "}
-              <strong style={{ color: "var(--text-body)" }}>
-                {preview.to_create.length} unpublished shift{preview.to_create.length === 1 ? "" : "s"}
-              </strong>{" "}
-              in Sling for {monthLabel}. Nothing goes live until you publish them in Sling.
-              {preview.skipped_count > 0 && (
-                <> <span className="muted">{preview.skipped_count} already in Sling (skipped).</span></>
+        {phase === "preview" && preview && (() => {
+          const g = groupSyncActions(preview.actions);
+          const changes = slingChangeCount(preview);
+          const work = hasWork(preview);
+          return (
+            <>
+              <h3>{title}</h3>
+              <p className="muted" style={{ marginTop: 0 }}>
+                {mode === "push" ? (
+                  <>
+                    Only what changed is sent, as unpublished (planning) shifts for {monthLabel}. Nothing
+                    goes live until you publish in Sling.
+                    {preview.unchanged > 0 && <> {preview.unchanged} shift{preview.unchanged === 1 ? " is" : "s are"} already up to date.</>}
+                  </>
+                ) : (
+                  <>
+                    Deletes this draft's planning shifts for {monthLabel} from Sling. Shifts that were
+                    published or edited in Sling are left alone.
+                  </>
+                )}
+              </p>
+
+              {mode === "push" && preview.cleanup_offers.length > 0 && (() => {
+                const removable = preview.cleanup_offers.reduce((n, o) => n + o.removable, 0);
+                const blocked = preview.cleanup_offers.reduce((n, o) => n + o.blocked, 0);
+                const names = preview.cleanup_offers.map((o) => `“${o.draft_name}”`).join(", ");
+                return (
+                  <label className="bk-sync-cleanup">
+                    <input
+                      type="checkbox"
+                      checked={cleanup}
+                      disabled={removable === 0 && !cleanup}
+                      onChange={(e) => setCleanup(e.target.checked)}
+                    />
+                    <span>
+                      Remove {removable} planning shift{removable === 1 ? "" : "s"} previously pushed from {names}
+                      {blocked > 0 && (
+                        <span className="muted"> ({blocked} published or edited in Sling — left alone)</span>
+                      )}
+                      <br />
+                      <span className="muted">
+                        Removed before this draft's new shifts are created. Leave unchecked to keep them in Sling.
+                      </span>
+                    </span>
+                  </label>
+                );
+              })()}
+
+              {!work ? (
+                <p className="ok">Sling already matches “{preview.draft_name}” — nothing to send.</p>
+              ) : (
+                <div className="bk-sync-sections">
+                  <Section title={SYNC_KIND_LABEL.create} items={g.create} />
+                  <Section title={SYNC_KIND_LABEL.update} items={g.update} note="replaced (delete + re-create)" />
+                  <Section title={SYNC_KIND_LABEL.delete} items={g.delete} />
+                  <Section title={SYNC_KIND_LABEL.cleanup} items={g.cleanup} />
+                  <Section title={SYNC_KIND_LABEL.adopt} items={g.adopt} note="no change in Sling" />
+                </div>
               )}
-            </p>
-            {preview.other_pushed_drafts.length > 0 && (
-              <div className="bk-warn" style={{ marginTop: 0, marginBottom: 12 }}>
-                {preview.other_pushed_drafts.map((n) => `“${n}”`).join(", ")}{" "}
-                {preview.other_pushed_drafts.length === 1 ? "was" : "were"} pushed for this month
-                before. Pushing “{preview.draft_name}” adds its differing shifts but does NOT
-                remove the earlier draft's shifts from Sling — delete those in Sling if they
-                should go.
-              </div>
-            )}
-            {preview.to_create.length === 0 ? (
-              <p className="ok">Everything is already in Sling — nothing to push.</p>
-            ) : (
-              <div className="bk-push-list">
-                {preview.to_create.map((it, i) => (
-                  <div className="bk-push-row" key={i}>
-                    <span>{it.date} {it.start}–{it.end}</span>
-                    <span>{it.class_name}</span>
-                    <span>→ {it.teacher_name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
-              <button className="btn-ghost" onClick={onClose}>Cancel</button>
-              <button className="btn-primary" onClick={onConfirm} disabled={preview.to_create.length === 0}>
-                <Upload size={15} /> Push {preview.to_create.length} shift{preview.to_create.length === 1 ? "" : "s"}
-              </button>
-            </div>
-          </>
-        )}
+              {g.skip.length > 0 && (
+                <div className="bk-warn" style={{ marginTop: 12 }}>
+                  <Section title={SYNC_KIND_LABEL.skip} items={g.skip} note="the app won't touch these" />
+                </div>
+              )}
 
-        {phase === "pushing" && (
+              <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
+                <button className="btn-ghost" onClick={onClose}>
+                  Cancel
+                </button>
+                <button className="btn-primary" onClick={onConfirm} disabled={!work}>
+                  {mode === "push" ? <Upload size={15} /> : <Trash2 size={15} />}{" "}
+                  {changes > 0
+                    ? `${mode === "push" ? "Send" : "Remove"} ${changes} change${changes === 1 ? "" : "s"}`
+                    : "Record"}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+
+        {phase === "running" && (
           <>
-            <h3>Pushing to Sling…</h3>
+            <h3>{mode === "push" ? "Pushing to Sling…" : "Removing from Sling…"}</h3>
             <p className="muted">
-              Creating planning shifts for {monthLabel} in batches of 10 with pauses
-              (Sling rate-limits). Don't close this window.
+              Batches of 10 with pauses (Sling rate-limits). Don't close this window.
             </p>
             <ProgressBar value={pct} />
             {progress && (
               <p className="muted" style={{ fontVariantNumeric: "tabular-nums" }}>
-                {progress.done}/{progress.total} — {progress.created} created
+                {progress.done}/{progress.total} — {progress.created} created, {progress.updated} updated,{" "}
+                {progress.deleted} removed
                 {progress.failed > 0 && <>, {progress.failed} failed</>}
-                {progress.last_label && <><br /><code>{progress.last_outcome}: {progress.last_label}</code></>}
+                {progress.last_label && (
+                  <>
+                    <br />
+                    <code>
+                      {progress.last_outcome}: {progress.last_label}
+                    </code>
+                  </>
+                )}
               </p>
             )}
           </>
@@ -146,16 +239,16 @@ export function PushModal({ proposalId, draftName, monthLabel, onClose, onTokenE
             <span className="bk-done-icon">
               <Check size={24} />
             </span>
-            <h3 style={{ marginTop: 12 }}>Pushed to Sling</h3>
+            <h3 style={{ marginTop: 12 }}>{mode === "push" ? "Sling is up to date" : "Removed from Sling"}</h3>
             <p className="muted" style={{ marginTop: 0 }}>
-              {summary.created} planning shift{summary.created === 1 ? "" : "s"} created for {monthLabel}
-              {summary.skipped > 0 && <>, {summary.skipped} already present</>}
-              {summary.failed > 0 && <>, {summary.failed} failed</>}. Open Sling to review and publish them.
+              {summary.created} created, {summary.updated} updated, {summary.deleted} removed
+              {summary.adopted > 0 && <>, {summary.adopted} kept from an earlier draft</>}
+              {summary.skipped > 0 && <>, {summary.skipped} skipped</>}
+              {summary.failed > 0 && <>, {summary.failed} failed</>}.{" "}
+              {mode === "push" && "Open Sling to review and publish."}
             </p>
             {summary.failed > 0 && (
-              <p className="muted">
-                Some shifts failed — click Push again to retry; the ones already created are skipped automatically.
-              </p>
+              <p className="muted">Some changes failed — run it again; finished ones are not repeated.</p>
             )}
             {summary.backup_warning && (
               <p className="muted" style={{ color: "var(--color-warning)" }}>
@@ -164,17 +257,21 @@ export function PushModal({ proposalId, draftName, monthLabel, onClose, onTokenE
               </p>
             )}
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
-              <button className="btn-primary" onClick={onClose}>Done</button>
+              <button className="btn-primary" onClick={onClose}>
+                Done
+              </button>
             </div>
           </>
         )}
 
         {phase === "error" && (
           <>
-            <h3>Push “{draftName}” to Sling</h3>
+            <h3>{title}</h3>
             <div className="error">{error}</div>
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
-              <button className="btn-ghost" onClick={onClose}>Close</button>
+              <button className="btn-ghost" onClick={onClose}>
+                Close
+              </button>
             </div>
           </>
         )}

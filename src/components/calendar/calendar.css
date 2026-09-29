@@ -461,3 +461,57 @@
   color: var(--text-muted);
   border: 1px solid var(--border-card);
 }
+
+/* ---- Availability re-check result (conflicts with refreshed Sling data) ---- */
+
+.bk-conflicts {
+  padding: 0.5rem 0.75rem;
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-stroke);
+  border-radius: var(--radius);
+  margin-bottom: 0.5rem;
+  font-size: 13px;
+}
+
+.bk-conflicts-clear {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--color-success-bg);
+  border-color: var(--border-card);
+}
+
+.bk-conflicts-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.bk-conflicts-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.bk-conflicts-list li {
+  display: grid;
+  grid-template-columns: 110px 110px minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.bk-conflict-kind {
+  font-weight: 600;
+  color: var(--color-danger);
+}
+
+.bk-conflict-msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

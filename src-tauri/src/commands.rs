@@ -92,6 +92,19 @@ fn load_studio_config(conn: &duckdb::Connection) -> Result<sling::StudioConfig, 
     .map_err(err)
 }
 
+/// load_studio_config, erroring while the ids are still placeholders.
+pub(crate) fn load_studio_config_checked(conn: &duckdb::Connection) -> Result<sling::StudioConfig, String> {
+    let cfg = load_studio_config(conn)?;
+    if cfg.org_id == 0 || cfg.home_location_id == 0 {
+        return Err(
+            "Studio not configured — set your Sling org, acting-user, and location IDs in \
+             Settings → Studio configuration first."
+                .to_string(),
+        );
+    }
+    Ok(cfg)
+}
+
 #[derive(Serialize)]
 pub struct StudioConfigDto {
     pub org_id: i64,
@@ -623,6 +636,8 @@ pub struct ProposalSummary {
     pub is_push_candidate: bool,
     /// At least one push to Sling is on record for this draft.
     pub pushed: bool,
+    /// Live Sling shifts this draft owns (push_sync tracking, migration 0013).
+    pub sling_shift_count: i64,
 }
 
 /// Shared SELECT for ProposalSummary rows (list + get). Callers append
@@ -665,7 +680,18 @@ fn summary_from_row(r: &duckdb::Row<'_>) -> duckdb::Result<ProposalSummary> {
         created_from: r.get(11)?,
         is_push_candidate: r.get(12)?,
         pushed: r.get(13)?,
+        sling_shift_count: 0, // filled by with_sling_counts
     })
+}
+
+/// Fill sling_shift_count from push tracking (not expressible as a column
+/// subquery: "latest tracking row per Sling shift" is a window query).
+fn with_sling_counts(conn: &duckdb::Connection, mut list: Vec<ProposalSummary>) -> Result<Vec<ProposalSummary>, String> {
+    let counts = crate::push_sync::live_counts(conn)?;
+    for p in &mut list {
+        p.sling_shift_count = counts.get(&p.id).copied().unwrap_or(0);
+    }
+    Ok(list)
 }
 
 #[derive(Serialize)]
@@ -691,6 +717,30 @@ pub struct ProposalDetail {
     pub shifts: Vec<ProposalShiftRow>,
     pub is_stale: bool,
     pub last_pulled_at: Option<String>,
+    /// Last check_draft_conflicts run against pulled data (migration 0013).
+    pub last_checked_at: Option<String>,
+}
+
+/// A draft is stale when the month's latest pull (or availability refresh)
+/// is newer than both its generation and its last conflict check — i.e.
+/// nothing has looked at this draft against the current Sling data.
+pub(crate) fn staleness(
+    conn: &duckdb::Connection,
+    proposal_id: i64,
+) -> Result<(bool, Option<String>, Option<String>), String> {
+    conn.query_row(
+        "SELECT
+            COALESCE(mp.pulled_at > greatest(p.generated_at, COALESCE(dc.checked_at, p.generated_at)), FALSE),
+            CAST(mp.pulled_at AS VARCHAR),
+            CAST(dc.checked_at AS VARCHAR)
+         FROM proposals p
+         LEFT JOIN month_pulls mp ON mp.target_month = p.target_month
+         LEFT JOIN draft_checks dc ON dc.proposal_id = p.id
+         WHERE p.id = ?",
+        duckdb::params![proposal_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -701,7 +751,8 @@ pub fn list_proposals(db: State<'_, Db>) -> Result<Vec<ProposalSummary>, String>
         .prepare(&format!("{PROPOSAL_SUMMARY_SQL} ORDER BY p.id DESC"))
         .map_err(err)?;
     let rows = stmt.query_map([], summary_from_row).map_err(err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+    let list = rows.collect::<Result<Vec<_>, _>>().map_err(err)?;
+    with_sling_counts(&conn, list)
 }
 
 #[tauri::command]
@@ -718,6 +769,7 @@ pub fn get_proposal(
             summary_from_row,
         )
         .map_err(err)?;
+    let summary = with_sling_counts(&conn, vec![summary])?.remove(0);
 
     let mut stmt = conn
         .prepare(
@@ -765,24 +817,9 @@ pub fn get_proposal(
         .collect::<Result<Vec<_>, _>>()
         .map_err(err)?;
 
-    let (is_stale, last_pulled_at): (bool, Option<String>) = {
-        let row: Result<(Option<String>, String), _> = conn.query_row(
-            "SELECT
-                CAST(mp.pulled_at AS VARCHAR),
-                CAST(p.generated_at AS VARCHAR)
-             FROM proposals p
-             LEFT JOIN month_pulls mp ON mp.target_month = p.target_month
-             WHERE p.id = ?",
-            duckdb::params![proposal_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        );
-        match row {
-            Ok((Some(pulled), generated)) => (pulled > generated, Some(pulled)),
-            _ => (false, None),
-        }
-    };
+    let (is_stale, last_pulled_at, last_checked_at) = staleness(&conn, proposal_id)?;
 
-    Ok(ProposalDetail { summary, shifts, is_stale, last_pulled_at })
+    Ok(ProposalDetail { summary, shifts, is_stale, last_pulled_at, last_checked_at })
 }
 
 // ============================================================
@@ -2577,6 +2614,69 @@ fn sync_roster(
     Ok(RosterSyncSummary { teachers_active, teachers_deactivated, positions_active, positions_deactivated, qualifications })
 }
 
+/// Replace one month's availability/leave blocks and external shifts with
+/// the calendar events Sling just returned. Shared by the full pull and the
+/// availability refresh. Must run inside a transaction.
+fn write_month_events(
+    tx: &duckdb::Connection,
+    target_month: &str,
+    month_events: &[crate::sling::CalendarEvent],
+    roster_ids: &std::collections::HashSet<i32>,
+    cfg: &crate::sling::StudioConfig,
+) -> Result<(i64, i64), String> {
+    let (m_start, m_end) = sling::month_range(target_month).map_err(err)?;
+    tx.execute(
+        "DELETE FROM availability_blocks
+         WHERE starts_at >= CAST(? AS TIMESTAMPTZ) AND starts_at <= CAST(? AS TIMESTAMPTZ)",
+        duckdb::params![&m_start, &m_end],
+    ).map_err(err)?;
+    let mut availability_count: i64 = 0;
+    for e in month_events {
+        if e.kind != "availability" && e.kind != "leave" { continue; }
+        // Ownership guard: this pull owns (deletes + rewrites) only blocks
+        // that START in the target month — the same window the DELETE above
+        // clears. A spanning block Sling returns for a later month would
+        // otherwise be inserted a second time.
+        if e.dtstart.get(0..7) != Some(target_month) { continue; }
+        let uid = match e.user.as_ref().or_else(|| e.users.as_ref().and_then(|v| v.first())) {
+            Some(u) => u.id as i32,
+            None => continue,
+        };
+        if !roster_ids.contains(&uid) { continue; }
+        tx.execute(
+            "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at)
+             VALUES (?, ?, CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ))",
+            duckdb::params![uid, &e.kind, &e.dtstart, &e.dtend],
+        ).map_err(err)?;
+        availability_count += 1;
+    }
+
+    tx.execute(
+        "DELETE FROM external_sling_shifts WHERE target_month = ?",
+        duckdb::params![target_month],
+    ).map_err(err)?;
+    let mut external_shift_count: i64 = 0;
+    let home_location_shifts = sling::filter_events(month_events, &["shift"], cfg.home_location_id);
+    for e in home_location_shifts {
+        let shift_id = match e.id { Some(v) => v, None => continue };
+        let date_part = e.dtstart.get(0..10).unwrap_or("").to_string();
+        let start_hm = e.dtstart.get(11..16).unwrap_or("").to_string();
+        let end_hm = e.dtend.get(11..16).unwrap_or("").to_string();
+        let pid = match e.position.as_ref() { Some(p) => p.id as i32, None => continue };
+        let uid = e.user.as_ref().or_else(|| e.users.as_ref().and_then(|v| v.first())).map(|u| u.id as i32);
+        let status = e.status.clone().unwrap_or_else(|| "planning".to_string());
+        tx.execute(
+            "INSERT OR REPLACE INTO external_sling_shifts
+                (sling_shift_id, target_month, shift_date, start_time, end_time,
+                 sling_user_id, sling_position_id, status, pulled_at)
+             VALUES (?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, now())",
+            duckdb::params![shift_id, target_month, &date_part, &start_hm, &end_hm, uid, pid, &status],
+        ).map_err(err)?;
+        external_shift_count += 1;
+    }
+    Ok((availability_count, external_shift_count))
+}
+
 #[tauri::command(async)]
 pub fn pull_month_from_sling(
     db: State<'_, Db>,
@@ -2616,56 +2716,8 @@ pub fn pull_month_from_sling(
     let user_count: i64 = roster_ids.len() as i64;
     let qual_count: i64 = _roster.qualifications;
 
-    let (m_start, m_end) = sling::month_range(&target_month).map_err(err)?;
-    tx.execute(
-        "DELETE FROM availability_blocks
-         WHERE starts_at >= CAST(? AS TIMESTAMPTZ) AND starts_at <= CAST(? AS TIMESTAMPTZ)",
-        duckdb::params![&m_start, &m_end],
-    ).map_err(err)?;
-    let mut availability_count: i64 = 0;
-    for e in &payload.month_events {
-        if e.kind != "availability" && e.kind != "leave" { continue; }
-        // Ownership guard: this pull owns (deletes + rewrites) only blocks
-        // that START in the target month — the same window the DELETE above
-        // clears. A spanning block Sling returns for a later month would
-        // otherwise be inserted a second time.
-        if e.dtstart.get(0..7) != Some(target_month.as_str()) { continue; }
-        let uid = match e.user.as_ref().or_else(|| e.users.as_ref().and_then(|v| v.first())) {
-            Some(u) => u.id as i32,
-            None => continue,
-        };
-        if !roster_ids.contains(&uid) { continue; }
-        tx.execute(
-            "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at)
-             VALUES (?, ?, CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ))",
-            duckdb::params![uid, &e.kind, &e.dtstart, &e.dtend],
-        ).map_err(err)?;
-        availability_count += 1;
-    }
-
-    tx.execute(
-        "DELETE FROM external_sling_shifts WHERE target_month = ?",
-        duckdb::params![&target_month],
-    ).map_err(err)?;
-    let mut external_shift_count: i64 = 0;
-    let home_location_shifts = sling::filter_events(&payload.month_events, &["shift"], cfg.home_location_id);
-    for e in home_location_shifts {
-        let shift_id = match e.id { Some(v) => v, None => continue };
-        let date_part = e.dtstart.get(0..10).unwrap_or("").to_string();
-        let start_hm = e.dtstart.get(11..16).unwrap_or("").to_string();
-        let end_hm = e.dtend.get(11..16).unwrap_or("").to_string();
-        let pid = match e.position.as_ref() { Some(p) => p.id as i32, None => continue };
-        let uid = e.user.as_ref().or_else(|| e.users.as_ref().and_then(|v| v.first())).map(|u| u.id as i32);
-        let status = e.status.clone().unwrap_or_else(|| "planning".to_string());
-        tx.execute(
-            "INSERT OR REPLACE INTO external_sling_shifts
-                (sling_shift_id, target_month, shift_date, start_time, end_time,
-                 sling_user_id, sling_position_id, status, pulled_at)
-             VALUES (?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, now())",
-            duckdb::params![shift_id, &target_month, &date_part, &start_hm, &end_hm, uid, pid, &status],
-        ).map_err(err)?;
-        external_shift_count += 1;
-    }
+    let (availability_count, external_shift_count) =
+        write_month_events(&tx, &target_month, &payload.month_events, &roster_ids, &cfg)?;
     let mut history_shift_count: i64 = 0;
     for e in &payload.history_shifts {
         let shift_id = match e.id { Some(v) => v, None => continue };
@@ -2711,54 +2763,12 @@ pub fn pull_month_from_sling(
 }
 
 // ============================================================
-// Push proposal to Sling — dry-run (preview) command
+// Push proposal to Sling — spec building (the sync itself: push_sync.rs)
 // ============================================================
 
-#[derive(serde::Serialize)]
-pub struct PushPreviewItem {
-    pub date: String,
-    pub start: String,
-    pub end: String,
-    pub class_name: String,
-    pub teacher_name: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct PushPreview {
-    pub total: i64,
-    pub skipped_count: i64,
-    pub to_create: Vec<PushPreviewItem>,
-    /// The draft being pushed (always the month's push draft).
-    pub draft_name: String,
-    /// Other drafts of this month with a push on record — their shifts may
-    /// already be in Sling and would NOT be removed by this push.
-    pub other_pushed_drafts: Vec<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct PushSummary {
-    pub push_id: i64,
-    pub created: i64,
-    pub failed: i64,
-    pub skipped: i64,
-    /// Set when the pre-push database backup failed (the push still ran).
-    pub backup_warning: Option<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct PushProgress {
-    pub total: i64,
-    pub done: i64,
-    pub created: i64,
-    pub failed: i64,
-    pub skipped: i64,
-    pub last_label: String,
-    pub last_outcome: String,
-}
-
 /// Load proposal rows + roster map + studio config, then build the gated
-/// push specs and the target month string. Shared by dry-run and execute.
-fn build_specs_for_proposal(
+/// push specs and the target month string. Shared by push_sync preview and execute.
+pub(crate) fn build_specs_for_proposal(
     conn: &duckdb::Connection,
     proposal_id: i64,
 ) -> Result<(Vec<crate::sling::PushSpec>, crate::sling::StudioConfig, String), String> {
@@ -2814,7 +2824,6 @@ fn build_specs_for_proposal(
                 end: r.get(3)?,
                 position_id: r.get::<_, i32>(4)? as i64,
                 user_id: uid.map(|u| u as i64),
-                teacher_name: r.get(6)?,
                 class_name: r.get(7)?,
                 is_coteach: r.get(8)?,
                 coteach_label: r.get(9)?,
@@ -2828,174 +2837,6 @@ fn build_specs_for_proposal(
 
     let specs = crate::sling::build_push_specs(&inputs, &name_to_id)?;
     Ok((specs, studio_cfg, target_month))
-}
-
-#[tauri::command(async)]
-pub fn push_proposal_dry_run(
-    db: State<'_, Db>,
-    token: State<'_, SlingToken>,
-    proposal_id: i64,
-) -> Result<PushPreview, String> {
-    // Refuse a non-push draft before anything else (token, network).
-    {
-        let conn = db.0.lock().map_err(err)?;
-        crate::drafts::ensure_push_candidate(&conn, proposal_id)?;
-    }
-    let token_str = {
-        let t = token.0.lock().map_err(err)?;
-        t.clone()
-            .ok_or_else(|| "no Sling token — paste one in Settings".to_string())?
-    };
-    let (specs, cfg, month, draft_name, other_pushed_drafts) = {
-        let conn = db.0.lock().map_err(err)?;
-        let (specs, cfg, month) = build_specs_for_proposal(&conn, proposal_id)?;
-        (
-            specs,
-            cfg,
-            month,
-            crate::drafts::draft_name(&conn, proposal_id),
-            crate::drafts::other_pushed_drafts(&conn, proposal_id)?,
-        )
-    };
-    let events =
-        crate::sling::fetch_calendar(&token_str, &cfg, &month).map_err(err)?;
-    let existing =
-        crate::sling::existing_fingerprints(&events, cfg.home_location_id);
-
-    let total = specs.len() as i64;
-    let mut to_create = Vec::new();
-    let mut skipped_count = 0i64;
-    for s in &specs {
-        if existing.contains(&crate::sling::spec_fingerprint(s, cfg.home_location_id)) {
-            skipped_count += 1;
-        } else {
-            to_create.push(PushPreviewItem {
-                date: s.date.clone(),
-                start: s.start.clone(),
-                end: s.end.clone(),
-                class_name: s.class_name.clone(),
-                teacher_name: s.teacher_name.clone(),
-            });
-        }
-    }
-    Ok(PushPreview {
-        total,
-        skipped_count,
-        to_create,
-        draft_name,
-        other_pushed_drafts,
-    })
-}
-
-const PUSH_BATCH_SIZE: usize = 10;
-const PUSH_INTRA_DELAY_SECS: u64 = 1;
-const PUSH_INTER_DELAY_SECS: u64 = 10;
-
-#[tauri::command(async)]
-pub fn push_proposal_execute(
-    app: tauri::AppHandle,
-    db: State<'_, Db>,
-    token: State<'_, SlingToken>,
-    proposal_id: i64,
-) -> Result<PushSummary, String> {
-    use tauri::{Emitter, Manager};
-
-    // Refuse a non-push draft before anything else (token, network).
-    {
-        let conn = db.0.lock().map_err(err)?;
-        crate::drafts::ensure_push_candidate(&conn, proposal_id)?;
-    }
-    let token_str = {
-        let t = token.0.lock().map_err(err)?;
-        t.clone().ok_or_else(|| "no Sling token — paste one in Settings".to_string())?
-    };
-    let (specs, cfg, month) = {
-        let conn = db.0.lock().map_err(err)?;
-        build_specs_for_proposal(&conn, proposal_id)?
-    };
-    let (viewdates, cachedates) = crate::sling::view_cache_dates(&month).map_err(err)?;
-
-    // Re-dedupe at execute time (idempotent re-push: only POST what's missing).
-    let events = crate::sling::fetch_calendar(&token_str, &cfg, &month).map_err(err)?;
-    let existing = crate::sling::existing_fingerprints(&events, cfg.home_location_id);
-    let to_create: Vec<&crate::sling::PushSpec> = specs.iter()
-        .filter(|s| !existing.contains(&crate::sling::spec_fingerprint(s, cfg.home_location_id)))
-        .collect();
-    let skipped = (specs.len() - to_create.len()) as i64;
-    let total = to_create.len() as i64;
-
-    // Routine backup before writing anything. Non-fatal: a failure is
-    // logged and reported with the summary, never blocks the push.
-    let backup_warning = if to_create.is_empty() {
-        None
-    } else {
-        let conn = db.0.lock().map_err(err)?;
-        let backup_state = app.state::<crate::backup::BackupState>();
-        match db_path(&app) {
-            Ok(path) => crate::backup::run(&conn, &path, "prepush", Some(&backup_state)).err(),
-            Err(e) => Some(format!("prepush backup failed: {e:#}")),
-        }
-    };
-
-    // Open the audit row.
-    let push_id: i64 = {
-        let conn = db.0.lock().map_err(err)?;
-        conn.query_row(
-            "INSERT INTO pushes (proposal_id, shifts_attempted, shifts_skipped) VALUES (?, ?, ?) RETURNING id",
-            duckdb::params![proposal_id, total, skipped],
-            |r| r.get(0),
-        ).map_err(err)?
-    };
-
-    let mut created = 0i64;
-    let mut failed = 0i64;
-    let mut aborted_401 = false;
-
-    'outer: for (idx, chunk) in to_create.chunks(PUSH_BATCH_SIZE).enumerate() {
-        for (j, s) in chunk.iter().enumerate() {
-            let label = format!("{} {} {} → {}", s.date, s.start, s.class_name, s.teacher_name);
-            let (outcome, sling_id, errmsg): (&str, Option<String>, Option<String>) =
-                match crate::sling::push_shift(&token_str, &cfg, s, &viewdates, &cachedates) {
-                    Ok(id) => { created += 1; ("created", Some(id.to_string()), None) }
-                    Err(e) if e.to_string() == "sling-401" => { aborted_401 = true; failed += 1; ("failed", None, Some("token expired".into())) }
-                    Err(e) => { failed += 1; ("failed", None, Some(e.to_string())) }
-                };
-            {
-                let conn = db.0.lock().map_err(err)?;
-                conn.execute(
-                    "INSERT INTO push_results (push_id, proposal_shift_id, outcome, sling_shift_id, error_message)
-                     VALUES (?, ?, ?, ?, ?)",
-                    duckdb::params![push_id, s.proposal_shift_id, outcome, sling_id, errmsg],
-                ).map_err(err)?;
-            }
-            let done = created + failed;
-            let _ = app.emit("push-progress", PushProgress {
-                total, done, created, failed, skipped,
-                last_label: label, last_outcome: outcome.to_string(),
-            });
-            if aborted_401 { break 'outer; }
-            if j < chunk.len() - 1 {
-                std::thread::sleep(std::time::Duration::from_secs(PUSH_INTRA_DELAY_SECS));
-            }
-        }
-        if idx < to_create.len().div_ceil(PUSH_BATCH_SIZE) - 1 {
-            std::thread::sleep(std::time::Duration::from_secs(PUSH_INTER_DELAY_SECS));
-        }
-    }
-
-    // Close the audit row.
-    {
-        let conn = db.0.lock().map_err(err)?;
-        conn.execute(
-            "UPDATE pushes SET finished_at = now(), shifts_succeeded = ?, shifts_failed = ? WHERE id = ?",
-            duckdb::params![created, failed, push_id],
-        ).map_err(err)?;
-    }
-
-    if aborted_401 {
-        return Err(format!("sling-401: token expired after creating {created} shift(s)"));
-    }
-    Ok(PushSummary { push_id, created, failed, skipped, backup_warning })
 }
 
 #[tauri::command]
@@ -3167,6 +3008,104 @@ pub fn refresh_roster_from_sling(
     tx.commit().map_err(err)?;
     let _ = conn.execute("CHECKPOINT", []);
     Ok(summary)
+}
+
+// ============================================================
+// Availability refresh — re-pull availability/leave (+ roster, external
+// shifts) for the current and future months WITHOUT regenerating drafts.
+// Drafts keep their edits; check_draft_conflicts (conflicts.rs) then shows
+// what the new availability breaks.
+// ============================================================
+
+#[derive(serde::Serialize, Clone)]
+pub struct MonthRefresh {
+    pub target_month: String,
+    pub availability_count: i64,
+    pub external_shift_count: i64,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct AvailabilityRefreshResult {
+    pub months: Vec<MonthRefresh>,
+    pub roster: RosterSyncSummary,
+    pub refreshed_at: String,
+}
+
+/// Months to refresh: every month with a pull or a draft, from `current`
+/// ("YYYY-MM") on. Past months are read-only and never touched.
+fn refresh_months(conn: &duckdb::Connection, current: &str) -> Result<Vec<String>, String> {
+    conn.prepare(
+        "SELECT target_month FROM month_pulls WHERE target_month >= ?
+         UNION
+         SELECT target_month FROM proposals WHERE target_month >= ?
+         ORDER BY 1",
+    )
+    .map_err(err)?
+    .query_map(duckdb::params![current, current], |r| r.get(0))
+    .map_err(err)?
+    .collect::<Result<_, _>>()
+    .map_err(err)
+}
+
+/// Pause between the refresh's GETs (roster, groups, one calendar per
+/// month) — a handful of calls, but Sling's limit is ~20/min.
+const REFRESH_GET_DELAY_SECS: u64 = 1;
+
+#[tauri::command(async)]
+pub fn refresh_availability_from_sling(
+    db: State<'_, Db>,
+    token: State<'_, SlingToken>,
+) -> Result<AvailabilityRefreshResult, String> {
+    let token_str = {
+        let t = token.0.lock().map_err(err)?;
+        t.clone().ok_or_else(|| "no Sling token — log in to Sling first".to_string())?
+    };
+    let current = chrono::Local::now().format("%Y-%m").to_string();
+    let (cfg, months) = {
+        let conn = db.0.lock().map_err(err)?;
+        (load_studio_config_checked(&conn)?, refresh_months(&conn, &current)?)
+    };
+    if months.is_empty() {
+        return Err("Nothing to refresh — pull a month from Sling first.".to_string());
+    }
+
+    // Network first (no DB lock held), then one transaction for all writes:
+    // a failure part-way leaves the previous data intact.
+    let pause = || std::thread::sleep(std::time::Duration::from_secs(REFRESH_GET_DELAY_SECS));
+    let users = sling::fetch_users(&token_str).map_err(err)?;
+    pause();
+    let groups = sling::fetch_groups(&token_str).map_err(err)?;
+    let mut calendars = Vec::with_capacity(months.len());
+    for m in &months {
+        pause();
+        calendars.push((m.clone(), sling::fetch_calendar(&token_str, &cfg, m).map_err(err)?));
+    }
+
+    let mut conn = db.0.lock().map_err(err)?;
+    let tx = conn.transaction().map_err(err)?;
+    let roster = sync_roster(&tx, &users, &groups, &cfg)?;
+    let roster_ids: std::collections::HashSet<i32> = {
+        let mut s = tx.prepare("SELECT sling_user_id FROM teachers WHERE active = TRUE").map_err(err)?;
+        s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
+    };
+    let mut out = Vec::with_capacity(calendars.len());
+    for (month, events) in &calendars {
+        let (availability_count, external_shift_count) =
+            write_month_events(&tx, month, events, &roster_ids, &cfg)?;
+        // The month's data is now as fresh as a full pull — drafts generated
+        // or checked before this are stale until re-checked.
+        tx.execute(
+            "INSERT OR REPLACE INTO month_pulls
+                (target_month, pulled_at, user_count, qual_count, availability_count, external_shift_count)
+             VALUES (?, now(), ?, ?, ?, ?)",
+            duckdb::params![month, roster_ids.len() as i64, roster.qualifications, availability_count, external_shift_count],
+        )
+        .map_err(err)?;
+        out.push(MonthRefresh { target_month: month.clone(), availability_count, external_shift_count });
+    }
+    tx.commit().map_err(err)?;
+    let _ = conn.execute("CHECKPOINT", []);
+    Ok(AvailabilityRefreshResult { months: out, roster, refreshed_at: chrono::Utc::now().to_rfc3339() })
 }
 
 // ============================================================

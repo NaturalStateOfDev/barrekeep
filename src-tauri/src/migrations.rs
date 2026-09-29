@@ -73,6 +73,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "multi-draft: proposal_drafts, month_push_candidate, claude_run_targets",
         sql: include_str!("../migrations/0012_multi_draft.sql"),
     },
+    Migration {
+        version: 13,
+        label: "sling sync: push_result_snapshots + draft_checks",
+        sql: include_str!("../migrations/0013_sling_sync.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.
@@ -367,6 +372,36 @@ mod tests {
             .query_row("SELECT name FROM proposal_drafts WHERE proposal_id = 4", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "Consistent days");
+    }
+
+    /// Migration 0013 is additive and re-runnable; its tables take the
+    /// insert / INSERT OR REPLACE shapes push_sync and conflicts rely on.
+    #[test]
+    fn migration_0013_is_idempotent() {
+        let conn = fresh_db();
+        let sql = MIGRATIONS.iter().find(|m| m.version == 13).unwrap().sql;
+        conn.execute_batch(
+            "INSERT INTO pushes (id, proposal_id) SELECT 1, id FROM proposals;
+             INSERT INTO push_results (push_id, proposal_shift_id, outcome, sling_shift_id)
+               SELECT 1, id, 'created', '555' FROM proposal_shifts;
+             INSERT INTO push_result_snapshots
+               (push_result_id, sling_user_id, sling_position_id, shift_date, start_time, end_time)
+               SELECT id, 1930001, 29470407, '2026-08-03', '09:00', '10:00' FROM push_results;
+             INSERT OR REPLACE INTO draft_checks (proposal_id) SELECT id FROM proposals;
+             INSERT OR REPLACE INTO draft_checks (proposal_id) SELECT id FROM proposals;",
+        )
+        .expect("0013 shapes");
+        conn.execute_batch(sql).expect("0013 re-run");
+        run(&conn).expect("runner re-run");
+        let (snaps, checks): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM push_result_snapshots), (SELECT count(*) FROM draft_checks)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((snaps, checks), (1, 1));
+        assert_eq!(current_version(&conn).unwrap(), 13);
     }
 
     /// backup_if_pending: no-op when absent, fresh, or up to date; copies the

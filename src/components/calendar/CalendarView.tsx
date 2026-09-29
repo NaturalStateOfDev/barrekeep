@@ -1,8 +1,16 @@
 import { useState } from "react";
-import type { ProposalDetail, Teacher, Position, ProposalShiftRow, AvailabilityBlock } from "../../types";
+import type {
+  ProposalDetail,
+  Teacher,
+  Position,
+  ProposalShiftRow,
+  AvailabilityBlock,
+  DraftConflict,
+} from "../../types";
 import { api } from "../../lib/api";
 import type { Issue } from "../../lib/issues";
 import { StaleBanner } from "./StaleBanner";
+import { ConflictsPanel } from "./ConflictsPanel";
 import { IssueQueue } from "./IssueQueue";
 import { MonthGrid } from "./MonthGrid";
 import { DayEditorPanel } from "./DayEditorPanel";
@@ -16,6 +24,12 @@ interface Props {
   issues: Issue[];
   onProposalChanged: () => void;
   onRegenerate: () => void;
+  /** Re-pull availability for current/future months and re-check this draft. */
+  onRefreshAvailability: () => void;
+  refreshing?: boolean;
+  /** Result of the last availability re-check (null = none shown). */
+  conflicts: DraftConflict[] | null;
+  onDismissConflicts: () => void;
   onImportExternal: (slingShiftId: number) => Promise<void>;
   readonly?: boolean;
 }
@@ -29,6 +43,10 @@ export function CalendarView({
   issues,
   onProposalChanged,
   onRegenerate,
+  onRefreshAvailability,
+  refreshing,
+  conflicts,
+  onDismissConflicts,
   onImportExternal,
   readonly,
 }: Props) {
@@ -37,6 +55,7 @@ export function CalendarView({
   const issueShiftIds = new Set(
     issues.map((w) => w.shift_id).filter((id): id is number => id != null),
   );
+  for (const c of conflicts ?? []) issueShiftIds.add(c.proposal_shift_id);
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const targetMonth = proposal.summary.target_month.slice(0, 7);
@@ -76,7 +95,18 @@ export function CalendarView({
           <StaleBanner
             lastPulledAt={proposal.last_pulled_at}
             generatedAt={proposal.summary.generated_at}
+            refreshing={refreshing}
+            readonly={readonly}
+            onRefreshAvailability={onRefreshAvailability}
             onRegenerate={onRegenerate}
+          />
+        )}
+        {conflicts && (
+          <ConflictsPanel
+            conflicts={conflicts}
+            readonly={readonly}
+            onOpenDay={(iso) => setSelectedDay(iso)}
+            onDismiss={onDismissConflicts}
           />
         )}
         <MonthGrid

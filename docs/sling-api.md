@@ -83,13 +83,21 @@ Body:
 
 Returns array of one shift on success (200/201). Unwrap `resp[0]`.
 
-### PUT shift (update existing)
+### PUT shift (update existing) — NOT used by the app
 
 ```
 PUT /v1/{orgId}/shifts/{shiftId}?publish=false&...same query params as POST
 ```
 
 Body uses `user: {id}` singular. Always send `publish=false` to keep the shift in planning status.
+
+**Unverified.** No PUT request has been captured from the Sling web client in
+full or exercised by this project — the notes above are all we know (the full
+body shape Sling expects, and whether a partial body clobbers other fields, are
+unknown). The incremental push (`src-tauri/src/push_sync.rs`) therefore does
+**not** PUT: an "update" is a DELETE of the old shift followed by a POST of the
+new one. Consequence: an updated shift gets a new Sling id (tracked in
+`push_results`, see below). Capture a real PUT from DevTools before switching.
 
 ### DELETE shift
 
@@ -99,7 +107,54 @@ DELETE /v1/{orgId}/shifts/{shiftId}
   &cachedates=<startISO>/<endISO>
 ```
 
-Returns 204 with empty body on success.
+Same browser-like headers as POST (plus `Accept: application/json, text/plain, */*`,
+`Accept-Language: en-US,en;q=0.9`). No body.
+
+Returns **204 with an empty body** on success — don't parse JSON. The app treats
+**404** as "already gone" (deleted in Sling's UI or by an earlier run), not an
+error. 401/429 as elsewhere. Ported from `scripts/rollback_push.py` into
+`sling::delete_shift` (same 429 backoff as creates: 30s/60s/90s, max 3 tries).
+
+## Incremental push (sync) and safety rules
+
+`push_sync.rs`, migration 0013. What the app may touch in Sling:
+
+- **Only shifts it created.** Each create records `push_results` (outcome
+  `created`/`updated`/`adopted`, with `sling_shift_id`) plus a
+  `push_result_snapshots` row of exactly what was sent. The latest tracking row
+  per Sling id decides whether the app still owns it (`deleted` /
+  `skipped_missing` end tracking). A shift with no tracking row is never
+  updated or deleted.
+- **Only planning, unmodified shifts.** Before any update/delete the month's
+  calendar is fetched (one GET) and each shift must still exist, be
+  `status: "planning"`, sit at the home location, and match its snapshot
+  (teacher, position, date, start, end). Otherwise it's skipped with a reason
+  (`skipped_conflict`, or `skipped_missing` when it's gone). Pushes made before
+  0013 have no snapshot and are never changed automatically.
+- **Plan = create / update / delete / unchanged** per proposal shift, matched
+  by (proposal_shift_id, teacher) — a co-teach slot is two tracked shifts.
+  Identical shifts owned by another draft of the month are *adopted* (tracked
+  for the push draft, no Sling call). Other drafts' remaining shifts are offered
+  for cleanup (explicit, default off); cleanup deletes run before creates.
+- **Dedupe still applies to creates**, using the same fingerprints as before,
+  minus shifts this plan deletes (so a slot replaced in place isn't mistaken
+  for a duplicate of itself).
+- Execution order: adopt/skip bookkeeping → cleanup deletes → deletes →
+  replacements (DELETE then POST) → creates; rate-limited across all calls
+  (1s apart, 10s after every 10th). Execute re-plans from a fresh fetch and
+  refuses if the plan differs from the confirmed preview.
+
+## Availability refresh
+
+`refresh_availability_from_sling` re-pulls, for every month from the current
+one on that has a pull or a draft: `/users/concise` + `/groups` (roster sync)
+and one calendar GET per month (1s apart). It rewrites that month's
+`availability_blocks` and `external_sling_shifts` and bumps
+`month_pulls.pulled_at` — drafts are NOT regenerated. `check_draft_conflicts`
+then re-validates a draft (blocked/leave overlap, deactivated, unqualified,
+over weekly cap, unassigned) and records `draft_checks.checked_at`, which clears
+the stale banner. Overlaps are computed with US Central DST rules, not the
+fixed `-05:00` the calendar query uses.
 
 ## Rate limiting
 

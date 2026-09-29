@@ -11,12 +11,14 @@
 mod algorithm;
 mod backup;
 mod commands;
+mod conflicts;
 mod db;
 mod drafts;
 mod editor;
 mod logging;
 mod migrations;
 mod python;
+mod push_sync;
 mod review;
 mod secrets;
 mod seed;
@@ -107,8 +109,12 @@ pub fn run() {
             commands::import_external_shift,
             commands::list_availability_blocks,
             commands::list_external_shifts_for_month,
-            commands::push_proposal_dry_run,
-            commands::push_proposal_execute,
+            commands::refresh_availability_from_sling,
+            conflicts::check_draft_conflicts,
+            push_sync::push_sync_preview,
+            push_sync::push_sync_execute,
+            push_sync::remove_draft_from_sling_preview,
+            push_sync::remove_draft_from_sling_execute,
             drafts::duplicate_proposal,
             drafts::rename_proposal,
             drafts::archive_proposal,
