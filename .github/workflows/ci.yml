@@ -91,7 +91,13 @@ jobs:
       - name: Rust tests
         # --release so the test build reuses the release-profile DuckDB/deps
         # artifacts compiled (and cached) above instead of a second debug build.
-        run: cargo test --release --manifest-path src-tauri/Cargo.toml
+        #
+        # --test-threads=1: the duckdb crate is built without its `json`
+        # feature, so each test's migrations autoload (download + install)
+        # the json extension into ~/.duckdb/extensions. Parallel tests race
+        # on that install and Windows fails the file move ("Could not move
+        # file: Access is denied"). The suite takes seconds either way.
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 
       - name: Clippy
         # Non-blocking for now: 6 known lints remain in commands.rs /
