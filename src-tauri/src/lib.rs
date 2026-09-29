@@ -9,11 +9,13 @@
 //   - IPC commands (exposed to the React frontend)
 
 mod algorithm;
+mod backup;
 mod commands;
 mod editor;
 mod db;
 mod logging;
 mod migrations;
+mod python;
 mod review;
 mod secrets;
 mod seed;
@@ -62,6 +64,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             logging::log_frontend_error,
+            python::check_python,
+            backup::list_backups,
+            backup::backup_now,
+            backup::open_backups_folder,
             commands::db_info,
             commands::list_teachers,
             commands::update_teacher_settings,
@@ -133,6 +139,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     logging::write_line("startup", &format!("opening database at {}", path.display()));
     let db = db::Db::open(app.handle())?;
+    let backup_state = backup::BackupState::default();
     {
         let conn = db.0.lock().expect("db poisoned at startup");
         logging::write_line("startup", "running migrations");
@@ -152,8 +159,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             },
             Err(e) => logging::write_line("algorithm", &format!("no algorithms dir: {e}")),
         }
+        // Routine backup, at most once per calendar day. Goes through the
+        // open connection (DuckDB COPY FROM DATABASE), never a file copy.
+        // Failure is logged + surfaced in Settings, never fatal.
+        logging::write_line("startup", "daily backup check");
+        backup::run_startup(&conn, &path, &backup_state);
     }
     app.manage(db);
+    app.manage(backup_state);
 
     // Open the Stronghold-backed secrets vault and preload the
     // Sling token (if any). If the vault can't be opened for any

@@ -35,6 +35,34 @@ export interface DbInfo {
   position_count: number;
 }
 
+export interface PythonStatus {
+  found: boolean;
+  version: string | null;
+  /** How it's invoked, e.g. "py -3". */
+  command: string | null;
+  /** sys.executable of the resolved interpreter. */
+  path: string | null;
+  error: string | null;
+  min_version: string;
+}
+
+export interface BackupEntry {
+  name: string;
+  path: string;
+  size_bytes: number;
+  /** Local time, "YYYY-MM-DD HH:MM:SS". */
+  created_at: string;
+  reason: string;
+}
+
+export interface BackupsInfo {
+  dir: string;
+  keep: number;
+  backups: BackupEntry[];
+  /** Most recent backup failure this session, if the last attempt failed. */
+  last_error: string | null;
+}
+
 export interface GenerateResult {
   proposal_id: number;
   target_month: string;
@@ -165,6 +193,8 @@ export interface PushSummary {
   created: number;
   failed: number;
   skipped: number;
+  /** Set when the pre-push database backup failed (the push still ran). */
+  backup_warning: string | null;
 }
 
 export interface PushProgress {

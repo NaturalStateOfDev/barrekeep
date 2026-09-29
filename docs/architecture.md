@@ -76,6 +76,52 @@ See `docs/data-model.md` for full DDL. Tables:
 - **User preferences:** window size, last-viewed month — Tauri config dir as JSON.
 - **Prompt source files:** `prompts/*.md` — git-versioned, copied into DuckDB on app startup if newer.
 
+## Python runtime
+
+`propose.py` needs Python 3.11+ (stdlib only). `src-tauri/src/python.rs`
+probes, in order, `py -3`, `python`, `python3` on Windows (`python3`, `python`
+elsewhere), rejects the Microsoft Store placeholder (`WindowsApps\python.exe`,
+exit 9009) and anything older than 3.11, and caches the first good one for the
+session. Settings → Python shows the result and re-probes on "Re-check".
+Because Windows apps inherit PATH at launch, installing Python requires an
+app restart before it's picked up.
+
+## Backups
+
+The database lives at `%LOCALAPPDATA%\com.barrekeep.app\scheduler.duckdb`.
+Two kinds of copies sit next to it:
+
+- `backups/scheduler-YYYYMMDD-HHMMSS-<reason>.duckdb` — routine backups
+  (`src-tauri/src/backup.rs`). Taken once per calendar day at startup
+  (`startup`), before every Sling push that creates shifts (`prepush`), and
+  from Settings → Backups → "Back up now" (`manual`). The newest 14 are kept;
+  rotation deletes only files matching that name pattern. They are written
+  through the open connection with DuckDB's
+  `ATTACH '<file>' AS b; COPY FROM DATABASE scheduler TO b; DETACH b` — never
+  by copying the live file, which Windows refuses while it's open (os error
+  32). A failed backup is logged to `logs\barrekeep.log` and shown as a
+  warning; it never blocks startup or a push.
+- `scheduler.duckdb.backup-vN` — taken automatically right before a schema
+  migration (`migrations::backup_if_pending`), N = the schema version it holds.
+
+### Restoring a backup
+
+There is no in-app restore; do it by hand:
+
+1. **Quit Barrekeep completely** (check Task Manager) — the database
+   file can't be replaced while it's open.
+2. In `%LOCALAPPDATA%\com.barrekeep.app\`, rename the current
+   `scheduler.duckdb` to e.g. `scheduler.duckdb.before-restore` (keep it until
+   you're sure). If a `scheduler.duckdb.wal` file exists, rename it alongside.
+3. Copy the chosen file from `backups\` into that folder and rename the copy
+   to `scheduler.duckdb`.
+4. Start Barrekeep. If the backup predates a schema change, pending migrations
+   run automatically on startup (making their own `.backup-vN` first).
+
+A backup is a normal DuckDB file of the same engine version, so it can also be
+inspected read-only with the DuckDB CLI of the pinned version (see
+`src-tauri/Cargo.toml`) without restoring it.
+
 ## Where to put new code
 
 | What | Where |

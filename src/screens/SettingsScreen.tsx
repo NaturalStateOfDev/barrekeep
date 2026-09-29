@@ -12,7 +12,7 @@ import {
   type Update,
   type DownloadProgress,
 } from "../lib/updater";
-import type { DbInfo, DiscoveredLocation } from "../types";
+import type { BackupsInfo, DbInfo, DiscoveredLocation, PythonStatus } from "../types";
 
 function StatusValue({ state, okLabel, warnLabel, mutedLabel }: {
   state: boolean | null;
@@ -36,7 +36,9 @@ export function SettingsScreen() {
         <AnthropicKeyCard />
         <SlingCredentialsCard />
         <UpdatesCard />
+        <PythonCard />
         <DatabaseCard />
+        <BackupsCard />
       </div>
     </div>
   );
@@ -578,6 +580,184 @@ function DatabaseCard() {
               <td className="muted">Class types</td>
               <td>{info.position_count}</td>
             </tr>
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function PythonCard() {
+  const [status, setStatus] = useState<PythonStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const check = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      setStatus(await api.checkPython());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  useEffect(() => { check(); }, []);
+
+  return (
+    <div className="card">
+      <strong>Python</strong>
+      <p className="muted" style={{ marginTop: 4 }}>
+        "Generate proposal" runs the schedule algorithm (<code>propose.py</code>)
+        with Python {status?.min_version ?? "3.11"} or newer.
+      </p>
+      <div style={{ marginTop: 12 }}>
+        Status:{" "}
+        {checking && !status ? <span className="muted">checking…</span>
+          : status?.found ? (
+            <span style={{ color: "var(--color-success)", fontWeight: 600 }}>
+              Python {status.version}
+            </span>
+          ) : status ? (
+            <span style={{ color: "var(--color-warning)", fontWeight: 600 }}>not found</span>
+          ) : <span className="muted">unknown</span>}
+      </div>
+      {status?.found && (
+        <table style={{ marginTop: 8 }}>
+          <tbody>
+            <tr>
+              <td className="muted">Command</td>
+              <td><code>{status.command}</code></td>
+            </tr>
+            {status.path && (
+              <tr>
+                <td className="muted">Path</td>
+                <td><code>{status.path}</code></td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      )}
+      {status && !status.found && status.error && (
+        <div className="error" style={{ marginTop: 8 }}>{status.error}</div>
+      )}
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn-ghost" onClick={check} disabled={checking}>
+          {checking ? "Checking…" : "Re-check"}
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const BACKUP_REASON_LABELS: Record<string, string> = {
+  startup: "daily (startup)",
+  prepush: "before Sling push",
+  manual: "manual",
+};
+
+function BackupsCard() {
+  const [info, setInfo] = useState<BackupsInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = () => api.listBackups().then(setInfo).catch((e) => setError(String(e)));
+
+  useEffect(() => { refresh(); }, []);
+
+  const onBackupNow = async () => {
+    setBusy(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const b = await api.backupNow();
+      setStatus(`Backed up to ${b.name}.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  const onOpenFolder = async () => {
+    setError(null);
+    try {
+      await api.openBackupsFolder();
+    } catch (e) {
+      setError(`${e} — copy the path instead.`);
+    }
+  };
+
+  const onCopyPath = async () => {
+    if (!info) return;
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(info.dir);
+      setStatus("Folder path copied.");
+    } catch {
+      setError("Couldn't copy — select the path and copy it manually.");
+    }
+  };
+
+  return (
+    <div className="card">
+      <strong>Backups</strong>
+      <p className="muted" style={{ marginTop: 4 }}>
+        A copy of the database is saved once a day when Barrekeep starts and
+        before every Sling push; the newest {info?.keep ?? 14} are kept. To
+        restore one, see <code>docs/architecture.md</code> → "Restoring a backup".
+      </p>
+      {info?.last_error && (
+        <div className="error" style={{ marginTop: 8 }}>
+          Last backup failed: {info.last_error}
+        </div>
+      )}
+      {info && (
+        <div style={{ marginTop: 12 }}>
+          <span className="muted">Folder </span>
+          <code style={{ wordBreak: "break-all" }}>{info.dir}</code>
+        </div>
+      )}
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn-primary" onClick={onBackupNow} disabled={busy}>
+          {busy ? "Backing up…" : "Back up now"}
+        </button>
+        <button className="btn-ghost" onClick={onOpenFolder}>Open backups folder</button>
+        <button className="btn-ghost" onClick={onCopyPath} disabled={!info}>Copy path</button>
+      </div>
+      {status && <div className="ok">{status}</div>}
+      {error && <div className="error">{error}</div>}
+      {info && info.backups.length === 0 && (
+        <div className="muted" style={{ marginTop: 8 }}>No backups yet.</div>
+      )}
+      {info && info.backups.length > 0 && (
+        <table style={{ marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Taken</th>
+              <th style={{ textAlign: "left" }}>Why</th>
+              <th style={{ textAlign: "right" }}>Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            {info.backups.map((b) => (
+              <tr key={b.name} title={b.name}>
+                <td>{b.created_at}</td>
+                <td className="muted">{BACKUP_REASON_LABELS[b.reason.replace(/\d+$/, "")] ?? b.reason}</td>
+                <td style={{ textAlign: "right" }}>{formatBytes(b.size_bytes)}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}

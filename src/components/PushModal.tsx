@@ -146,6 +146,12 @@ export function PushModal({ proposalId, monthLabel, onClose, onTokenExpired }: P
                 Some shifts failed — click Push again to retry; the ones already created are skipped automatically.
               </p>
             )}
+            {summary.backup_warning && (
+              <p className="muted" style={{ color: "var(--color-warning)" }}>
+                Heads up: the pre-push database backup didn't save ({summary.backup_warning}).
+                The push itself was not affected — try Settings → Backups → Back up now.
+              </p>
+            )}
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>
               <button className="btn-primary" onClick={onClose}>Done</button>
             </div>
