@@ -130,7 +130,14 @@ error. 401/429 as elsewhere. Ported from `scripts/rollback_push.py` into
   `status: "planning"`, sit at the home location, and match its snapshot
   (teacher, position, date, start, end). Otherwise it's skipped with a reason
   (`skipped_conflict`, or `skipped_missing` when it's gone). Pushes made before
-  0013 have no snapshot and are never changed automatically.
+  0013 have no snapshot: if Sling shows one as planning, at the home location
+  and exactly equal to its current draft shift, executing the push records
+  Sling's state as its snapshot (an `adopted` row, no Sling call) and it is
+  syncable from then on. Otherwise it's listed as "pushed before sync
+  tracking; differs from draft — fix in Sling or remove manually" and never
+  touched. A tracked shift deleted in Sling is shown as "deleted in Sling since
+  last push — will be re-created on the next push unless you remove it from
+  the draft" (recorded `skipped_missing`, which ends tracking).
 - **Plan = create / update / delete / unchanged** per proposal shift, matched
   by (proposal_shift_id, teacher) — a co-teach slot is two tracked shifts.
   Identical shifts owned by another draft of the month are *adopted* (tracked

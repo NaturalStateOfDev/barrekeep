@@ -171,7 +171,13 @@ function summaryOf(p: MockProposal): ProposalSummary {
 
 // ---- Mock Sling tracking (mirrors push_sync.rs) ----
 // proposal id -> proposal_shift id -> the shift as last pushed (+ Sling status).
-type MockSlingShift = { row: ProposalShiftRow; sling_id: number; status: "planning" | "published" };
+type MockSlingShift = {
+  row: ProposalShiftRow;
+  sling_id: number;
+  status: "planning" | "published" | "deleted";
+  /** Pushed before sync tracking (no snapshot yet). */
+  legacy?: boolean;
+};
 const SLING = new Map<number, Map<number, MockSlingShift>>();
 let nextSlingId = 5_000_000;
 /** Drafts whose month data is newer than their last check (get_proposal.is_stale). */
@@ -186,7 +192,13 @@ function seedSling(id: number, publishedFirst = false) {
   // Everything but the last 3 assigned shifts is "in Sling" (so a sync has creates).
   const rows = p.shifts.filter((s) => !s.is_dropped && s.sling_user_id != null);
   rows.slice(0, Math.max(0, rows.length - 3)).forEach((r, i) =>
-    m.set(r.id, { row: { ...r }, sling_id: nextSlingId++, status: publishedFirst && i === 0 ? "published" : "planning" }),
+    m.set(r.id, {
+      row: { ...r },
+      sling_id: nextSlingId++,
+      // Exercise the preview: #0 published, #1 deleted in Sling, #2 a legacy push.
+      status: publishedFirst && i === 0 ? "published" : publishedFirst && i === 1 ? "deleted" : "planning",
+      legacy: publishedFirst && i === 2,
+    }),
   );
   SLING.set(id, m);
   p.summary.pushed = true;
@@ -218,7 +230,7 @@ const act = (kind: SyncAction["kind"], ps: number, x: Partial<SyncAction>): Sync
   skip_outcome: null,
   ...x,
 });
-const KIND_ORDER: SyncAction["kind"][] = ["adopt", "skip", "cleanup", "delete", "update", "create"];
+const KIND_ORDER: SyncAction["kind"][] = ["baseline", "adopt", "skip", "cleanup", "delete", "update", "create"];
 
 function mockSyncPlan(id: number, mode: "push" | "remove", cleanup: boolean): SyncPreview {
   const p = findProposal(id);
@@ -241,7 +253,13 @@ function mockSyncPlan(id: number, mode: "push" | "remove", cleanup: boolean): Sy
     for (const s of p.shifts) {
       const t = mine.get(s.id);
       const live = !s.is_dropped && s.sling_user_id != null;
-      if (t && live && sameShift(t.row, s)) unchanged++;
+      if (t && live && t.status === "deleted")
+        actions.push(act("skip", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: view(s), reason: "deleted in Sling since last push — will be re-created on the next push unless you remove it from the draft", skip_outcome: "skipped_missing" }));
+      else if (t && live && sameShift(t.row, s) && t.legacy && t.status === "planning")
+        actions.push(act("baseline", s.id, { sling_shift_id: t.sling_id, before: view(s), after: view(s), reason: "pushed before sync tracking; matches the draft — tracked from now on" }));
+      else if (t && live && sameShift(t.row, s)) unchanged++;
+      else if (t && t.legacy)
+        actions.push(act("skip", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: live ? view(s) : null, reason: "pushed before sync tracking; differs from draft — fix in Sling or remove manually", skip_outcome: "skipped_conflict" }));
       else if (t && t.status === "published")
         actions.push(act("skip", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: live ? view(s) : null, reason: "is published in Sling — the app only changes planning shifts", skip_outcome: "skipped_conflict" }));
       else if (t && live) actions.push(act("update", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: view(s), reason: "changed in the draft since the last push" }));
@@ -312,6 +330,8 @@ async function mockSyncExecute(id: number, mode: "push" | "remove", cleanup: boo
     else if (a.kind === "update" && row) { mine.set(row.id, { row: { ...row }, sling_id: nextSlingId++, status: "planning" }); sum.updated++; }
     else if (a.kind === "delete") { mine.delete(a.proposal_shift_id); sum.deleted++; }
     else if (a.kind === "cleanup") { for (const m of SLING.values()) for (const [k, x] of m) if (x.sling_id === a.sling_shift_id) m.delete(k); sum.deleted++; }
+    else if (a.kind === "baseline") { const t = mine.get(a.proposal_shift_id); if (t) t.legacy = false; sum.adopted++; }
+    else if (a.kind === "skip" && a.skip_outcome === "skipped_missing") { mine.delete(a.proposal_shift_id); sum.skipped++; }
     else if (a.kind === "adopt" && row) {
       for (const m of SLING.values()) for (const [k, x] of m) if (x.sling_id === a.sling_shift_id) m.delete(k);
       mine.set(row.id, { row: { ...row }, sling_id: a.sling_shift_id!, status: "planning" }); sum.adopted++;

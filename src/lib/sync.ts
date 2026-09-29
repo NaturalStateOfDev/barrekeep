@@ -10,12 +10,18 @@ export interface SyncGroups {
   delete: SyncAction[];
   cleanup: SyncAction[];
   adopt: SyncAction[];
+  baseline: SyncAction[];
+  /** Skips because the shift was deleted in Sling since the last push. */
+  deletedInSling: SyncAction[];
   skip: SyncAction[];
 }
 
 export function groupSyncActions(actions: SyncAction[]): SyncGroups {
-  const g: SyncGroups = { create: [], update: [], delete: [], cleanup: [], adopt: [], skip: [] };
-  for (const a of actions) g[a.kind].push(a);
+  const g: SyncGroups = { create: [], update: [], delete: [], cleanup: [], adopt: [], baseline: [], deletedInSling: [], skip: [] };
+  for (const a of actions) {
+    if (a.kind === "skip" && a.skip_outcome === "skipped_missing") g.deletedInSling.push(a);
+    else g[a.kind].push(a);
+  }
   return g;
 }
 
@@ -54,6 +60,7 @@ export const SYNC_KIND_LABEL: Record<SyncActionKind, string> = {
   delete: "Remove",
   cleanup: "Remove (earlier draft)",
   adopt: "Keep (already in Sling)",
+  baseline: "Now tracked (pushed before sync tracking)",
   skip: "Skipped",
 };
 

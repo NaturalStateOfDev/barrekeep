@@ -186,6 +186,20 @@ export function PushModal({ mode, proposalId, draftName, monthLabel, onClose, on
                   <Section title={SYNC_KIND_LABEL.delete} items={g.delete} />
                   <Section title={SYNC_KIND_LABEL.cleanup} items={g.cleanup} />
                   <Section title={SYNC_KIND_LABEL.adopt} items={g.adopt} note="no change in Sling" />
+                  <Section
+                    title={SYNC_KIND_LABEL.baseline}
+                    items={g.baseline}
+                    note="matches the draft — syncable from now on, no change in Sling"
+                  />
+                </div>
+              )}
+              {g.deletedInSling.length > 0 && (
+                <div className="bk-warn" style={{ marginTop: 12 }}>
+                  <Section
+                    title="Deleted in Sling since last push"
+                    items={g.deletedInSling}
+                    note="will be re-created on the next push unless you remove it from the draft"
+                  />
                 </div>
               )}
               {g.skip.length > 0 && (

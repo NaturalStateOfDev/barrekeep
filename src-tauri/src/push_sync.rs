@@ -105,6 +105,10 @@ pub enum ActionKind {
     // Declaration order = execution order: DB-only first, then deletes
     // (cleanup of the previous draft before this draft's creates), then
     // replacements, then creates.
+    /// A pre-0013 shift that matches the draft exactly and is still
+    /// planning: record Sling's state as its snapshot (on execute only), so
+    /// it is syncable from then on. No Sling call.
+    Baseline,
     Adopt,
     Skip,
     Cleanup,
@@ -202,6 +206,16 @@ pub enum Unsafe {
     Legacy,
 }
 
+/// A pre-0013 push (no snapshot) that doesn't match the draft: the app can't
+/// tell a draft edit from a Sling edit, so it never touches it.
+pub const LEGACY_REASON: &str =
+    "pushed before sync tracking; differs from draft — fix in Sling or remove manually";
+/// A tracked shift the draft still wants was deleted in Sling.
+pub const MISSING_WANTED: &str =
+    "deleted in Sling since last push — will be re-created on the next push unless you remove it from the draft";
+/// A tracked shift the draft no longer wants is already gone.
+pub const MISSING_GONE: &str = "already deleted in Sling — nothing to remove";
+
 impl Unsafe {
     fn outcome(&self) -> &'static str {
         match self {
@@ -211,10 +225,11 @@ impl Unsafe {
     }
     fn reason(&self, wanted: &str) -> String {
         match self {
-            Unsafe::Missing => format!("no longer in Sling (deleted there?) — {wanted}"),
+            // Context-specific: "will be re-created…" vs MISSING_GONE.
+            Unsafe::Missing => wanted.to_string(),
             Unsafe::NotPlanning(s) => format!("is {s} in Sling — the app only changes planning shifts"),
             Unsafe::Modified(what) => format!("was edited in Sling since the app pushed it ({what}) — left alone"),
-            Unsafe::Legacy => "was pushed before change tracking, so the app can't confirm it wasn't edited in Sling — change it in Sling by hand".to_string(),
+            Unsafe::Legacy => LEGACY_REASON.to_string(),
         }
     }
 }
@@ -335,16 +350,28 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
             match hit {
                 Some(pos) => {
                     let s = specs.remove(pos);
-                    if by_id.contains_key(&t.sling_shift_id) {
-                        plan.unchanged += 1;
-                    } else {
-                        plan.actions.push(skip(
-                            t,
-                            &Unsafe::Missing,
-                            "not re-created now; push again to create it",
-                            Some(ShiftState::from_spec(s)),
-                            &by_id,
-                        ));
+                    let want = ShiftState::from_spec(s);
+                    match by_id.get(&t.sling_shift_id) {
+                        None => plan.actions.push(skip(t, &Unsafe::Missing, MISSING_WANTED, Some(want), &by_id)),
+                        // Legacy (no snapshot) and Sling == draft: adopt Sling's
+                        // state as the baseline if it's still ours to change.
+                        Some(ev)
+                            if t.snapshot.is_none()
+                                && ev.status.as_deref() == Some("planning")
+                                && ev.location.as_ref().map_or(true, |l| l.id == home) =>
+                        {
+                            plan.actions.push(SyncAction {
+                                kind: ActionKind::Baseline,
+                                proposal_shift_id: ps,
+                                sling_shift_id: Some(t.sling_shift_id),
+                                before: Some(want.clone()),
+                                after: Some(want),
+                                reason: "pushed before sync tracking; matches the draft — tracked from now on".to_string(),
+                                skip_outcome: None,
+                                from_proposal_id: None,
+                            });
+                        }
+                        Some(_) => plan.unchanged += 1,
                     }
                 }
                 None => left.push(t),
@@ -388,7 +415,7 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
                 Err(u) => plan.actions.push(skip(
                     t,
                     &u,
-                    "the draft change is not sent; push again to create it",
+                    MISSING_WANTED,
                     Some(after),
                     &by_id,
                 )),
@@ -413,7 +440,7 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
                         from_proposal_id: None,
                     });
                 }
-                Err(u) => plan.actions.push(skip(t, &u, "nothing to remove", None, &by_id)),
+                Err(u) => plan.actions.push(skip(t, &u, MISSING_GONE, None, &by_id)),
             }
         }
     }
@@ -485,7 +512,7 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
                 });
             }
             Err(u) => {
-                let mut a = skip(t, &u, "nothing to remove", None, &by_id);
+                let mut a = skip(t, &u, MISSING_GONE, None, &by_id);
                 a.from_proposal_id = Some(t.proposal_id);
                 plan.actions.push(a);
             }
@@ -555,7 +582,7 @@ pub fn build_remove_plan(
                 skip_outcome: None,
                 from_proposal_id: None,
             }),
-            Err(u) => plan.actions.push(skip(t, &u, "nothing to remove", None, &by_id)),
+            Err(u) => plan.actions.push(skip(t, &u, MISSING_GONE, None, &by_id)),
         }
     }
     plan.sort();
@@ -680,8 +707,12 @@ pub fn execute_plan(
         };
         let last_outcome: String;
         match a.kind {
-            ActionKind::Adopt => {
-                record(&row("adopted", a.sling_shift_id, None, a.after.clone()))?;
+            // Both are bookkeeping: an 'adopted' row with a snapshot makes the
+            // shift tracked (by this draft) and syncable. Written only here,
+            // on execute — never on preview.
+            ActionKind::Baseline | ActionKind::Adopt => {
+                let note = (a.kind == ActionKind::Baseline).then(|| "baseline snapshot adopted from Sling".to_string());
+                record(&row("adopted", a.sling_shift_id, note, a.after.clone()))?;
                 sum.adopted += 1;
                 continue;
             }
@@ -1319,15 +1350,76 @@ mod tests {
         // Pre-0013 push (no snapshot): can't verify → never changed...
         let p = plan(1, &[spec(11, &now)], &[tr(111, 1, 11, None)], &[ev(111, &was, "planning")], false);
         assert_eq!(kinds(&p), vec![(ActionKind::Skip, 11, Some(111))]);
-        assert!(p.actions[0].reason.contains("before change tracking"));
-        // ...but still counts as unchanged when Sling matches the draft.
-        let p = plan(1, &[spec(11, &was)], &[tr(111, 1, 11, None)], &[ev(111, &was, "planning")], false);
-        assert_eq!((p.unchanged, p.actions.len()), (1, 0));
+        assert_eq!(p.actions[0].reason, LEGACY_REASON);
+        // ...and a deleted-in-Sling shift the draft still wants says so.
+        let p = plan(1, &[spec(11, &was)], &[tr(111, 1, 11, Some(&was))], &[], false);
+        assert_eq!(p.actions[0].reason, MISSING_WANTED);
 
         // Unsafe deletes are skipped too, and none of these call Sling.
         let p = plan(1, &[], &[tr(111, 1, 11, Some(&was))], &[ev(111, &was, "published")], false);
         assert_eq!(kinds(&p), vec![(ActionKind::Skip, 11, Some(111))]);
         assert_eq!(p.network_ops(), 0);
+    }
+
+    #[test]
+    fn legacy_shift_matching_the_draft_gets_a_baseline_on_execute_only() {
+        let x = st("2026-11-02", "09:00", "10:00", A, CLASSIC);
+        let y = st("2026-11-03", "09:00", "10:00", B, CLASSIC);
+        let y_draft = st("2026-11-03", "09:00", "10:00", C, CLASSIC);
+        let tracked = [tr(700, 1, 10, None), tr(701, 1, 11, None)];
+        let events = [ev(700, &x, "planning"), ev(701, &y, "planning")];
+        let p = plan(1, &[spec(10, &x), spec(11, &y_draft)], &tracked, &events, false);
+        // Match → baseline (DB-only); mismatch → untouchable with the legacy reason.
+        assert_eq!(kinds(&p), vec![(ActionKind::Baseline, 10, Some(700)), (ActionKind::Skip, 11, Some(701))]);
+        assert_eq!(p.actions[1].reason, LEGACY_REASON);
+        assert_eq!(p.network_ops(), 0);
+
+        // Planning is pure: nothing recorded until execute, which writes an
+        // 'adopted' row carrying Sling's state as the snapshot.
+        let mut ops = FakeOps::default();
+        let (sum, rows) = run(&p, &mut ops);
+        assert!(ops.calls.is_empty());
+        assert_eq!(sum.adopted, 1);
+        assert_eq!(rows[0].outcome, "adopted");
+        assert_eq!(rows[0].sling_shift_id, Some(700));
+        assert_eq!(rows[0].snapshot.as_ref(), Some(&x));
+        assert_eq!(rows[1].outcome, "skipped_conflict");
+
+        // Once baselined, a later draft edit is a normal update.
+        let now = st("2026-11-02", "09:00", "10:00", B, CLASSIC);
+        let p = plan(1, &[spec(10, &now)], &[tr(700, 1, 10, Some(&x))], &events[..1], false);
+        assert_eq!(kinds(&p), vec![(ActionKind::Update, 10, Some(700))]);
+
+        // A matching legacy shift that's published is just unchanged (no baseline).
+        let p = plan(1, &[spec(10, &x)], &tracked[..1], &[ev(700, &x, "published")], false);
+        assert_eq!((p.unchanged, p.actions.len()), (1, 0));
+    }
+
+    #[test]
+    fn baseline_snapshot_persists_through_tracking() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        crate::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO positions (sling_position_id, class_name) VALUES (29303965, 'Classic');
+             INSERT INTO proposals (id, target_month, algorithm_version, parameters) VALUES (1, '2026-11', 'v9', '{}');
+             INSERT INTO proposal_shifts (id, proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, generation_reason) VALUES
+               (10, 1, DATE '2026-11-02', '09:00', '10:00', 29303965, 'r');
+             INSERT INTO pushes (id, proposal_id) VALUES (1, 1), (2, 1);
+             INSERT INTO push_results (push_id, proposal_shift_id, outcome, sling_shift_id)
+               VALUES (1, 10, 'created', '700');",
+        )
+        .unwrap();
+        let x = st("2026-11-02", "09:00", "10:00", A, CLASSIC);
+        let before = load_tracked(&conn, Some("2026-11")).unwrap();
+        assert!(before[0].snapshot.is_none());
+        let p = plan(1, &[spec(10, &x)], &before, &[ev(700, &x, "planning")], false);
+        let mut ops = FakeOps::default();
+        let mut rec = |r: &ResultRow| record_result(&conn, 2, r);
+        execute_plan(&p, &mut ops, &mut rec, &mut |_| {}).unwrap();
+        let after = load_tracked(&conn, Some("2026-11")).unwrap();
+        assert_eq!((after.len(), after[0].proposal_id), (1, 1));
+        assert_eq!(after[0].snapshot.as_ref(), Some(&x));
     }
 
     #[test]

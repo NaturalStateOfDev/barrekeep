@@ -238,7 +238,7 @@ export interface ProposalDiff {
   totals_b: DraftTotals;
 }
 
-export type SyncActionKind = "adopt" | "skip" | "cleanup" | "delete" | "update" | "create";
+export type SyncActionKind = "baseline" | "adopt" | "skip" | "cleanup" | "delete" | "update" | "create";
 
 export interface ShiftView {
   date: string;

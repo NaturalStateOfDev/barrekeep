@@ -36,8 +36,16 @@ const preview = (actions: SyncAction[]): SyncPreview => ({
 
 describe("sync helpers", () => {
   it("groups actions by kind", () => {
-    const g = groupSyncActions([action("create"), action("update"), action("create"), action("skip")]);
+    const g = groupSyncActions([
+      action("create"),
+      action("update"),
+      action("create"),
+      action("skip"),
+      action("skip", { skip_outcome: "skipped_missing" }),
+      action("baseline"),
+    ]);
     expect([g.create.length, g.update.length, g.skip.length, g.delete.length]).toEqual([2, 1, 1, 0]);
+    expect([g.deletedInSling.length, g.baseline.length]).toEqual([1, 1]);
   });
 
   it("counts only Sling-changing actions", () => {
