@@ -361,8 +361,9 @@ row per `sling_shift_id` decides whether the app still owns that Sling shift
 
 What was actually sent to Sling for one `push_results` row. Insert-only; PK
 only, no FKs (side table rather than new `push_results` columns — see the
-migration header). Pre-0013 rows have none and are never changed
-automatically by sync.
+migration header). Pre-0013 rows have none; a push baselines one (an
+`adopted` row + snapshot of Sling's state) only when Sling shows it planning
+and equal to its draft shift — otherwise sync never changes it.
 
 ```sql
 CREATE TABLE push_result_snapshots (
