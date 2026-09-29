@@ -4,7 +4,7 @@ version = "0.2.4"
 description = "Example Barre Studio monthly schedule planner"
 authors = ["Barrekeep contributors"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88" # keep in step with rust-toolchain.toml + mise.toml
 
 [lib]
 name = "barrekeep_lib"
