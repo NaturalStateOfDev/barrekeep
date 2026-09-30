@@ -1430,7 +1430,7 @@ mod tests {
 
     #[test]
     fn baseline_snapshot_persists_through_tracking() {
-        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
         crate::migrations::run(&conn).unwrap();
         conn.execute_batch(
             "INSERT INTO positions (sling_position_id, class_name) VALUES (29303965, 'Classic');
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn tracking_follows_the_latest_row_per_sling_shift() {
-        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
         crate::migrations::run(&conn).unwrap();
         conn.execute_batch(
             "INSERT INTO positions (sling_position_id, class_name) VALUES (29303965, 'Classic');
@@ -1704,7 +1704,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let db_file = dir.join("scheduler.duckdb");
-        let conn = duckdb::Connection::open(&db_file).unwrap();
+        let conn = crate::db::open_file(&db_file).unwrap();
         crate::migrations::run(&conn).unwrap();
         let bdir = crate::backup::backups_dir(&db_file);
         let n_backups = || std::fs::read_dir(&bdir).map(|d| d.count()).unwrap_or(0);

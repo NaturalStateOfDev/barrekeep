@@ -357,7 +357,7 @@ mod tests {
     fn backup_of_live_db_reopens_with_data_and_sequences() {
         let dir = tmpdir("copy");
         let db_file = dir.join("scheduler.duckdb");
-        let conn = Connection::open(&db_file).unwrap();
+        let conn = crate::db::open_file(&db_file).unwrap();
         crate::migrations::run(&conn).unwrap();
         for m in ["2026-10", "2026-11", "2026-12"] {
             conn.execute(
@@ -394,7 +394,7 @@ mod tests {
         drop(conn);
 
         // The backup opens on its own and has the data + schema version.
-        let b = Connection::open(&entry.path).unwrap();
+        let b = crate::db::open_file(&entry.path).unwrap();
         let n: i64 = b.query_row("SELECT count(*) FROM proposals", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 3);
         assert_eq!(
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn same_second_backups_get_distinct_names() {
         let dir = tmpdir("dup");
-        let conn = Connection::open(dir.join("scheduler.duckdb")).unwrap();
+        let conn = crate::db::open_file(dir.join("scheduler.duckdb")).unwrap();
         crate::migrations::run(&conn).unwrap();
         let bdir = dir.join("backups");
         let t = at("2026-09-29 10:00:00");
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn failed_backup_leaves_no_partial_and_reports() {
         let dir = tmpdir("fail");
-        let conn = Connection::open(dir.join("scheduler.duckdb")).unwrap();
+        let conn = crate::db::open_file(dir.join("scheduler.duckdb")).unwrap();
         crate::migrations::run(&conn).unwrap();
         // A regular file where the backups dir should be → create_dir_all fails.
         let blocker = dir.join("backups");

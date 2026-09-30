@@ -3340,7 +3340,7 @@ mod tests {
     use crate::sling::{SlingGroup, SlingUser, StudioConfig};
 
     fn conn_with_schema() -> duckdb::Connection {
-        let conn = duckdb::Connection::open_in_memory().expect("open");
+        let conn = crate::db::open_in_memory().expect("open");
         crate::migrations::run(&conn).expect("migrations");
         conn
     }

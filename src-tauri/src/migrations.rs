@@ -138,7 +138,7 @@ pub fn backup_if_pending(
     if !db_file.exists() {
         return Ok(None);
     }
-    let conn = Connection::open(db_file)?;
+    let conn = crate::db::open_file(db_file)?;
     let current = current_version(&conn)?;
     // Flush any WAL replayed at open so the copy is a consistent snapshot.
     let _ = conn.execute("CHECKPOINT", []);
@@ -166,7 +166,7 @@ mod tests {
     use super::*;
 
     fn fresh_db() -> Connection {
-        let conn = Connection::open_in_memory().expect("open");
+        let conn = crate::db::open_in_memory().expect("open");
         run(&conn).expect("migrations");
         // Roster + a generated proposal, i.e. the state where pull #2 used
         // to explode (positions referenced by quals and proposal_shifts).
@@ -290,7 +290,7 @@ mod tests {
     /// _migrations insert) changes nothing.
     #[test]
     fn migration_0012_backfill_is_idempotent() {
-        let conn = Connection::open_in_memory().expect("open");
+        let conn = crate::db::open_in_memory().expect("open");
         // Migrate up to 0011, seed history, then apply 0012.
         conn.execute_batch(
             "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, label VARCHAR NOT NULL,
@@ -424,13 +424,13 @@ mod tests {
 
         // Fresh db, everything pending -> skipped (version 0, nothing to lose).
         {
-            let _conn = Connection::open(&db_file).expect("create file db");
+            let _conn = crate::db::open_file(&db_file).expect("create file db");
         }
         assert!(backup_if_pending(&db_file).unwrap().is_none());
 
         // Fully migrated -> no backup.
         {
-            let conn = Connection::open(&db_file).expect("open file db");
+            let conn = crate::db::open_file(&db_file).expect("open file db");
             run(&conn).expect("migrations");
         }
         assert!(backup_if_pending(&db_file).unwrap().is_none());
@@ -438,7 +438,7 @@ mod tests {
         // Simulate an older install: pretend the last migration is pending.
         let latest = MIGRATIONS.last().unwrap().version;
         {
-            let conn = Connection::open(&db_file).expect("reopen");
+            let conn = crate::db::open_file(&db_file).expect("reopen");
             conn.execute("DELETE FROM _migrations WHERE version = ?", duckdb::params![latest])
                 .unwrap();
         }
@@ -447,7 +447,7 @@ mod tests {
         assert!(backup.to_string_lossy().ends_with(&format!("backup-v{}", latest - 1)));
 
         // The snapshot must itself be an openable database at the old version.
-        let snap = Connection::open(&backup).expect("backup opens");
+        let snap = crate::db::open_file(&backup).expect("backup opens");
         let v: i32 = snap
             .query_row("SELECT max(version) FROM _migrations", [], |r| r.get(0))
             .unwrap();

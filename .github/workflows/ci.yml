@@ -92,12 +92,10 @@ jobs:
         # --release so the test build reuses the release-profile DuckDB/deps
         # artifacts compiled (and cached) above instead of a second debug build.
         #
-        # --test-threads=1: the duckdb crate is built without its `json`
-        # feature, so each test's migrations autoload (download + install)
-        # the json extension into ~/.duckdb/extensions. Parallel tests race
-        # on that install and Windows fails the file move ("Could not move
-        # file: Access is denied"). The suite takes seconds either way.
-        run: cargo test --release --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+        # Runs in parallel: json is compiled in and every connection has
+        # extension autoinstall/autoload off (db.rs), so no test downloads
+        # into ~/.duckdb/extensions (the old install race on Windows).
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml
 
       - name: Clippy
         run: cargo clippy --release --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings

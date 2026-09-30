@@ -788,7 +788,7 @@ mod tests {
     use serde_json::json;
 
     fn conn() -> duckdb::Connection {
-        let c = duckdb::Connection::open_in_memory().expect("open");
+        let c = crate::db::open_in_memory().expect("open");
         crate::migrations::run(&c).expect("migrations");
         c
     }
