@@ -280,7 +280,9 @@ pub fn list_backups(
     })
 }
 
-#[tauri::command]
+// async: COPY FROM DATABASE can take seconds; keep it off the UI thread
+// (Tauri 2 runs plain sync commands on the main thread).
+#[tauri::command(async)]
 pub fn backup_now(
     app: tauri::AppHandle,
     db: State<'_, Db>,
