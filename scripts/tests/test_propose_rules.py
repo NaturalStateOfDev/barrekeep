@@ -86,11 +86,13 @@ assert all(s["sling_user_id"] != lead_uid for s in mon9), \
     "lead overflow must not assign the lead to a slot-blocklisted slot"
 assert all(s["is_dropped"] for s in mon9), [s["generation_reason"] for s in mon9]
 
-# 7. Studio timezone (_USCentral) matches IANA America/Chicago hour by hour,
-#    including fold handling, 2026-2028. zoneinfo is only used here (tests
-#    run on Linux); propose.py stays stdlib-only for Windows.
+# 7. Studio timezone (_USCentral) matches US Central time hour by hour,
+#    including fold handling, 2026-2028. The reference is IANA
+#    America/Chicago via zoneinfo when the tz database is available; stock
+#    Windows Python (CI) has none without the tzdata package, so there the
+#    reference is the published 2026-2028 transition instants. propose.py
+#    itself stays stdlib-only for Windows.
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 _src = (ROOT / "scripts" / "propose.py").read_text()
 _node = next(n for n in ast.parse(_src).body
@@ -99,19 +101,49 @@ _ns = {}
 exec("from datetime import datetime, timedelta, tzinfo\n"
      + ast.get_source_segment(_src, _node), _ns)
 central = _ns["_USCentral"]()
-chicago = ZoneInfo("America/Chicago")
+
+try:
+    from zoneinfo import ZoneInfo
+    chicago = ZoneInfo("America/Chicago")
+except Exception:  # ZoneInfoNotFoundError: no system tz db and no tzdata
+    chicago = None
+
+# (spring-forward, fall-back) in UTC: 2am local -> 08:00Z / 07:00Z.
+_TRANSITIONS = [
+    (datetime(2026, 3, 8, 8, tzinfo=timezone.utc), datetime(2026, 11, 1, 7, tzinfo=timezone.utc)),
+    (datetime(2027, 3, 14, 8, tzinfo=timezone.utc), datetime(2027, 11, 7, 7, tzinfo=timezone.utc)),
+    (datetime(2028, 3, 12, 8, tzinfo=timezone.utc), datetime(2028, 11, 5, 7, tzinfo=timezone.utc)),
+]
+
+
+def ref_utc(t):
+    """(naive wall clock, utcoffset, fold) for UTC instant t."""
+    if chicago is not None:
+        r = t.astimezone(chicago)
+        return r.replace(tzinfo=None), r.utcoffset(), r.fold
+    dst = any(a <= t < b for a, b in _TRANSITIONS)
+    off = timedelta(hours=-5 if dst else -6)
+    fold = int(any(b <= t < b + timedelta(hours=1) for _, b in _TRANSITIONS))
+    return (t + off).replace(tzinfo=None), off, fold
+
+
 t = datetime(2026, 1, 1, tzinfo=timezone.utc)
 while t < datetime(2029, 1, 1, tzinfo=timezone.utc):
-    ours, ref = t.astimezone(central), t.astimezone(chicago)
-    assert ours.replace(tzinfo=None) == ref.replace(tzinfo=None), (t, ours, ref)
-    assert ours.utcoffset() == ref.utcoffset(), (t, ours.utcoffset(), ref.utcoffset())
-    assert ours.fold == ref.fold, (t, ours.fold, ref.fold)
+    ours = t.astimezone(central)
+    wall, off, fold = ref_utc(t)
+    assert ours.replace(tzinfo=None) == wall, (t, ours, wall)
+    assert ours.utcoffset() == off, (t, ours.utcoffset(), off)
+    assert ours.fold == fold, (t, ours.fold, fold)
     t += timedelta(minutes=30)
 # Wall-clock -> offset (what date.replace(hour=...) relies on).
-for y, mo, d, h in [(2026, 11, 1, 0), (2026, 11, 1, 9), (2026, 10, 31, 23),
-                    (2027, 3, 14, 1), (2027, 3, 14, 5), (2027, 3, 13, 9)]:
+for y, mo, d, h, cdt in [(2026, 11, 1, 0, True), (2026, 11, 1, 9, False),
+                         (2026, 10, 31, 23, True), (2027, 3, 14, 1, False),
+                         (2027, 3, 14, 5, True), (2027, 3, 13, 9, False)]:
     w = datetime(y, mo, d, h)
-    assert w.replace(tzinfo=central).utcoffset() == w.replace(tzinfo=chicago).utcoffset(), w
+    want = timedelta(hours=-5 if cdt else -6)
+    if chicago is not None:
+        assert w.replace(tzinfo=chicago).utcoffset() == want, w
+    assert w.replace(tzinfo=central).utcoffset() == want, w
 
 # 8. End to end across fall-back: CST-offset history keeps its wall-clock
 #    slot (09:00, not 08:00), and a CST availability block given in UTC
