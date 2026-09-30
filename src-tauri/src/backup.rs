@@ -6,11 +6,12 @@
 //! KEEP backups are kept; rotation only ever deletes files matching that
 //! exact name pattern — nothing else in the folder is touched.
 //!
-//! The copy is made THROUGH the open connection with DuckDB's own
-//! `ATTACH … ; COPY FROM DATABASE …` rather than by copying the file: on
-//! Windows, copying scheduler.duckdb while the app holds it open fails with a
-//! sharing violation (os error 32) — see migrations::backup_if_pending. The
-//! result is an ordinary DuckDB file that opens on its own.
+//! The backup is an exact copy of scheduler.duckdb. On Windows the file can't
+//! be copied while DuckDB holds it open (sharing violation, os error 32 — see
+//! migrations::backup_if_pending), so under the Db mutex the live connection
+//! is checkpointed, closed, the file copied, and the connection reopened
+//! (see create_backup). The result is an ordinary DuckDB file that opens on
+//! its own.
 //!
 //! A failed backup never blocks startup or a push: it is logged to
 //! barrekeep.log, remembered in BackupState, and surfaced as a warning.
@@ -32,7 +33,6 @@ pub const KEEP: usize = 14;
 const PREFIX: &str = "scheduler-";
 const SUFFIX: &str = ".duckdb";
 const PARTIAL: &str = ".partial";
-const ATTACH_ALIAS: &str = "barrekeep_backup";
 
 /// Last backup failure (cleared by the next success), for the UI warning.
 #[derive(Default)]
@@ -134,22 +134,102 @@ pub fn has_backup_on(dir: &Path, day: NaiveDate, reason: &str) -> bool {
     })
 }
 
-fn sql_string(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 fn remove_partial(partial: &Path) {
     let _ = std::fs::remove_file(partial);
-    let mut wal = partial.as_os_str().to_owned();
-    wal.push(".wal");
-    let _ = std::fs::remove_file(PathBuf::from(wal));
 }
 
-/// Copy the connection's main database into a new backup file in `dir`.
+fn wal_path(db_file: &Path) -> PathBuf {
+    let mut wal = db_file.as_os_str().to_owned();
+    wal.push(".wal");
+    PathBuf::from(wal)
+}
+
+/// Reopen the database file with the app's connection config. A couple of
+/// retries: on Windows an antivirus scanner or the indexer can hold the file
+/// for a moment right after our copy read it.
+fn reopen(db_file: &Path) -> anyhow::Result<Connection> {
+    let mut last = None;
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+        }
+        match crate::db::open_file(db_file) {
+            Ok(c) => return Ok(c),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "could not reopen the database after the backup copy (restart Barrekeep): {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
+/// While alive, the live connection has been closed and an in-memory
+/// placeholder sits in its slot. `restore` (or, as a last resort, Drop —
+/// e.g. on a panic) reopens the real file and swaps it back in.
+struct Released<'a> {
+    slot: &'a mut Connection,
+    db_file: &'a Path,
+    attempted: bool,
+}
+
+impl Released<'_> {
+    fn restore(&mut self) -> anyhow::Result<()> {
+        self.attempted = true;
+        *self.slot = reopen(self.db_file)?;
+        Ok(())
+    }
+}
+
+impl Drop for Released<'_> {
+    fn drop(&mut self) {
+        if self.attempted {
+            return;
+        }
+        if let Err(e) = self.restore() {
+            crate::logging::write_line("backup", &format!("{e:#}"));
+        }
+    }
+}
+
+/// Checkpoint and close `conn` (the connection to `db_file`), leaving an
+/// in-memory placeholder in its place so the file handle is released — on
+/// Windows a file can't be copied while DuckDB holds it open (os error 32,
+/// see migrations::backup_if_pending). The caller MUST hold the only
+/// connection to the file (the app has exactly one: the `Db` mutex).
+fn release<'a>(conn: &'a mut Connection, db_file: &'a Path) -> anyhow::Result<Released<'a>> {
+    // Fold the WAL into the main file so the file alone is the whole DB.
+    conn.execute_batch("CHECKPOINT;")?;
+    let placeholder = crate::db::open_in_memory()?;
+    let live = std::mem::replace(conn, placeholder);
+    if let Err((live, e)) = live.close() {
+        // Still open: put it back untouched.
+        *conn = live;
+        return Err(e.into());
+    }
+    Ok(Released { slot: conn, db_file, attempted: false })
+}
+
+/// Copy the database file into a new backup file in `dir`.
+///
+/// `conn` must be the (only) connection to `db_file`. It is checkpointed and
+/// closed for the duration of the file copy, then reopened — always, even
+/// when the copy fails — so the caller gets its working connection back.
+/// Only if the reopen itself fails (after retries) is the slot left holding
+/// an empty in-memory placeholder; the error then says to restart the app.
+///
+/// An exact file copy rather than `ATTACH … ; COPY FROM DATABASE`: COPY
+/// FROM DATABASE inserts tables in an order that puts child rows before
+/// their parents (availability_blocks before teachers), so on any DB with
+/// FK-referencing rows it fails with "Violates foreign key constraint".
+/// (EXPORT/IMPORT DATABASE has the same ordering hazard.) A file copy also
+/// preserves sequences and every catalog detail byte for byte.
+///
 /// Writes to a `.partial` name and renames on success, so an interrupted
 /// backup never shows up as a real one.
 pub fn create_backup(
-    conn: &Connection,
+    conn: &mut Connection,
+    db_file: &Path,
     dir: &Path,
     reason: &str,
     at: NaiveDateTime,
@@ -167,33 +247,32 @@ pub fn create_backup(
     let partial = dir.join(format!("{name}{PARTIAL}"));
     remove_partial(&partial);
 
-    let main_db: String = conn.query_row("SELECT current_database()", [], |r| r.get(0))?;
-    let partial_str = partial
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("backup path is not valid UTF-8"))?;
-
-    let copy = (|| -> anyhow::Result<()> {
-        conn.execute_batch(&format!("ATTACH {} AS {ATTACH_ALIAS};", sql_string(partial_str)))?;
-        let copied = conn.execute_batch(&format!(
-            "COPY FROM DATABASE \"{}\" TO {ATTACH_ALIAS};",
-            main_db.replace('"', "\"\"")
-        ));
-        // Always detach — even after a failed COPY — so the partial file is
-        // closed before we delete it (Windows won't delete an open file).
-        let detached = conn.execute_batch(&format!("DETACH {ATTACH_ALIAS};"));
-        copied?;
-        detached?;
+    let mut released = release(conn, db_file)?;
+    let copied = (|| -> anyhow::Result<()> {
+        // CHECKPOINT + a clean close leave no WAL. If one is somehow still
+        // there, the main file alone would be missing its contents — refuse
+        // rather than write a backup that silently lacks recent changes.
+        if wal_path(db_file).exists() {
+            anyhow::bail!(
+                "{} still exists after CHECKPOINT; not taking a file-only backup",
+                wal_path(db_file).display()
+            );
+        }
+        std::fs::copy(db_file, &partial)?;
+        std::fs::rename(&partial, &final_path)?;
         Ok(())
     })();
-    if let Err(e) = copy {
-        let _ = conn.execute_batch(&format!("DETACH DATABASE IF EXISTS {ATTACH_ALIAS};"));
+    let reopened = released.restore();
+    drop(released);
+    if let Err(e) = copied {
         remove_partial(&partial);
-        return Err(e);
+        return Err(match reopened {
+            Ok(()) => e,
+            Err(r) => e.context(format!("{r:#}")),
+        });
     }
-    if let Err(e) = std::fs::rename(&partial, &final_path) {
-        remove_partial(&partial);
-        return Err(e.into());
-    }
+    reopened?;
+
     let size_bytes = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
     Ok(BackupEntry {
         path: final_path.display().to_string(),
@@ -209,13 +288,13 @@ pub fn create_backup(
 /// Take a backup + rotate, logging either way and recording the outcome in
 /// `state`. Never panics; returns a user-facing warning on failure.
 pub fn run(
-    conn: &Connection,
+    conn: &mut Connection,
     db_file: &Path,
     reason: &str,
     state: Option<&BackupState>,
 ) -> Result<BackupEntry, String> {
     let dir = backups_dir(db_file);
-    let result = create_backup(conn, &dir, reason, chrono::Local::now().naive_local());
+    let result = create_backup(conn, db_file, &dir, reason, chrono::Local::now().naive_local());
     let outcome = match result {
         Ok(entry) => {
             crate::logging::write_line(
@@ -247,7 +326,7 @@ pub fn run(
 }
 
 /// Startup hook: one "startup" backup per calendar day (local date).
-pub fn run_startup(conn: &Connection, db_file: &Path, state: &BackupState) {
+pub fn run_startup(conn: &mut Connection, db_file: &Path, state: &BackupState) {
     let dir = backups_dir(db_file);
     let today = chrono::Local::now().date_naive();
     if has_backup_on(&dir, today, "startup") {
@@ -280,7 +359,7 @@ pub fn list_backups(
     })
 }
 
-// async: COPY FROM DATABASE can take seconds; keep it off the UI thread
+// async: the file copy can take seconds; keep it off the UI thread
 // (Tauri 2 runs plain sync commands on the main thread).
 #[tauri::command(async)]
 pub fn backup_now(
@@ -289,8 +368,8 @@ pub fn backup_now(
     state: State<'_, BackupState>,
 ) -> Result<BackupEntry, String> {
     let db_file = crate::db::db_path(&app).map_err(|e| e.to_string())?;
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    run(&conn, &db_file, "manual", Some(&state))
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    run(&mut conn, &db_file, "manual", Some(&state))
 }
 
 /// Open the backups folder in the OS file manager (created if missing).
@@ -353,11 +432,142 @@ mod tests {
         }
     }
 
+    /// Every base table with its row count, for comparing a backup with its
+    /// source.
+    fn table_counts(c: &Connection) -> Vec<(String, i64)> {
+        let names: Vec<String> = c
+            .prepare(
+                "SELECT table_name FROM duckdb_tables()
+                 WHERE database_name = current_database() AND NOT temporary
+                 ORDER BY schema_name, table_name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        names
+            .into_iter()
+            .map(|t| {
+                let n: i64 = c
+                    .query_row(&format!("SELECT count(*) FROM \"{t}\""), [], |r| r.get(0))
+                    .unwrap();
+                (t, n)
+            })
+            .collect()
+    }
+
+    fn open_read_only(path: &Path) -> Connection {
+        let cfg = duckdb::Config::default()
+            .enable_autoload_extension(false)
+            .unwrap()
+            .access_mode(duckdb::AccessMode::ReadOnly)
+            .unwrap();
+        Connection::open_with_flags(path, cfg).unwrap()
+    }
+
+    /// A migrated file DB populated like a real one: every FK edge
+    /// (availability_blocks / teacher_qualifications / proposal_shifts →
+    /// teachers, proposal_shifts / pushes → proposals, push_results →
+    /// pushes) has referencing rows.
+    fn populated_db(dir: &Path) -> (PathBuf, Connection) {
+        let db_file = dir.join("scheduler.duckdb");
+        let conn = crate::db::open_file(&db_file).unwrap();
+        crate::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)
+             VALUES (29578230, 'Teacher A', 4, 5), (29578231, 'Teacher B', 3, 4);
+             INSERT INTO positions (sling_position_id, class_name)
+             VALUES (29470407, 'Classic'), (29470408, 'Empower');
+             INSERT INTO teacher_qualifications (sling_user_id, sling_position_id)
+             VALUES (29578230, 29470407), (29578230, 29470408), (29578231, 29470407);
+             INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at)
+             VALUES (29578230, 'availability', TIMESTAMPTZ '2026-11-02 08:00:00-06:00',
+                                               TIMESTAMPTZ '2026-11-02 12:00:00-06:00'),
+                    (29578231, 'leave',        TIMESTAMPTZ '2026-11-03 00:00:00-06:00',
+                                               TIMESTAMPTZ '2026-11-04 00:00:00-06:00');
+             INSERT INTO proposals (target_month, algorithm_version, parameters, is_current)
+             VALUES ('2026-11', 'v9', '{}', TRUE);
+             INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time,
+                 sling_position_id, sling_user_id, generation_reason)
+             SELECT id, DATE '2026-11-02', '09:00', '10:00', 29470407, 29578230, 'rotation'
+             FROM proposals
+             UNION ALL
+             SELECT id, DATE '2026-11-03', '17:30', '18:15', 29470408, 29578231, 'rotation'
+             FROM proposals;
+             INSERT INTO pushes (proposal_id, shifts_attempted) SELECT id, 2 FROM proposals;
+             INSERT INTO push_results (push_id, proposal_shift_id, outcome, sling_shift_id)
+             SELECT p.id, s.id, 'created', CAST(s.id + 1000 AS VARCHAR)
+             FROM pushes p, proposal_shifts s;",
+        )
+        .unwrap();
+        (db_file, conn)
+    }
+
+    /// Regression: `COPY FROM DATABASE` copied child tables before their
+    /// parents, so every backup of a populated DB failed with "Violates
+    /// foreign key constraint because key sling_user_id: … does not exist
+    /// in the referenced table".
+    #[test]
+    fn backup_of_db_with_fk_rows_matches_source() {
+        let dir = tmpdir("fk");
+        let (db_file, mut conn) = populated_db(&dir);
+        let before = table_counts(&conn);
+        for t in ["teachers", "availability_blocks", "teacher_qualifications", "proposal_shifts", "pushes", "push_results"] {
+            assert!(before.iter().any(|(n, c)| n == t && *c > 0), "{t} must have rows");
+        }
+        let version = crate::migrations::current_version(&conn).unwrap();
+
+        let entry = create_backup(&mut conn, &db_file, &backups_dir(&db_file), "manual", at("2026-09-29 10:00:00"))
+            .expect("backup of a DB with FK-referencing rows");
+        drop(conn);
+
+        let b = open_read_only(Path::new(&entry.path));
+        assert_eq!(table_counts(&b), before);
+        assert_eq!(crate::migrations::current_version(&b).unwrap(), version);
+        drop(b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live connection keeps working — and still writes to the real
+    /// file, not the in-memory placeholder — after a backup succeeds and
+    /// after the copy fails.
+    #[test]
+    fn live_connection_survives_success_and_copy_failure() {
+        let dir = tmpdir("live");
+        let (db_file, mut conn) = populated_db(&dir);
+        let bdir = backups_dir(&db_file);
+        let t = at("2026-09-29 11:00:00");
+        let insert = "INSERT INTO proposals (target_month, algorithm_version, parameters) VALUES ('2026-12', 'v9', '{}')";
+
+        create_backup(&mut conn, &db_file, &bdir, "manual", t).unwrap();
+        conn.execute(insert, []).unwrap();
+
+        // Force the copy itself to fail (after the connection was closed):
+        // a directory squats on the next backup's .partial name.
+        let squat = bdir.join(format!("{}{PARTIAL}", backup_file_name(t, "manual2")));
+        std::fs::create_dir_all(&squat).unwrap();
+        let err = create_backup(&mut conn, &db_file, &bdir, "manual", t).unwrap_err();
+        assert!(!format!("{err:#}").contains("reopen"), "{err:#}");
+        assert_eq!(list(&bdir).len(), 1, "a failed backup must not be listed");
+        conn.execute(insert, []).unwrap();
+        let n: i64 = conn.query_row("SELECT count(*) FROM proposals", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 3);
+        drop(conn);
+
+        // Both writes reached the file.
+        let c = open_read_only(&db_file);
+        let n: i64 = c.query_row("SELECT count(*) FROM proposals", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 3);
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn backup_of_live_db_reopens_with_data_and_sequences() {
         let dir = tmpdir("copy");
         let db_file = dir.join("scheduler.duckdb");
-        let conn = crate::db::open_file(&db_file).unwrap();
+        let mut conn = crate::db::open_file(&db_file).unwrap();
         crate::migrations::run(&conn).unwrap();
         for m in ["2026-10", "2026-11", "2026-12"] {
             conn.execute(
@@ -371,20 +581,12 @@ mod tests {
         let max_id: i64 = conn.query_row("SELECT max(id) FROM proposals", [], |r| r.get(0)).unwrap();
 
         let bdir = backups_dir(&db_file);
-        let entry = create_backup(&conn, &bdir, "manual", at("2026-09-29 10:00:00")).unwrap();
+        let entry = create_backup(&mut conn, &db_file, &bdir, "manual", at("2026-09-29 10:00:00")).unwrap();
         assert_eq!(entry.name, "scheduler-20260929-100000-manual.duckdb");
         assert!(entry.size_bytes > 0);
-        // Live connection is still usable and nothing is left attached.
+        // Live connection is still usable.
         let n: i64 = conn.query_row("SELECT count(*) FROM proposals", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 3);
-        let attached: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM duckdb_databases() WHERE database_name = ?",
-                duckdb::params![ATTACH_ALIAS],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(attached, 0);
         // Only the finished backup is left behind: no .partial, no .wal.
         let files: Vec<String> = std::fs::read_dir(&bdir)
             .unwrap()
@@ -419,12 +621,13 @@ mod tests {
     #[test]
     fn same_second_backups_get_distinct_names() {
         let dir = tmpdir("dup");
-        let conn = crate::db::open_file(dir.join("scheduler.duckdb")).unwrap();
+        let db_file = dir.join("scheduler.duckdb");
+        let mut conn = crate::db::open_file(&db_file).unwrap();
         crate::migrations::run(&conn).unwrap();
         let bdir = dir.join("backups");
         let t = at("2026-09-29 10:00:00");
-        let a = create_backup(&conn, &bdir, "manual", t).unwrap();
-        let b = create_backup(&conn, &bdir, "manual", t).unwrap();
+        let a = create_backup(&mut conn, &db_file, &bdir, "manual", t).unwrap();
+        let b = create_backup(&mut conn, &db_file, &bdir, "manual", t).unwrap();
         assert_ne!(a.name, b.name);
         assert_eq!(b.name, "scheduler-20260929-100000-manual2.duckdb");
         assert_eq!(list(&bdir).len(), 2);
@@ -486,13 +689,13 @@ mod tests {
     #[test]
     fn failed_backup_leaves_no_partial_and_reports() {
         let dir = tmpdir("fail");
-        let conn = crate::db::open_file(dir.join("scheduler.duckdb")).unwrap();
+        let mut conn = crate::db::open_file(dir.join("scheduler.duckdb")).unwrap();
         crate::migrations::run(&conn).unwrap();
         // A regular file where the backups dir should be → create_dir_all fails.
         let blocker = dir.join("backups");
         std::fs::write(&blocker, b"not a dir").unwrap();
         let state = BackupState::default();
-        let r = run(&conn, &dir.join("scheduler.duckdb"), "prepush", Some(&state));
+        let r = run(&mut conn, &dir.join("scheduler.duckdb"), "prepush", Some(&state));
         assert!(r.is_err());
         assert!(state.0.lock().unwrap().as_deref().unwrap().contains("prepush backup failed"));
         // Live connection unaffected.

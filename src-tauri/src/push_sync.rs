@@ -1103,7 +1103,7 @@ fn preview(db: State<'_, Db>, token: State<'_, SlingToken>, proposal_id: i64, mo
 /// returned as a warning for the summary; it never blocks the sync. Skipped
 /// when the plan has no network operations.
 fn pre_sync_backup(
-    conn: &duckdb::Connection,
+    conn: &mut duckdb::Connection,
     db_file: anyhow::Result<std::path::PathBuf>,
     plan: &SyncPlan,
     reason: &str,
@@ -1141,13 +1141,13 @@ fn execute(
     let counted_skips = plan.actions.iter().filter(|a| a.kind == ActionKind::Skip).count() as i64;
 
     let backup_warning = {
-        let conn = db.0.lock().map_err(err)?;
+        let mut conn = db.0.lock().map_err(err)?;
         let reason = match mode {
             Mode::Push { .. } => "prepush",
             Mode::Remove => "preremove",
         };
         let backup_state = app.state::<crate::backup::BackupState>();
-        pre_sync_backup(&conn, crate::db::db_path(&app), &plan, reason, Some(&backup_state))
+        pre_sync_backup(&mut conn, crate::db::db_path(&app), &plan, reason, Some(&backup_state))
     };
 
     let push_id: i64 = {
@@ -1704,7 +1704,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let db_file = dir.join("scheduler.duckdb");
-        let conn = crate::db::open_file(&db_file).unwrap();
+        let mut conn = crate::db::open_file(&db_file).unwrap();
         crate::migrations::run(&conn).unwrap();
         let bdir = crate::backup::backups_dir(&db_file);
         let n_backups = || std::fs::read_dir(&bdir).map(|d| d.count()).unwrap_or(0);
@@ -1713,7 +1713,7 @@ mod tests {
         let same = st("2026-11-02", "09:00", "10:00", A, CLASSIC);
         let noop = plan(1, &[spec(10, &same)], &[tr(110, 1, 10, Some(&same))], &[ev(110, &same, "planning")], false);
         assert_eq!(noop.network_ops(), 0);
-        assert_eq!(pre_sync_backup(&conn, Ok(db_file.clone()), &noop, "prepush", None), None);
+        assert_eq!(pre_sync_backup(&mut conn, Ok(db_file.clone()), &noop, "prepush", None), None);
         assert_eq!(n_backups(), 0);
 
         // A create: one backup, tagged with the reason.
@@ -1721,7 +1721,7 @@ mod tests {
         let writes = plan(1, &[spec(12, &new)], &[], &[], false);
         assert!(writes.network_ops() > 0);
         let state = crate::backup::BackupState::default();
-        assert_eq!(pre_sync_backup(&conn, Ok(db_file.clone()), &writes, "prepush", Some(&state)), None);
+        assert_eq!(pre_sync_backup(&mut conn, Ok(db_file.clone()), &writes, "prepush", Some(&state)), None);
         let names: Vec<String> = std::fs::read_dir(&bdir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -1730,7 +1730,7 @@ mod tests {
         assert!(names[0].ends_with("-prepush.duckdb"), "{names:?}");
 
         // No resolvable DB path: a warning, not an error.
-        let w = pre_sync_backup(&conn, Err(anyhow::anyhow!("no app dir")), &writes, "preremove", None);
+        let w = pre_sync_backup(&mut conn, Err(anyhow::anyhow!("no app dir")), &writes, "preremove", None);
         assert!(w.as_deref().is_some_and(|m| m.contains("preremove backup failed")), "{w:?}");
 
         drop(conn);
