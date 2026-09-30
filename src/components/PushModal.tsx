@@ -266,8 +266,8 @@ export function PushModal({ mode, proposalId, draftName, monthLabel, onClose, on
             )}
             {summary.backup_warning && (
               <p className="muted" style={{ color: "var(--color-warning)" }}>
-                Heads up: the pre-push database backup didn't save ({summary.backup_warning}).
-                The push itself was not affected — try Settings → Backups → Back up now.
+                Heads up: the database backup taken before {mode === "push" ? "pushing" : "removing"} didn't
+                save ({summary.backup_warning}). Sling was still updated — try Settings → Backups → Back up now.
               </p>
             )}
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>

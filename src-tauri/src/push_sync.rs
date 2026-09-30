@@ -642,6 +642,8 @@ pub struct SyncSummary {
     pub failed: i64,
     /// Stopped early on an expired token.
     pub aborted: bool,
+    /// Set when the pre-sync database backup failed (the sync still ran).
+    pub backup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1096,6 +1098,26 @@ fn preview(db: State<'_, Db>, token: State<'_, SlingToken>, proposal_id: i64, mo
     view_of(&conn, proposal_id, &month, mode, &plan)
 }
 
+/// Routine database backup before a sync writes anything to Sling (or to
+/// the push audit tables). Non-fatal: a failure is logged by backup::run and
+/// returned as a warning for the summary; it never blocks the sync. Skipped
+/// when the plan has no network operations.
+fn pre_sync_backup(
+    conn: &duckdb::Connection,
+    db_file: anyhow::Result<std::path::PathBuf>,
+    plan: &SyncPlan,
+    reason: &str,
+    state: Option<&crate::backup::BackupState>,
+) -> Option<String> {
+    if plan.network_ops() == 0 {
+        return None;
+    }
+    match db_file {
+        Ok(path) => crate::backup::run(conn, &path, reason, state).err(),
+        Err(e) => Some(format!("{reason} backup failed: {e:#}")),
+    }
+}
+
 fn execute(
     app: tauri::AppHandle,
     db: State<'_, Db>,
@@ -1104,7 +1126,7 @@ fn execute(
     mode: Mode,
     plan_key: &str,
 ) -> Result<SyncSummary, String> {
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
     if let Mode::Push { .. } = mode {
         let conn = db.0.lock().map_err(err)?;
         crate::drafts::ensure_push_candidate(&conn, proposal_id)?;
@@ -1117,6 +1139,16 @@ fn execute(
     }
     let (viewdates, cachedates) = crate::sling::view_cache_dates(&month).map_err(err)?;
     let counted_skips = plan.actions.iter().filter(|a| a.kind == ActionKind::Skip).count() as i64;
+
+    let backup_warning = {
+        let conn = db.0.lock().map_err(err)?;
+        let reason = match mode {
+            Mode::Push { .. } => "prepush",
+            Mode::Remove => "preremove",
+        };
+        let backup_state = app.state::<crate::backup::BackupState>();
+        pre_sync_backup(&conn, crate::db::db_path(&app), &plan, reason, Some(&backup_state))
+    };
 
     let push_id: i64 = {
         let conn = db.0.lock().map_err(err)?;
@@ -1154,6 +1186,7 @@ fn execute(
     }
     let mut summary = result?;
     summary.push_id = push_id;
+    summary.backup_warning = backup_warning;
     if summary.aborted {
         return Err(format!(
             "sling-401: token expired partway through ({} created, {} updated, {} deleted) — log in again and push to finish",
@@ -1660,5 +1693,47 @@ mod tests {
 
         let counts = live_counts(&conn).unwrap();
         assert_eq!((counts.get(&1), counts.get(&2), counts.get(&3)), (None, Some(&1), Some(&1)));
+    }
+
+    #[test]
+    fn pre_sync_backup_runs_only_when_the_plan_writes_and_never_fails_the_sync() {
+        let dir = std::env::temp_dir().join(format!(
+            "barrekeep-presync-backup-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_file = dir.join("scheduler.duckdb");
+        let conn = duckdb::Connection::open(&db_file).unwrap();
+        crate::migrations::run(&conn).unwrap();
+        let bdir = crate::backup::backups_dir(&db_file);
+        let n_backups = || std::fs::read_dir(&bdir).map(|d| d.count()).unwrap_or(0);
+
+        // Nothing to send: no backup.
+        let same = st("2026-11-02", "09:00", "10:00", A, CLASSIC);
+        let noop = plan(1, &[spec(10, &same)], &[tr(110, 1, 10, Some(&same))], &[ev(110, &same, "planning")], false);
+        assert_eq!(noop.network_ops(), 0);
+        assert_eq!(pre_sync_backup(&conn, Ok(db_file.clone()), &noop, "prepush", None), None);
+        assert_eq!(n_backups(), 0);
+
+        // A create: one backup, tagged with the reason.
+        let new = st("2026-11-04", "17:30", "18:15", C, EMPOWER);
+        let writes = plan(1, &[spec(12, &new)], &[], &[], false);
+        assert!(writes.network_ops() > 0);
+        let state = crate::backup::BackupState::default();
+        assert_eq!(pre_sync_backup(&conn, Ok(db_file.clone()), &writes, "prepush", Some(&state)), None);
+        let names: Vec<String> = std::fs::read_dir(&bdir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1);
+        assert!(names[0].ends_with("-prepush.duckdb"), "{names:?}");
+
+        // No resolvable DB path: a warning, not an error.
+        let w = pre_sync_backup(&conn, Err(anyhow::anyhow!("no app dir")), &writes, "preremove", None);
+        assert!(w.as_deref().is_some_and(|m| m.contains("preremove backup failed")), "{w:?}");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -662,6 +662,7 @@ function formatBytes(n: number): string {
 const BACKUP_REASON_LABELS: Record<string, string> = {
   startup: "daily (startup)",
   prepush: "before Sling push",
+  preremove: "before removing from Sling",
   manual: "manual",
 };
 

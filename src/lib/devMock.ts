@@ -323,7 +323,7 @@ async function mockSyncExecute(id: number, mode: "push" | "remove", cleanup: boo
   await sleep(1200);
   const p = findProposal(id);
   const mine = SLING.get(id) ?? new Map<number, MockSlingShift>();
-  const sum = { push_id: 1, created: 0, updated: 0, deleted: 0, adopted: 0, skipped: 0, failed: 0, aborted: false };
+  const sum = { push_id: 1, created: 0, updated: 0, deleted: 0, adopted: 0, skipped: 0, failed: 0, aborted: false, backup_warning: null as string | null };
   for (const a of plan.actions) {
     const row = p.shifts.find((s) => s.id === a.proposal_shift_id);
     if (a.kind === "create" && row) { mine.set(row.id, { row: { ...row }, sling_id: nextSlingId++, status: "planning" }); sum.created++; }

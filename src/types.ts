@@ -294,6 +294,8 @@ export interface SyncSummary {
   skipped: number;
   failed: number;
   aborted: boolean;
+  /** Set when the pre-sync database backup failed (the sync still ran). */
+  backup_warning: string | null;
 }
 
 export interface SyncProgress {
