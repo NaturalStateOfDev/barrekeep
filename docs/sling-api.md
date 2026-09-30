@@ -6,7 +6,9 @@ Everything the team has reverse-engineered about Sling's API by watching DevTool
 
 These are studio-specific and configured at runtime (Settings → Studio
 configuration; stored in the `studio_config` table). They are NOT compiled in.
-Find your values in a Sling DevTools session — see the calendar request URL.
+They are detected automatically from `account/session`, `users/concise` and
+`groups` after a Sling login; otherwise find them in a Sling DevTools session —
+see the calendar request URL.
 
 | Thing | Where it comes from |
 |---|---|

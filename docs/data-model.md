@@ -77,6 +77,13 @@ carries no real org identity and each install configures its own studio at
 runtime (Settings → Studio configuration). Seeded with `0` placeholders; a pull
 errors with a "configure your studio" message until real values are entered.
 
+After a Sling login (and at startup while the row is incomplete) the app
+detects the values from the logged-in user (`auto_detect_studio_config`,
+rule in `src-tauri/src/studio_setup.rs`): an unset config with exactly one
+candidate per field is saved automatically; several candidates open a picker;
+a complete config is never overwritten — a disagreeing login only raises a
+"doesn't match" banner. Writes are compare-before-write.
+
 ```sql
 CREATE TABLE studio_config (
   id               INTEGER PRIMARY KEY,   -- always 1 (singleton)
@@ -437,8 +444,9 @@ position duration/special flags are edited in-app after import.
 
 ### `app_settings`
 
-Tiny key-value store for user preferences that belong in the DB (first key:
-`claude_model`). PK-only, no extra indexes, no FKs — `INSERT OR REPLACE`
+Tiny key-value store for user preferences that belong in the DB (keys include
+`claude_model` and `time_format` = `12h` | `24h`, display-only, default
+`12h`). PK-only, no extra indexes, no FKs — `INSERT OR REPLACE`
 upserts are safe under the DuckDB constraint rules.
 
 ```sql
