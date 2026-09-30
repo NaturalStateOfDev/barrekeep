@@ -2,6 +2,7 @@
 // Keep call signatures here in sync with src-tauri/src/commands.rs.
 
 import { invoke } from "@tauri-apps/api/core";
+import { notifySlingTokenSet } from "./studioSetup";
 import type {
   AlgorithmVersion,
   CandidatePreview,
@@ -25,6 +26,7 @@ import type {
   DraftConflict,
   AvailabilityRefreshResult,
   DiscoveredStudio,
+  StudioDetectOutcome,
   RosterSyncSummary,
   PythonStatus,
   BackupsInfo,
@@ -89,7 +91,11 @@ export const api = {
     invoke<string | null>("get_app_setting", { key }),
   setAppSetting: (key: string, value: string) =>
     invoke<void>("set_app_setting", { key, value }),
-  setSlingToken: (value: string) => invoke<void>("set_sling_token", { value }),
+  setSlingToken: async (value: string) => {
+    await invoke<void>("set_sling_token", { value });
+    // A pasted token is a login too: let StudioSetup re-run detection.
+    if (value.trim()) notifySlingTokenSet();
+  },
   hasSlingToken: () => invoke<boolean>("has_sling_token"),
   setSlingCredentials: (email: string, password: string) =>
     invoke<void>("set_sling_credentials", { email, password }),
@@ -98,6 +104,7 @@ export const api = {
   setStudioConfig: (orgId: number, actingUserId: number, homeLocationId: number) =>
     invoke<void>("set_studio_config", { orgId, actingUserId, homeLocationId }),
   discoverStudioConfig: () => invoke<DiscoveredStudio>("discover_studio_config"),
+  autoDetectStudioConfig: () => invoke<StudioDetectOutcome>("auto_detect_studio_config"),
   openSlingLoginWindow: () => invoke<void>("open_sling_login_window"),
   reviewProposal: (proposalId: number) =>
     invoke<ReviewResult>("review_proposal", { proposalId }),

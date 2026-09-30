@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Trash2, Upload } from "lucide-react";
 import { api } from "../lib/api";
+import { isStudioNotConfigured, openStudioSetup } from "../lib/studioSetup";
 import { groupSyncActions, hasWork, shiftLabel, slingChangeCount, SYNC_KIND_LABEL, updateLabel } from "../lib/sync";
 import { ProgressBar } from "./ui/ProgressBar";
+import { useTimeFormat } from "../lib/timeFormat";
 import type { SyncAction, SyncPreview, SyncProgress, SyncSummary } from "../types";
 
 interface Props {
@@ -19,12 +21,13 @@ interface Props {
 type Phase = "loading" | "preview" | "running" | "done" | "error";
 
 function ActionRow({ a }: { a: SyncAction }) {
+  const { fmt } = useTimeFormat();
   const main = a.after ?? a.before;
   return (
     <div className={`bk-push-row bk-sync-${a.kind}`}>
-      <span>{main ? shiftLabel(main) : `Sling shift ${a.sling_shift_id ?? ""}`}</span>
+      <span>{main ? shiftLabel(main, fmt) : `Sling shift ${a.sling_shift_id ?? ""}`}</span>
       <span className="muted">
-        {a.kind === "update" ? updateLabel(a) : a.from_draft ? `from “${a.from_draft}”` : ""}
+        {a.kind === "update" ? updateLabel(a, fmt) : a.from_draft ? `from “${a.from_draft}”` : ""}
         {a.kind === "skip" && a.reason}
       </span>
     </div>
@@ -283,6 +286,11 @@ export function PushModal({ mode, proposalId, draftName, monthLabel, onClose, on
             <h3>{title}</h3>
             <div className="error">{error}</div>
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+              {error && isStudioNotConfigured(error) && (
+                <button className="btn-primary" onClick={() => { onClose(); openStudioSetup(); }}>
+                  Set up studio
+                </button>
+              )}
               <button className="btn-ghost" onClick={onClose}>
                 Close
               </button>

@@ -1,7 +1,8 @@
 import { CircleCheck, ShieldAlert, X } from "lucide-react";
 import type { DraftConflict } from "../../types";
 import { CONFLICT_KIND_LABEL } from "../../lib/sync";
-import { formatDayShort, formatTimeShort } from "../../lib/dates";
+import { formatDayShort, formatTimesInText } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 
 interface Props {
   conflicts: DraftConflict[];
@@ -13,6 +14,7 @@ interface Props {
 
 /** Result of re-checking a draft against freshly refreshed availability. */
 export function ConflictsPanel({ conflicts, readonly, onOpenDay, onDismiss }: Props) {
+  const tf = useTimeFormat();
   if (conflicts.length === 0) {
     return (
       <div className="bk-conflicts bk-conflicts-clear">
@@ -41,9 +43,9 @@ export function ConflictsPanel({ conflicts, readonly, onOpenDay, onDismiss }: Pr
           <li key={`${c.proposal_shift_id}-${c.kind}-${c.sling_user_id ?? ""}-${i}`}>
             <span className={`bk-conflict-kind bk-conflict-${c.kind}`}>{CONFLICT_KIND_LABEL[c.kind] ?? c.kind}</span>
             <span className="bk-conflict-when">
-              {formatDayShort(c.shift_date)} {formatTimeShort(c.start_time)}
+              {formatDayShort(c.shift_date)} {tf.time(c.start_time)}
             </span>
-            <span className="bk-conflict-msg">{c.message}</span>
+            <span className="bk-conflict-msg">{formatTimesInText(c.message, tf.fmt)}</span>
             <button className="btn-ghost btn-sm" onClick={() => onOpenDay(c.shift_date)} disabled={readonly}>
               Open day
             </button>

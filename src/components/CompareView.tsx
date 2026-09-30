@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { DIFF_KIND_LABEL, defaultComparePair, filterDiff, pct } from "../lib/drafts";
-import { formatDayShort, formatTimeShort } from "../lib/dates";
+import { formatDayShort, formatSlotLabel } from "../lib/dates";
+import { useTimeFormat } from "../lib/timeFormat";
 import { LoadingBlock } from "./ui/LoadingBlock";
 import type { ProposalDiff, ProposalSummary, TeacherStats } from "../types";
 
@@ -22,6 +23,7 @@ function draftLabel(d: ProposalSummary): string {
  *  and per-teacher consistency (distinct weekday+time slots). */
 export function CompareView({ drafts, viewingId, onOpenDraft }: Props) {
   const initial = defaultComparePair(drafts, viewingId);
+  const tf = useTimeFormat();
   const [a, setA] = useState<number | null>(initial?.[0] ?? null);
   const [b, setB] = useState<number | null>(initial?.[1] ?? null);
   const [diff, setDiff] = useState<ProposalDiff | null>(null);
@@ -165,7 +167,7 @@ export function CompareView({ drafts, viewingId, onOpenDraft }: Props) {
                   {rows.map((c, i) => (
                     <tr key={`${c.date}-${c.start}-${i}`}>
                       <td>{formatDayShort(c.date)}</td>
-                      <td>{formatTimeShort(c.start)}</td>
+                      <td>{tf.time(c.start)}</td>
                       <td>{c.class_a ? `${c.class_a} · ${c.teacher_a ?? "—"}` : <span className="muted">—</span>}</td>
                       <td>{c.class_b ? `${c.class_b} · ${c.teacher_b ?? "—"}` : <span className="muted">—</span>}</td>
                       <td className="muted">{DIFF_KIND_LABEL[c.kind] ?? c.kind}</td>
@@ -234,6 +236,7 @@ export function CompareView({ drafts, viewingId, onOpenDraft }: Props) {
 }
 
 function StatCells({ s }: { s: TeacherStats | null }) {
+  const tf = useTimeFormat();
   if (!s) {
     return (
       <>
@@ -248,7 +251,7 @@ function StatCells({ s }: { s: TeacherStats | null }) {
       <td>{s.classes}</td>
       <td>{s.distinct_slots}</td>
       <td>
-        {s.top_slot} <span className="muted">({pct(s.top_slot_share)})</span>
+        {formatSlotLabel(s.top_slot, tf.fmt)} <span className="muted">({pct(s.top_slot_share)})</span>
       </td>
     </>
   );

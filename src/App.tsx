@@ -2,6 +2,8 @@ import { useState } from "react";
 import { CalendarDays, Users, Shapes, Settings } from "lucide-react";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { BackupWarningBanner } from "./components/BackupWarningBanner";
+import { StudioSetup } from "./components/StudioSetup";
+import { TimeFormatProvider } from "./lib/timeFormat";
 import { ProposalsScreen } from "./screens/ProposalsScreen";
 import { TeachersScreen } from "./screens/TeachersScreen";
 import { PositionsScreen } from "./screens/PositionsScreen";
@@ -20,36 +22,39 @@ export function App() {
   const goSettings = () => setView("settings");
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="wordmark">
-          barre<em>keep</em>
-        </div>
-        {NAV.map(([id, Icon, label]) => (
+    <TimeFormatProvider>
+      <div className="app">
+        <aside className="sidebar">
+          <div className="wordmark">
+            barre<em>keep</em>
+          </div>
+          {NAV.map(([id, Icon, label]) => (
+            <button
+              key={id}
+              className={`nav-item ${view === id ? "active" : ""}`}
+              onClick={() => setView(id)}
+            >
+              <Icon size={18} /> {label}
+            </button>
+          ))}
           <button
-            key={id}
-            className={`nav-item ${view === id ? "active" : ""}`}
-            onClick={() => setView(id)}
+            className={`nav-item ${view === "settings" ? "active" : ""}`}
+            onClick={goSettings}
+            style={{ marginTop: "auto" }}
           >
-            <Icon size={18} /> {label}
+            <Settings size={18} /> Settings
           </button>
-        ))}
-        <button
-          className={`nav-item ${view === "settings" ? "active" : ""}`}
-          onClick={goSettings}
-          style={{ marginTop: "auto" }}
-        >
-          <Settings size={18} /> Settings
-        </button>
-      </aside>
-      <main className="main">
-        <UpdateBanner />
-        <BackupWarningBanner onGoSettings={goSettings} />
-        {view === "proposals" && <ProposalsScreen onGoSettings={goSettings} />}
-        {view === "teachers" && <TeachersScreen onGoSettings={goSettings} />}
-        {view === "positions" && <PositionsScreen />}
-        {view === "settings" && <SettingsScreen />}
-      </main>
-    </div>
+        </aside>
+        <main className="main">
+          <UpdateBanner />
+          <BackupWarningBanner onGoSettings={goSettings} />
+          <StudioSetup onGoSettings={goSettings} />
+          {view === "proposals" && <ProposalsScreen onGoSettings={goSettings} />}
+          {view === "teachers" && <TeachersScreen onGoSettings={goSettings} />}
+          {view === "positions" && <PositionsScreen />}
+          {view === "settings" && <SettingsScreen />}
+        </main>
+      </div>
+    </TimeFormatProvider>
   );
 }

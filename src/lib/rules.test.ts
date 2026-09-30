@@ -26,6 +26,12 @@ describe("ruleLines", () => {
       "Alex — never Reform (swaps)",
       "Alex — variety penalty ×2",
       "Variety penalty per class: 0.5",
+      "Saturday 8:00 AM class moves to 8:30 AM",
+    ]);
+  });
+
+  it("keeps rule times as HH:MM in 24-hour mode", () => {
+    expect(ruleLines({ sat_time_shifts: { "08:00": "08:30" } }, teacher, "24h")).toEqual([
       "Saturday 08:00 class moves to 08:30",
     ]);
   });
@@ -54,7 +60,7 @@ describe("ruleDiffLabel", () => {
         },
         teacher,
       ),
-    ).toBe("Alex — never Wed 05:45");
+    ).toBe("Alex — never Wed 5:45 AM");
   });
 });
 

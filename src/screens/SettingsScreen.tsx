@@ -12,7 +12,9 @@ import {
   type Update,
   type DownloadProgress,
 } from "../lib/updater";
-import type { BackupsInfo, DbInfo, DiscoveredLocation, PythonStatus } from "../types";
+import type { BackupsInfo, DbInfo, PythonStatus } from "../types";
+import { onStudioConfigChanged, openStudioSetup } from "../lib/studioSetup";
+import { useTimeFormat } from "../lib/timeFormat";
 
 function StatusValue({ state, okLabel, warnLabel, mutedLabel }: {
   state: boolean | null;
@@ -33,6 +35,7 @@ export function SettingsScreen() {
       <div style={{ display: "flex", flexDirection: "column", maxWidth: 620 }}>
         <SlingTokenCard />
         <StudioConfigCard />
+        <DisplayCard />
         <AnthropicKeyCard />
         <SlingCredentialsCard />
         <UpdatesCard />
@@ -126,9 +129,6 @@ function StudioConfigCard() {
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [locations, setLocations] = useState<DiscoveredLocation[]>([]);
-  const [detecting, setDetecting] = useState(false);
-  const [detectMsg, setDetectMsg] = useState<string | null>(null);
 
   const refresh = () =>
     api.getStudioConfig().then((c) => {
@@ -138,40 +138,9 @@ function StudioConfigCard() {
       setLoaded(true);
     }).catch((e) => setError(String(e)));
 
-  const detect = async () => {
-    setDetecting(true);
-    setDetectMsg(null);
-    setError(null);
-    try {
-      const d = await api.discoverStudioConfig();
-      setOrgId(String(d.org_id));
-      setActingUserId(String(d.acting_user_id));
-      setLocations(d.locations);
-      if (d.locations.length === 1) setHomeLocationId(String(d.locations[0].id));
-      setDetectMsg(
-        `Detected ${d.acting_user_name || "your"} studio (org ${d.org_id}). ` +
-        `Pick the home location and click Save.`,
-      );
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("sling-401")) {
-        setDetectMsg("Sling token expired — use “Log in to Sling” above to refresh, then Detect again.");
-      } else if (msg.includes("no Sling token")) {
-        setDetectMsg("Log in to Sling first (card above), then Detect.");
-      } else {
-        setDetectMsg("Couldn't auto-detect everything — enter the IDs manually below.");
-      }
-    } finally {
-      setDetecting(false);
-    }
-  };
-
   useEffect(() => { refresh(); }, []);
-
-  useEffect(() => {
-    const p = listen<void>("sling-token-saved", () => { detect(); });
-    return () => { p.then((un) => un()); };
-  }, []);
+  // Auto-detection (App-level <StudioSetup>) saves here too — reload.
+  useEffect(() => onStudioConfigChanged(() => { refresh(); }), []);
 
   const configured = loaded && Number(orgId) > 0 && Number(homeLocationId) > 0;
 
@@ -198,7 +167,8 @@ function StudioConfigCard() {
     <div className="card">
       <strong>Studio configuration</strong>
       <p className="muted" style={{ marginTop: 4 }}>
-        Your studio's Sling identifiers. Required before pulling. Find them in a
+        Your studio's Sling identifiers. Required before pulling. Detected
+        automatically when you log in to Sling; otherwise find them in a
         Sling DevTools session: the <code>org id</code> and admin{" "}
         <code>acting-user id</code> appear in the calendar request URL, and the{" "}
         <code>home location id</code> is your studio's location (other locations
@@ -217,27 +187,48 @@ function StudioConfigCard() {
         <Field label="Acting-user id (admin calendar feed)">
           <input type="number" min={0} value={actingUserId} onChange={(e) => setActingUserId(e.target.value)} placeholder="0" style={mono} />
         </Field>
-        <Field label={locations.length > 0 ? "Home location" : "Home location id"}>
-          {locations.length > 0 ? (
-            <select value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} style={mono}>
-              <option value="">— pick your studio —</option>
-              {locations.map((l) => (
-                <option key={l.id} value={String(l.id)}>{l.name} ({l.id})</option>
-              ))}
-            </select>
-          ) : (
-            <input type="number" min={0} value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} placeholder="0" style={mono} />
-          )}
+        <Field label="Home location id">
+          <input type="number" min={0} value={homeLocationId} onChange={(e) => setHomeLocationId(e.target.value)} placeholder="0" style={mono} />
         </Field>
       </div>
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn-primary" onClick={onSave}>Save</button>
-        <button className="btn-ghost" onClick={detect} disabled={detecting}>
-          <Radar size={15} /> {detecting ? "Detecting…" : "Detect from Sling"}
+        <button className="btn-ghost" onClick={openStudioSetup}>
+          <Radar size={15} /> Detect from Sling
         </button>
       </div>
-      {detectMsg && <div className="muted" style={{ marginTop: 8 }}>{detectMsg}</div>}
       {status && <div className="ok">{status}</div>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+function DisplayCard() {
+  const tf = useTimeFormat();
+  const [error, setError] = useState<string | null>(null);
+  const onToggle = async (use24: boolean) => {
+    setError(null);
+    try {
+      await tf.setFormat(use24 ? "24h" : "12h");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  return (
+    <div className="card">
+      <strong>Display</strong>
+      <label className="row" style={{ marginTop: 12, gap: 8, cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          checked={tf.fmt === "24h"}
+          onChange={(e) => onToggle(e.target.checked)}
+        />
+        Use 24-hour time
+      </label>
+      <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+        Class times show as {tf.time("17:30")} ({tf.range("09:45", "10:35")}). Display only —
+        Sling, rules and Claude always use 24-hour times.
+      </p>
       {error && <div className="error">{error}</div>}
     </div>
   );

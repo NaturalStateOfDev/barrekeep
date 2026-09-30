@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { ruleLines } from "../../lib/rules";
+import { useTimeFormat } from "../../lib/timeFormat";
 import type { AlgorithmVersion, Teacher } from "../../types";
 
 interface Props {
@@ -22,6 +23,7 @@ function scriptBadge(v: AlgorithmVersion): string {
  *  forward (including to the v9 baseline), plus manual script deletion. */
 export function AlgorithmCard({ refreshToken, teachers }: Props) {
   const [versions, setVersions] = useState<AlgorithmVersion[] | null>(null);
+  const tf = useTimeFormat();
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -82,7 +84,7 @@ export function AlgorithmCard({ refreshToken, teachers }: Props) {
     </button>
   );
 
-  const lines = active ? ruleLines(active.rules, teacherName) : [];
+  const lines = active ? ruleLines(active.rules, teacherName, tf.fmt) : [];
 
   return (
     <div className="card">

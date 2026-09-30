@@ -24,6 +24,7 @@ mod secrets;
 mod seed;
 mod sling;
 mod sling_login;
+mod studio_setup;
 mod textdiff;
 
 use std::sync::Mutex;
@@ -98,6 +99,7 @@ pub fn run() {
             commands::set_studio_config,
             commands::open_sling_login_window,
             commands::discover_studio_config,
+            commands::auto_detect_studio_config,
             commands::review_proposal,
             commands::claude_edit_proposal,
             commands::claude_draft_code_change,

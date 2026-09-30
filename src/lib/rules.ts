@@ -2,6 +2,7 @@
 // src-tauri/src/algorithm.rs) and their diffs, plus unified-diff parsing
 // for the script diff view.
 
+import { formatTime, type TimeFormat } from "./dates";
 import type { CandidateValidation, ReviewSuggestion, RuleDiffEntry, SlotChange } from "../types";
 
 /** The editor instruction that turns a Claude-review suggestion into a rule
@@ -23,24 +24,27 @@ export function ruleEntryLabel(
   identity: string,
   value: any,
   teacher: TeacherName,
+  /** Display format for rule times (rules themselves stay "HH:MM"). */
+  fmt?: TimeFormat,
 ): string {
+  const t = (hhmm: unknown) => (typeof hhmm === "string" ? formatTime(hhmm, fmt) : String(hhmm));
   switch (key) {
     case "teacher_class_blocklist":
       return `${teacher(value?.sling_user_id)} — never ${value?.class_name}${value?.reason ? ` (${value.reason})` : ""}`;
     case "teacher_slot_blocklist":
-      return `${teacher(value?.sling_user_id)} — never ${value?.weekday} ${value?.time}${value?.reason ? ` (${value.reason})` : ""}`;
+      return `${teacher(value?.sling_user_id)} — never ${value?.weekday} ${t(value?.time)}${value?.reason ? ` (${value.reason})` : ""}`;
     case "priority_slots":
-      return `${teacher(value?.sling_user_id)} — preferred for ${value?.weekday} ${value?.time}`;
+      return `${teacher(value?.sling_user_id)} — preferred for ${value?.weekday} ${t(value?.time)}`;
     case "slot_class_overrides":
-      return `${value?.weekday} ${value?.time} is always ${value?.class_name}`;
+      return `${value?.weekday} ${t(value?.time)} is always ${value?.class_name}`;
     case "variety_penalty_multiplier":
       return `${teacher(identity)} — variety penalty ×${value}`;
     case "variety_penalty_per_class":
       return `Variety penalty per class: ${value}`;
     case "sat_time_shifts":
-      return `Saturday ${identity} class moves to ${value}`;
+      return `Saturday ${t(identity)} class moves to ${t(value)}`;
     case "sun_time_shifts":
-      return `Sunday ${identity} class moves to ${value}`;
+      return `Sunday ${t(identity)} class moves to ${t(value)}`;
     case "slot_continuity_bonus":
       return `Keep teachers on the same weekday+time: bonus ${value} per repeat`;
     default:
@@ -49,27 +53,27 @@ export function ruleEntryLabel(
 }
 
 /** Every standing rule in a rule set, one line each. */
-export function ruleLines(rules: Record<string, unknown>, teacher: TeacherName): string[] {
+export function ruleLines(rules: Record<string, unknown>, teacher: TeacherName, fmt?: TimeFormat): string[] {
   const out: string[] = [];
   for (const [key, value] of Object.entries(rules ?? {})) {
     if (Array.isArray(value)) {
-      for (const item of value) out.push(ruleEntryLabel(key, "", item, teacher));
+      for (const item of value) out.push(ruleEntryLabel(key, "", item, teacher, fmt));
     } else if (value && typeof value === "object") {
       for (const [id, v] of Object.entries(value as Record<string, unknown>))
-        out.push(ruleEntryLabel(key, id, v, teacher));
+        out.push(ruleEntryLabel(key, id, v, teacher, fmt));
     } else if (value != null) {
-      out.push(ruleEntryLabel(key, "", value, teacher));
+      out.push(ruleEntryLabel(key, "", value, teacher, fmt));
     }
   }
   return out;
 }
 
 /** One line describing a rules-diff entry. */
-export function ruleDiffLabel(e: RuleDiffEntry, teacher: TeacherName): string {
+export function ruleDiffLabel(e: RuleDiffEntry, teacher: TeacherName, fmt?: TimeFormat): string {
   if (e.kind === "changed") {
-    return `${ruleEntryLabel(e.rule_key, e.identity, e.before, teacher)} → ${ruleEntryLabel(e.rule_key, e.identity, e.after, teacher)}`;
+    return `${ruleEntryLabel(e.rule_key, e.identity, e.before, teacher, fmt)} → ${ruleEntryLabel(e.rule_key, e.identity, e.after, teacher, fmt)}`;
   }
-  return ruleEntryLabel(e.rule_key, e.identity, e.kind === "removed" ? e.before : e.after, teacher);
+  return ruleEntryLabel(e.rule_key, e.identity, e.kind === "removed" ? e.before : e.after, teacher, fmt);
 }
 
 /** Slots that appear/disappear with no time-shift rule change explaining them. */

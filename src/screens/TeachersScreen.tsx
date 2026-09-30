@@ -5,6 +5,7 @@ import { PageHead } from "../components/ui/PageHead";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Avatar } from "../components/ui/Avatar";
 import type { Teacher } from "../types";
+import { isStudioNotConfigured, openStudioSetup } from "../lib/studioSetup";
 
 export function TeachersScreen({ onGoSettings }: { onGoSettings: () => void }) {
   const [teachers, setTeachers] = useState<Teacher[] | null>(null);
@@ -27,7 +28,10 @@ export function TeachersScreen({ onGoSettings }: { onGoSettings: () => void }) {
     } catch (e) {
       const msg = String(e);
       if (msg.includes("sling-401")) setSyncMsg("Sling token expired — log in again (Settings), then Refresh.");
-      else if (msg.includes("not configured")) setSyncMsg("Set Studio configuration in Settings first, then Refresh.");
+      else if (isStudioNotConfigured(msg)) {
+        setSyncMsg("Your studio isn't set up yet — pick it in the setup dialog, then Refresh.");
+        openStudioSetup();
+      }
       else setSyncMsg(`Refresh failed: ${msg}`);
     } finally { setSyncing(false); }
   };
