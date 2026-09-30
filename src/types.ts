@@ -358,7 +358,19 @@ export interface DiscoveredStudio {
   org_id: number;
   acting_user_id: number;
   acting_user_name: string;
+  /** Human-readable org name when Sling's session reports one ("" otherwise). */
+  org_name: string;
   locations: DiscoveredLocation[];
+}
+
+/** Result of auto_detect_studio_config (see src-tauri/src/studio_setup.rs). */
+export interface StudioDetectOutcome {
+  decision: "autosaved" | "ask" | "ok" | "mismatch";
+  discovered: DiscoveredStudio;
+  /** Config after the call (includes an autosave). */
+  current: StudioConfig;
+  /** Mismatch explanations, one per disagreeing field. */
+  reasons: string[];
 }
 
 export interface ExternalShiftRow {

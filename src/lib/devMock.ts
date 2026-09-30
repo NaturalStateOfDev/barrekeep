@@ -468,6 +468,16 @@ let hasAnthropicKey = true;
 let hasSlingCredentials = false;
 let studioConfig = { org_id: 41822, acting_user_id: 1930221, home_location_id: 901 };
 const APP_SETTINGS = new Map<string, string>();
+const MOCK_DISCOVERED = {
+  org_id: 41822,
+  acting_user_id: 1930221,
+  acting_user_name: "Lead teacher",
+  org_name: "Demo Barre Co.",
+  locations: [
+    { id: 901, name: "Downtown Studio" },
+    { id: 902, name: "Uptown Studio" },
+  ],
+};
 
 const ALGO_VERSIONS: AlgorithmVersion[] = [
   {
@@ -617,15 +627,26 @@ export function installDevMock() {
         return null;
       case "discover_studio_config":
         await sleep(400);
-        return {
-          org_id: 41822,
-          acting_user_id: 1930221,
-          acting_user_name: "Lead teacher",
-          locations: [
-            { id: 901, name: "Downtown Studio" },
-            { id: 902, name: "Uptown Studio" },
-          ],
-        };
+        return MOCK_DISCOVERED;
+      case "auto_detect_studio_config": {
+        // Mirrors studio_setup::decide in src-tauri/src/studio_setup.rs.
+        await sleep(400);
+        const d = MOCK_DISCOVERED;
+        const c = studioConfig;
+        const complete = c.org_id > 0 && c.acting_user_id > 0 && c.home_location_id > 0;
+        if (!complete) {
+          if (d.locations.length === 1) {
+            studioConfig = { org_id: d.org_id, acting_user_id: d.acting_user_id, home_location_id: d.locations[0].id };
+            return { decision: "autosaved", discovered: d, current: studioConfig, reasons: [] };
+          }
+          return { decision: "ask", discovered: d, current: c, reasons: [] };
+        }
+        const reasons: string[] = [];
+        if (c.org_id !== d.org_id) reasons.push(`The Sling login belongs to a different organization than the configured one (org ${c.org_id}).`);
+        if (c.acting_user_id !== d.acting_user_id) reasons.push(`The logged-in Sling user isn't the configured acting user (${c.acting_user_id}).`);
+        if (!d.locations.some((l) => l.id === c.home_location_id)) reasons.push(`The logged-in Sling user can't see the configured home location (${c.home_location_id}).`);
+        return { decision: reasons.length ? "mismatch" : "ok", discovered: d, current: c, reasons };
+      }
       case "open_sling_login_window":
         return null;
 

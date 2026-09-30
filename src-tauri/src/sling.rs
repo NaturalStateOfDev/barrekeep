@@ -103,6 +103,8 @@ pub struct DiscoveredStudio {
     pub org_id: i64,
     pub acting_user_id: i64,
     pub acting_user_name: String,
+    /// Human-readable org name when the session response carries one ("" otherwise).
+    pub org_name: String,
     pub locations: Vec<DiscoveredLocation>,
 }
 
@@ -125,6 +127,17 @@ pub fn parse_session(v: &serde_json::Value) -> Result<(i64, String, Option<i64>)
         .or_else(|| user.get("orgId").and_then(json_i64))
         .or_else(|| user.get("org").and_then(|o| o.get("id")).and_then(json_i64));
     Ok((uid, name, org))
+}
+
+/// The org's display name from an account/session response, if present.
+/// Only trusted when the response's org id matches `org_id`.
+pub fn session_org_name(v: &serde_json::Value, org_id: i64) -> String {
+    ["org", "organization"].iter()
+        .filter_map(|k| v.get(*k))
+        .find(|o| o.get("id").and_then(json_i64) == Some(org_id))
+        .and_then(|o| o.get("name").and_then(|n| n.as_str()))
+        .unwrap_or("")
+        .to_string()
 }
 
 /// A single shift to be created or verified against Sling.
@@ -806,8 +819,9 @@ pub fn discover_studio(token: &str, org_hint: Option<i64>) -> Result<DiscoveredS
         .iter().filter_map(|g| serde_json::from_value(g.clone()).ok()).collect();
     let loc_names = location_name_by_id(&groups);
 
+    let org_name = session_org_name(&session, org_id);
     Ok(DiscoveredStudio {
-        org_id, acting_user_id, acting_user_name,
+        org_id, acting_user_id, acting_user_name, org_name,
         locations: select_locations(&group_ids, &loc_names),
     })
 }
@@ -1095,6 +1109,14 @@ mod tests {
         let (uid2, _n2, org2) = parse_session(&v2).unwrap();
         assert_eq!(uid2, 42);
         assert_eq!(org2, Some(1193381));
+    }
+
+    #[test]
+    fn session_org_name_requires_matching_id() {
+        let v = serde_json::json!({ "org": { "id": "77", "name": "Barre Studio" }, "user": { "id": 1 } });
+        assert_eq!(session_org_name(&v, 77), "Barre Studio");
+        assert_eq!(session_org_name(&v, 78), "");
+        assert_eq!(session_org_name(&serde_json::json!({}), 77), "");
     }
 
     #[test]

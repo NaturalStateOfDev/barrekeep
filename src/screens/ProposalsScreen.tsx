@@ -34,6 +34,7 @@ import { computeKpis } from "../lib/kpis";
 import { codifyInstruction } from "../lib/rules";
 import { draftsForMonth, pushDraftFor, representativeDraft } from "../lib/drafts";
 import { pushLabel } from "../lib/sync";
+import { isStudioNotConfigured, openStudioSetup } from "../lib/studioSetup";
 import {
   monthWindow,
   isReadOnlyMonth,
@@ -487,7 +488,17 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
 
       {pullResult && <div className="ok" style={{ margin: "0 0 14px" }}>{pullResult}</div>}
       {lastResult && <div className="ok" style={{ margin: "0 0 14px" }}>{lastResult}</div>}
-      {error && <div className="error" style={{ margin: "0 0 14px" }}>{error}</div>}
+      {error && (
+        <div className="error" style={{ margin: "0 0 14px" }}>
+          {error}
+          {isStudioNotConfigured(error) && (
+            <>
+              {" "}
+              <button className="btn-link" onClick={openStudioSetup}>Set up studio</button>
+            </>
+          )}
+        </div>
+      )}
 
       {mode === "new" ? (
         <div className="card">

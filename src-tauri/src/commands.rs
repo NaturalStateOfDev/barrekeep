@@ -97,15 +97,15 @@ pub(crate) fn load_studio_config_checked(conn: &duckdb::Connection) -> Result<sl
     let cfg = load_studio_config(conn)?;
     if cfg.org_id == 0 || cfg.home_location_id == 0 {
         return Err(
-            "Studio not configured — set your Sling org, acting-user, and location IDs in \
-             Settings → Studio configuration first."
+            "Studio not configured — use “Set up studio” (it detects your org and \
+             location from your Sling login) or enter the IDs in Settings → Studio configuration first."
                 .to_string(),
         );
     }
     Ok(cfg)
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StudioConfigDto {
     pub org_id: i64,
     pub acting_user_id: i64,
@@ -134,6 +134,24 @@ pub fn set_studio_config(
         return Err("IDs must be non-negative".to_string());
     }
     let conn = db.0.lock().map_err(err)?;
+    write_studio_config(&conn, org_id, acting_user_id, home_location_id)
+}
+
+/// Update the singleton studio_config row. Compare-before-write (see the
+/// DuckDB UPDATE gotcha in CLAUDE.md): an unchanged row is not touched.
+fn write_studio_config(
+    conn: &duckdb::Connection,
+    org_id: i64,
+    acting_user_id: i64,
+    home_location_id: i64,
+) -> Result<(), String> {
+    let cur = load_studio_config(conn)?;
+    if cur.org_id == org_id
+        && cur.acting_user_id == acting_user_id
+        && cur.home_location_id == home_location_id
+    {
+        return Ok(());
+    }
     conn.execute(
         "UPDATE studio_config
          SET org_id = ?, acting_user_id = ?, home_location_id = ?, updated_at = now()
@@ -2695,8 +2713,8 @@ pub fn pull_month_from_sling(
     };
     if cfg.org_id == 0 || cfg.home_location_id == 0 {
         return Err(
-            "Studio not configured — set your Sling org, acting-user, and location IDs in \
-             Settings → Studio configuration before pulling."
+            "Studio not configured — use “Set up studio” (it detects your org and \
+             location from your Sling login) or enter the IDs in Settings → Studio configuration before pulling."
                 .to_string(),
         );
     }
@@ -2777,8 +2795,8 @@ pub(crate) fn build_specs_for_proposal(
     let studio_cfg = load_studio_config(conn)?;
     if studio_cfg.org_id == 0 || studio_cfg.home_location_id == 0 {
         return Err(
-            "Studio not configured — set your Sling org, acting-user, and location IDs in \
-             Settings → Studio configuration before pushing."
+            "Studio not configured — use “Set up studio” (it detects your org and \
+             location from your Sling login) or enter the IDs in Settings → Studio configuration before pushing."
                 .to_string(),
         );
     }
@@ -2979,6 +2997,47 @@ pub fn discover_studio_config(
     crate::sling::discover_studio(&token_str, hint).map_err(err)
 }
 
+/// Detect the studio from the logged-in Sling user and apply the setup rule
+/// (studio_setup::decide): autosave when the config is unset and detection is
+/// unambiguous; otherwise report "ask" / "ok" / "mismatch" for the frontend.
+/// Never overwrites a complete config. Runs off the UI thread.
+#[tauri::command(async)]
+pub fn auto_detect_studio_config(
+    db: State<'_, Db>,
+    token: State<'_, SlingToken>,
+    org_hint: State<'_, SlingOrgHint>,
+) -> Result<crate::studio_setup::DetectOutcome, String> {
+    use crate::studio_setup::{decide, Candidates, Decision, DetectOutcome};
+    let token_str = {
+        let t = token.0.lock().map_err(err)?;
+        t.clone().ok_or_else(|| "no Sling token — log in to Sling first".to_string())?
+    };
+    let hint = { *org_hint.0.lock().map_err(err)? };
+    // Network first, without holding the DB lock.
+    let discovered = crate::sling::discover_studio(&token_str, hint).map_err(err)?;
+    let conn = db.0.lock().map_err(err)?;
+    let cfg = load_studio_config(&conn)?;
+    let decision = decide(&cfg, &Candidates::from_discovered(&discovered));
+    if let Decision::AutoSave { org_id, acting_user_id, home_location_id } = decision {
+        write_studio_config(&conn, org_id, acting_user_id, home_location_id)?;
+    }
+    let after = load_studio_config(&conn)?;
+    let reasons = match &decision {
+        Decision::Mismatch { reasons } => reasons.clone(),
+        _ => Vec::new(),
+    };
+    Ok(DetectOutcome {
+        decision: decision.kind(),
+        discovered,
+        current: StudioConfigDto {
+            org_id: after.org_id,
+            acting_user_id: after.acting_user_id,
+            home_location_id: after.home_location_id,
+        },
+        reasons,
+    })
+}
+
 // ============================================================
 // Standalone roster refresh — sync roster without pulling a month
 // ============================================================
@@ -2997,8 +3056,8 @@ pub fn refresh_roster_from_sling(
         load_studio_config(&conn)?
     };
     if cfg.org_id == 0 || cfg.home_location_id == 0 {
-        return Err("Studio not configured — set your Sling org, acting-user, and location IDs in \
-                    Settings → Studio configuration before refreshing the roster.".to_string());
+        return Err("Studio not configured — use “Set up studio” (it detects your org and \
+                    location from your Sling login) or enter the IDs in Settings → Studio configuration before refreshing the roster.".to_string());
     }
     let users = crate::sling::fetch_users(&token_str).map_err(err)?;
     let groups = crate::sling::fetch_groups(&token_str).map_err(err)?;

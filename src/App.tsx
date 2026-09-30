@@ -2,6 +2,7 @@ import { useState } from "react";
 import { CalendarDays, Users, Shapes, Settings } from "lucide-react";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { BackupWarningBanner } from "./components/BackupWarningBanner";
+import { StudioSetup } from "./components/StudioSetup";
 import { ProposalsScreen } from "./screens/ProposalsScreen";
 import { TeachersScreen } from "./screens/TeachersScreen";
 import { PositionsScreen } from "./screens/PositionsScreen";
@@ -45,6 +46,7 @@ export function App() {
       <main className="main">
         <UpdateBanner />
         <BackupWarningBanner onGoSettings={goSettings} />
+        <StudioSetup onGoSettings={goSettings} />
         {view === "proposals" && <ProposalsScreen onGoSettings={goSettings} />}
         {view === "teachers" && <TeachersScreen onGoSettings={goSettings} />}
         {view === "positions" && <PositionsScreen />}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Trash2, Upload } from "lucide-react";
 import { api } from "../lib/api";
+import { isStudioNotConfigured, openStudioSetup } from "../lib/studioSetup";
 import { groupSyncActions, hasWork, shiftLabel, slingChangeCount, SYNC_KIND_LABEL, updateLabel } from "../lib/sync";
 import { ProgressBar } from "./ui/ProgressBar";
 import type { SyncAction, SyncPreview, SyncProgress, SyncSummary } from "../types";
@@ -283,6 +284,11 @@ export function PushModal({ mode, proposalId, draftName, monthLabel, onClose, on
             <h3>{title}</h3>
             <div className="error">{error}</div>
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+              {error && isStudioNotConfigured(error) && (
+                <button className="btn-primary" onClick={() => { onClose(); openStudioSetup(); }}>
+                  Set up studio
+                </button>
+              )}
               <button className="btn-ghost" onClick={onClose}>
                 Close
               </button>
