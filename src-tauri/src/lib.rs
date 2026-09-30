@@ -19,6 +19,7 @@ mod secrets;
 mod seed;
 mod sling;
 mod sling_login;
+mod textdiff;
 
 use std::sync::Mutex;
 
@@ -91,7 +92,8 @@ pub fn run() {
             commands::review_proposal,
             commands::claude_edit_proposal,
             commands::claude_draft_code_change,
-            commands::validate_code_draft,
+            commands::preview_algorithm_candidate,
+            commands::set_active_algorithm_version,
             commands::list_reviews_for_proposal,
             commands::pull_month_from_sling,
             commands::refresh_roster_from_sling,

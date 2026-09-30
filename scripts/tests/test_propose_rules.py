@@ -65,4 +65,24 @@ tuned["rules"] = {"variety_penalty_per_class": 0.9}
 out4 = json.loads(run(tuned))
 assert out4["parameters"]["variety_penalty_per_class"] == 0.9
 
+# 6. Lead overflow respects teacher_slot_blocklist. Block the non-leads from
+# every class so the lead is the only candidate anywhere, then block the lead
+# from Mon 09:00: that slot must drop, not fall back to "LEAD OVERFLOW".
+lead_uid = next(t["sling_user_id"] for t in payload["teachers"] if t["is_lead"])
+others = [t["sling_user_id"] for t in payload["teachers"] if not t["is_lead"]]
+classes = sorted({s["class_name"] for s in json.loads(base)["shifts"]})
+lead_blocked = copy.deepcopy(payload)
+lead_blocked["rules"] = {
+    "teacher_class_blocklist": [
+        {"sling_user_id": u, "class_name": c} for u in others for c in classes],
+    "teacher_slot_blocklist": [
+        {"sling_user_id": lead_uid, "weekday": "Mon", "time": "09:00"}],
+}
+out5 = json.loads(run(lead_blocked))
+mon9 = [s for s in out5["shifts"] if s["weekday"] == "Mon" and s["start_time"] == "09:00"]
+assert mon9, "Mon 09:00 slots must still be reported (as dropped)"
+assert all(s["sling_user_id"] != lead_uid for s in mon9), \
+    "lead overflow must not assign the lead to a slot-blocklisted slot"
+assert all(s["is_dropped"] for s in mon9), [s["generation_reason"] for s in mon9]
+
 print("OK")

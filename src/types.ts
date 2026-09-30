@@ -247,23 +247,69 @@ export interface AlgorithmVersion {
   last_used_month: string | null;
   script_archived: boolean;
   script_missing: boolean;
+  /** sha256 of the shipped propose.py this version was adopted on. */
+  baseline_sha256: string | null;
+  /** Custom script built on a different shipped baseline than installed now. */
+  baseline_outdated: boolean;
+  is_active: boolean;
 }
 
 export interface CodeDraft {
   run_id: number;
   description: string;
+  /** Full resulting script (active script + Claude's edits). */
   script: string;
+  /** Unified diff, active script → draft. */
+  diff: string;
+  edit_count: number;
+  /** Active rules at draft time, carried into the code version. */
+  rules: Record<string, unknown>;
   model: string;
   cost_usd: number;
   duration_ms: number;
 }
 
-export interface DraftValidation {
-  ok: boolean;
-  error: string | null;
-  shift_count: number;
-  changed_assignments: number;
-  added_slots: number;
-  removed_slots: number;
-  month: string;
+export interface RuleDiffEntry {
+  rule_key: string;
+  identity: string;
+  kind: "added" | "removed" | "changed";
+  before: unknown;
+  after: unknown;
 }
+
+export interface SlotChange {
+  date: string;
+  weekday: string;
+  start: string;
+  kind: "changed" | "added" | "removed";
+  class_before: string | null;
+  class_after: string | null;
+  teacher_before: string | null;
+  teacher_after: string | null;
+  expected: boolean;
+}
+
+export type ValidationStatus = "pass" | "needs_confirm" | "error";
+
+export interface CandidateValidation {
+  status: ValidationStatus;
+  error: string | null;
+  reasons: string[];
+  month: string;
+  slot_count: number;
+  candidate_slot_count: number;
+  changed_count: number;
+  added_count: number;
+  removed_count: number;
+  unexpected_count: number;
+  changed_pct: number;
+  changes: SlotChange[];
+}
+
+export interface CandidatePreview {
+  active_version: number;
+  rules_diff: RuleDiffEntry[];
+  script_diff: string | null;
+  validation: CandidateValidation;
+}
+

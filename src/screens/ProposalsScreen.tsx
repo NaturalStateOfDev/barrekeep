@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Clock,
   Download,
+  GitBranchPlus,
   PlugZap,
   RefreshCw,
   Scale,
@@ -13,6 +14,7 @@ import { api } from "../lib/api";
 import { CalendarView } from "../components/calendar/CalendarView";
 import { ClaudeEditorPanel } from "../components/claude/ClaudeEditorPanel";
 import { AlgorithmCard } from "../components/claude/AlgorithmCard";
+import { VersionProposalCard } from "../components/claude/VersionProposalCard";
 import { SlingTokenModal } from "../components/SlingTokenModal";
 import { PushModal } from "../components/PushModal";
 import { MonthSelector } from "../components/MonthSelector";
@@ -27,6 +29,7 @@ import { Avatar } from "../components/ui/Avatar";
 import { ClassChip } from "../components/ui/ClassChip";
 import { computeIssues, type Issue } from "../lib/issues";
 import { computeKpis } from "../lib/kpis";
+import { codifyInstruction } from "../lib/rules";
 import {
   monthWindow,
   isReadOnlyMonth,
@@ -36,6 +39,7 @@ import {
   WEEKDAYS_SHORT,
 } from "../lib/dates";
 import type {
+  ClaudeEditResult,
   Position,
   Teacher,
   ProposalSummary,
@@ -431,11 +435,16 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                 positions={positions}
                 teachers={teachers}
                 hasKey={hasAnthropicKey}
+                readonly={readonly}
                 onProposalChanged={onProposalChanged}
                 onVersionAdopted={() => setAlgoRefresh((n) => n + 1)}
               />
-              <ClaudeReviewSection proposalId={detail.summary.id} />
-              <AlgorithmCard refreshToken={algoRefresh} />
+              <ClaudeReviewSection
+                proposalId={detail.summary.id}
+                teachers={teachers}
+                onVersionAdopted={() => setAlgoRefresh((n) => n + 1)}
+              />
+              <AlgorithmCard refreshToken={algoRefresh} teachers={teachers} />
             </>
           )}
         </>
@@ -598,7 +607,15 @@ function EditHistory({ proposalId }: { proposalId: number }) {
   );
 }
 
-function ClaudeReviewSection({ proposalId }: { proposalId: number }) {
+function ClaudeReviewSection({
+  proposalId,
+  teachers,
+  onVersionAdopted,
+}: {
+  proposalId: number;
+  teachers: Teacher[];
+  onVersionAdopted: () => void;
+}) {
   const [reviews, setReviews] = useState<ReviewRunSummary[] | null>(null);
   const [hasKey, setHasKey] = useState(false);
   const [running, setRunning] = useState(false);
@@ -671,7 +688,14 @@ function ClaudeReviewSection({ proposalId }: { proposalId: number }) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {latest.suggestions.map((s, i) => (
-                <SuggestionCard key={i} s={s} />
+                <SuggestionCard
+                  key={`${latest.id}-${i}`}
+                  s={s}
+                  proposalId={proposalId}
+                  hasKey={hasKey}
+                  teachers={teachers}
+                  onVersionAdopted={onVersionAdopted}
+                />
               ))}
             </div>
           )}
@@ -706,22 +730,85 @@ function ClaudeReviewSection({ proposalId }: { proposalId: number }) {
   );
 }
 
-function SuggestionCard({ s }: { s: ReviewSuggestion }) {
+function SuggestionCard({
+  s,
+  proposalId,
+  hasKey,
+  teachers,
+  onVersionAdopted,
+}: {
+  s: ReviewSuggestion;
+  proposalId: number;
+  hasKey: boolean;
+  teachers: Teacher[];
+  onVersionAdopted: () => void;
+}) {
   const kindLabel: Record<string, string> = {
     add_rule: "Add rule",
     tweak_parameter: "Tweak parameter",
     fyi: "FYI",
   };
+  const actionable = s.type === "add_rule" || s.type === "tweak_parameter";
+  const [codifying, setCodifying] = useState(false);
+  const [result, setResult] = useState<ClaudeEditResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+
+  const onCodify = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setCodifying(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await api.claudeEditProposal(proposalId, codifyInstruction(s)));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      inFlight.current = false;
+      setCodifying(false);
+    }
+  };
+
   return (
     <div className="suggestion">
       <div className="row" style={{ marginBottom: 4 }}>
         <span className={`pill pill-${s.type}`}>{kindLabel[s.type] ?? s.type}</span>
         <span className={`pill pill-confidence pill-${s.confidence}`}>{s.confidence}</span>
+        {actionable && (
+          <button
+            className="btn-ghost btn-sm"
+            style={{ marginLeft: "auto" }}
+            onClick={onCodify}
+            disabled={codifying || !hasKey}
+            title={hasKey ? "Ask Claude to express this as a rule, then review and adopt it" : "Set your API key in Settings first"}
+          >
+            <GitBranchPlus size={14} /> {codifying ? "Drafting rule…" : result ? "Draft again" : "Make it a rule"}
+          </button>
+        )}
       </div>
       <div style={{ fontWeight: 600 }}>{s.summary}</div>
       <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
         {s.rationale}
       </div>
+      {codifying && <LoadingBlock label="Asking Claude for a rule proposal…" />}
+      {error && <div className="error">{error}</div>}
+      {result && !codifying && (
+        result.ruleset_proposal ? (
+          <VersionProposalCard
+            proposal={result.ruleset_proposal}
+            runId={result.run_id}
+            teachers={teachers}
+            onAdopted={onVersionAdopted}
+          />
+        ) : (
+          <div className="bk-warn">
+            {result.needs_code_change
+              ? `The rule keys can't express this: ${result.needs_code_change.rationale} Ask Claude in the box above to draft a code change instead.`
+              : result.summary}
+          </div>
+        )
+      )}
     </div>
   );
 }

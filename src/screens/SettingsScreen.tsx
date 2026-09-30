@@ -241,16 +241,21 @@ function StudioConfigCard() {
   );
 }
 
+// Keep in sync with CLAUDE_MODELS in src-tauri/src/commands.rs. A stored id
+// that isn't listed (e.g. a retired model saved by an older build) shows as
+// the default — the backend falls back to it the same way.
 const CLAUDE_MODEL_OPTIONS = [
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8 — most capable (~13¢ per interaction)" },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — balanced (~7¢ per interaction)" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5 — most capable (~10¢ per interaction)" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 — balanced (~5¢ per interaction)" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — cheapest (~2–3¢ per interaction)" },
 ];
-const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_CLAUDE_MODEL = "claude-opus-5-5";
 
 function AnthropicKeyCard() {
   const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [keyInput, setKeyInput] = useState("");
+  // Keychain writes take a second or more; block double-submits meanwhile.
+  const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<string>(DEFAULT_CLAUDE_MODEL);
@@ -258,7 +263,9 @@ function AnthropicKeyCard() {
   useEffect(() => {
     api.hasAnthropicKey().then(setHasKey).catch((e) => setError(String(e)));
     api.getAppSetting("claude_model")
-      .then((m) => { if (m) setModel(m); })
+      .then((m) => {
+        if (m && CLAUDE_MODEL_OPTIONS.some((o) => o.id === m)) setModel(m);
+      })
       .catch(() => {});
   }, []);
 
@@ -272,6 +279,8 @@ function AnthropicKeyCard() {
   };
 
   const onSave = async () => {
+    if (saving) return;
+    setSaving(true);
     setError(null);
     setStatus(null);
     try {
@@ -282,16 +291,22 @@ function AnthropicKeyCard() {
       setStatus(has ? "Saved to the OS keychain — survives restarts." : "Cleared.");
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
   const onClear = async () => {
+    if (saving) return;
+    setSaving(true);
     try {
       await api.setAnthropicKey("");
       setHasKey(false);
       setStatus("Cleared.");
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -323,11 +338,11 @@ function AnthropicKeyCard() {
         />
       </Field>
       <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn-primary" onClick={onSave} disabled={!keyInput}>
-          Save
+        <button className="btn-primary" onClick={onSave} disabled={!keyInput || saving}>
+          {saving ? "Saving…" : "Save"}
         </button>
         {hasKey && (
-          <button className="btn-ghost" onClick={onClear}>
+          <button className="btn-ghost" onClick={onClear} disabled={saving}>
             Clear
           </button>
         )}
@@ -342,6 +357,7 @@ function SlingCredentialsCard() {
   const [hasCreds, setHasCreds] = useState<boolean | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -357,6 +373,8 @@ function SlingCredentialsCard() {
       setError("Email is required.");
       return;
     }
+    if (saving) return;
+    setSaving(true);
     try {
       await api.setSlingCredentials(email.trim(), password);
       setEmail("");
@@ -365,18 +383,24 @@ function SlingCredentialsCard() {
       await refresh();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
   const onClear = async () => {
     setError(null);
     setStatus(null);
+    if (saving) return;
+    setSaving(true);
     try {
       await api.setSlingCredentials("", "");
       setStatus("Cleared.");
       await refresh();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -410,11 +434,11 @@ function SlingCredentialsCard() {
         </Field>
       </div>
       <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn-primary" onClick={onSave}>
-          {hasCreds ? "Update" : "Save"}
+        <button className="btn-primary" onClick={onSave} disabled={saving}>
+          {saving ? "Saving…" : hasCreds ? "Update" : "Save"}
         </button>
         {hasCreds && (
-          <button className="btn-ghost" onClick={onClear}>Clear</button>
+          <button className="btn-ghost" onClick={onClear} disabled={saving}>Clear</button>
         )}
       </div>
       {status && <div className="ok">{status}</div>}

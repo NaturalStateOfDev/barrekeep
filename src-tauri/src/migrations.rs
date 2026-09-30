@@ -63,6 +63,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "claude editor: app_settings + algorithm_versions",
         sql: include_str!("../migrations/0010_algorithm_versions.sql"),
     },
+    Migration {
+        version: 11,
+        label: "algorithm_versions.baseline_sha256",
+        sql: include_str!("../migrations/0011_algorithm_baseline_sha.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.
@@ -246,6 +251,26 @@ mod tests {
             [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(ver, 10);
         assert!(script.is_none());
+    }
+
+    /// Migration 0011 adds baseline_sha256 as a nullable column.
+    #[test]
+    fn migration_0011_baseline_sha() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO algorithm_versions (version, description, rules, created_by, baseline_sha256)
+             VALUES (10, 'v10', '{}', 'user', 'abc'), (11, 'v11', '{}', 'user', NULL)",
+            [],
+        )
+        .expect("insert with baseline_sha256");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM algorithm_versions WHERE baseline_sha256 IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// backup_if_pending: no-op when absent, fresh, or up to date; copies the

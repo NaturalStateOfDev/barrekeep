@@ -1,0 +1,13 @@
+-- Migration 0011: record which shipped baseline an adopted version was built on.
+--
+-- algorithm_versions.baseline_sha256: sha256 (hex) of the shipped
+-- scripts/propose.py at the moment the version was adopted. Code versions
+-- are edits of that baseline (or of a descendant), so when an app update
+-- ships a different propose.py the UI can say "based on an older baseline"
+-- instead of silently running a stale fork. Rules-only versions carry the
+-- value forward from the version whose script they reuse.
+--
+-- Additive column on an append-only table (rows are never UPDATEd), so none
+-- of the DuckDB index/FK UPDATE hazards apply. Existing rows stay NULL
+-- ("unknown baseline") — no backfill: we can't know what they were built on.
+ALTER TABLE algorithm_versions ADD COLUMN IF NOT EXISTS baseline_sha256 VARCHAR;
