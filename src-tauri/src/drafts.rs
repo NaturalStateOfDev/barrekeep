@@ -138,25 +138,6 @@ pub fn ensure_push_candidate(conn: &duckdb::Connection, proposal_id: i64) -> Res
     }
 }
 
-/// Names of OTHER drafts of the same month that already have a push on
-/// record — shown as a warning in the push preview.
-pub fn other_pushed_drafts(conn: &duckdb::Connection, proposal_id: i64) -> Result<Vec<String>, String> {
-    let month = month_of(conn, proposal_id)?;
-    conn.prepare(
-        "SELECT COALESCE(d.name, 'Draft #' || CAST(p.id AS VARCHAR))
-         FROM proposals p
-         LEFT JOIN proposal_drafts d ON d.proposal_id = p.id
-         WHERE p.target_month = ? AND p.id <> ?
-           AND EXISTS (SELECT 1 FROM pushes x WHERE x.proposal_id = p.id)
-         ORDER BY p.id",
-    )
-    .map_err(err)?
-    .query_map(duckdb::params![month, proposal_id], |r| r.get(0))
-    .map_err(err)?
-    .collect::<Result<_, _>>()
-    .map_err(err)
-}
-
 /// Copy a draft: the proposals row (same generated_at, so staleness vs the
 /// last pull carries over; is_current FALSE) and every shift with fresh ids,
 /// remapping coteach_partner_shift_id onto the copies. Edit and push history
@@ -225,6 +206,14 @@ pub fn duplicate_impl(
         "INSERT INTO proposal_drafts (proposal_id, name, parent_proposal_id, created_from)
          VALUES (?, ?, ?, 'duplicate')",
         duckdb::params![new_id, name, proposal_id],
+    )
+    .map_err(err)?;
+    // Same shifts, so the parent's last conflict check holds for the copy
+    // too (otherwise a copy of a re-checked draft would look stale).
+    tx.execute(
+        "INSERT INTO draft_checks (proposal_id, checked_at)
+         SELECT ?, checked_at FROM draft_checks WHERE proposal_id = ?",
+        duckdb::params![new_id, proposal_id],
     )
     .map_err(err)?;
     tx.commit().map_err(err)?;
@@ -757,8 +746,6 @@ mod tests {
 
         // A push on record for the other draft shows up as a warning.
         c.execute("INSERT INTO pushes (proposal_id) VALUES (?)", duckdb::params![a]).unwrap();
-        assert_eq!(other_pushed_drafts(&c, b).unwrap(), vec!["Consistent days".to_string()]);
-        assert!(other_pushed_drafts(&c, a).unwrap().is_empty());
     }
 
     #[test]

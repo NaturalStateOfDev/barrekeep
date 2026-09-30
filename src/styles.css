@@ -1034,3 +1034,33 @@ code {
   font-weight: var(--weight-semibold);
   border-top: 2px solid var(--border-hairline);
 }
+
+/* ---- Push sync modal (incremental push / remove from Sling) ---- */
+
+.bk-sync-modal {
+  max-width: 720px;
+}
+
+.bk-sync-modal .bk-push-row {
+  grid-template-columns: 1.3fr 1fr;
+}
+
+.bk-sync-section {
+  margin-top: var(--space-3);
+}
+
+.bk-sync-section-head {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bk-sync-cleanup {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius);
+  margin-bottom: var(--space-2);
+}

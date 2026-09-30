@@ -33,6 +33,7 @@ import { computeIssues, type Issue } from "../lib/issues";
 import { computeKpis } from "../lib/kpis";
 import { codifyInstruction } from "../lib/rules";
 import { draftsForMonth, pushDraftFor, representativeDraft } from "../lib/drafts";
+import { pushLabel } from "../lib/sync";
 import {
   monthWindow,
   isReadOnlyMonth,
@@ -52,6 +53,7 @@ import type {
   ReviewRunSummary,
   AvailabilityBlock,
   ExternalShiftRow,
+  DraftConflict,
 } from "../types";
 
 function todayIso(): string {
@@ -76,6 +78,11 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   const [pullResult, setPullResult] = useState<string | null>(null);
   const [slingExpiredModal, setSlingExpiredModal] = useState(false);
   const [pushOpen, setPushOpen] = useState(false);
+  // "Remove this draft's shifts from Sling" (a pushed, non-push draft).
+  const [removeOpen, setRemoveOpen] = useState(false);
+  // Availability refresh in place: the re-check result for one draft.
+  const [refreshingAvail, setRefreshingAvail] = useState(false);
+  const [conflicts, setConflicts] = useState<{ proposalId: number; list: DraftConflict[] } | null>(null);
   // Viewing a draft that isn't the month's push draft and clicked Push.
   const [pushGateOpen, setPushGateOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -122,6 +129,8 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     if (selectedId == null) return;
     refreshDetail(selectedId).catch((e) => setError(String(e)));
   }, [selectedId]);
+
+  const shownConflicts = conflicts && conflicts.proposalId === selectedId ? conflicts.list : null;
 
   useEffect(() => {
     setPullResult(null);
@@ -229,6 +238,36 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     }
   };
 
+  // Re-pull availability/leave (+ roster) for the current and future months,
+  // then re-check THIS draft against it — no regeneration, edits kept.
+  const onRefreshAvailability = async () => {
+    if (selectedId == null) return;
+    setError(null);
+    setPullResult(null);
+    setRefreshingAvail(true);
+    try {
+      const r = await api.refreshAvailabilityFromSling();
+      const list = await api.checkDraftConflicts(selectedId);
+      setConflicts({ proposalId: selectedId, list });
+      setPullResult(
+        `Refreshed availability for ${r.months.map((m) => monthLabel(m.target_month)).join(", ")} ` +
+          `(${r.months.reduce((n, m) => n + m.availability_count, 0)} availability/leave blocks). ` +
+          (list.length === 0
+            ? "This draft has no conflicts."
+            : `${list.length} conflict${list.length === 1 ? "" : "s"} in this draft — see the list above the calendar.`),
+      );
+      await refreshProposals();
+      await refreshDetail(selectedId);
+      if (detail) loadContext(detail.summary.target_month);
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("sling-401")) setSlingExpiredModal(true);
+      else setError(msg);
+    } finally {
+      setRefreshingAvail(false);
+    }
+  };
+
   const onGenerate = async (name?: string) => {
     if (isReadOnlyMonth(activeMonth, today)) return;
     setError(null);
@@ -320,6 +359,10 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     try {
       if (selectedId != null) await refreshDetail(selectedId);
       await refreshProposals();
+      // Keep a shown conflict list current as the user fixes slots (DB only).
+      if (selectedId != null && conflicts?.proposalId === selectedId) {
+        setConflicts({ proposalId: selectedId, list: await api.checkDraftConflicts(selectedId) });
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -400,6 +443,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                 onRename={() => setNameModal("rename")}
                 onArchiveToggle={onArchiveToggle}
                 onUseForPush={() => onUseForPush(selectedId)}
+                onRemoveFromSling={() => setRemoveOpen(true)}
                 onCompare={() => setTab("compare")}
               />
             )}
@@ -428,11 +472,13 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                   readonly
                     ? readonlyTitle
                     : detail.summary.is_push_candidate
-                      ? `Push “${detail.summary.name}” to Sling as planning shifts`
+                      ? detail.summary.sling_shift_count > 0
+                        ? `Send the changes to “${detail.summary.name}” since the last push (planning shifts only)`
+                        : `Push “${detail.summary.name}” to Sling as planning shifts`
                       : `Push sends the push draft${pushDraft ? ` (“${pushDraft.name}”)` : ""}, not this one`
                 }
               >
-                <Upload size={15} /> {detail.summary.is_push_candidate ? "Push to Sling" : "Push…"}
+                <Upload size={15} /> {detail.summary.is_push_candidate ? pushLabel(detail.summary) : "Push…"}
               </button>
             </>
           ) : undefined
@@ -519,6 +565,10 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
               issues={issues}
               onProposalChanged={onProposalChanged}
               onRegenerate={() => onGenerate()}
+              onRefreshAvailability={onRefreshAvailability}
+              refreshing={refreshingAvail}
+              conflicts={shownConflicts}
+              onDismissConflicts={() => setConflicts(null)}
               onImportExternal={async (slingShiftId) => {
                 await api.importExternalShift(slingShiftId, detail.summary.id);
                 await onProposalChanged();
@@ -630,8 +680,8 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
               ) : (
                 <>{monthLabel(detail.summary.target_month)} has no push draft yet.</>
               )}{" "}
-              Only one draft per month goes to Sling — pushing a second would add its differing
-              shifts on top of the first.
+              Only one draft per month goes to Sling. After switching, the push keeps shifts the two
+              drafts share and offers to remove the earlier draft's other planning shifts.
             </p>
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
               <button className="btn-ghost" onClick={() => setPushGateOpen(false)}>
@@ -662,8 +712,25 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
           </div>
         </div>
       )}
+      {removeOpen && detail && (
+        <PushModal
+          mode="remove"
+          proposalId={detail.summary.id}
+          draftName={detail.summary.name}
+          monthLabel={monthLabel(detail.summary.target_month)}
+          onClose={() => {
+            setRemoveOpen(false);
+            onProposalChanged();
+          }}
+          onTokenExpired={() => {
+            setRemoveOpen(false);
+            setSlingExpiredModal(true);
+          }}
+        />
+      )}
       {pushOpen && detail && (
         <PushModal
+          mode="push"
           proposalId={detail.summary.id}
           draftName={detail.summary.name}
           monthLabel={monthLabel(detail.summary.target_month)}

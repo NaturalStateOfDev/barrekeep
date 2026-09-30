@@ -89,7 +89,6 @@ pub struct ProposalShiftInput {
     pub end: String,
     pub position_id: i64,
     pub user_id: Option<i64>,
-    pub teacher_name: Option<String>,
     pub class_name: String,
     pub is_coteach: bool,
     pub coteach_label: Option<String>,
@@ -138,8 +137,6 @@ pub struct PushSpec {
     pub end: String,          // "06:45"
     pub position_id: i64,
     pub user_id: i64,
-    pub class_name: String,   // display only
-    pub teacher_name: String, // display only
 }
 
 // Sling returns some id fields as JSON strings (notably the top-level event
@@ -367,6 +364,82 @@ pub fn push_shift(token: &str, cfg: &StudioConfig, s: &PushSpec, viewdates: &str
     Err(anyhow!("create failed after {PUSH_MAX_RETRIES} retries: {last_err}"))
 }
 
+/// Result of a DELETE /shifts/{id}. A 404 means the shift is already gone
+/// (deleted in Sling's UI, or by an earlier run) — not an error for sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    Deleted,
+    NotFound,
+}
+
+/// DELETE with browser-like headers + percent-encoded query params. Sling
+/// answers 204 with an EMPTY body, so unlike GET/POST the 2xx branch must not
+/// parse JSON. Ported from scripts/rollback_push.py (method, URL, headers).
+fn http_delete(token: &str, url: &str, query: &[(&str, &str)]) -> Result<DeleteOutcome> {
+    let mut req = http_agent()
+        .delete(url)
+        .header("Authorization", token)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Origin", "https://app.getsling.com")
+        .header("Referer", "https://app.getsling.com/")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-site")
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Accept-Language", "en-US,en;q=0.9");
+    for (k, v) in query {
+        req = req.query(*k, *v);
+    }
+    match req.call() {
+        Ok(mut r) => match r.status().as_u16() {
+            401 => Err(anyhow!("sling-401")),
+            404 => Ok(DeleteOutcome::NotFound),
+            429 => Err(anyhow!("sling-429")),
+            1010 => Err(anyhow!("sling-1010")),
+            c if (200..=299).contains(&c) => Ok(DeleteOutcome::Deleted),
+            c => {
+                let body = r.body_mut().read_to_string().unwrap_or_default();
+                Err(anyhow!("sling-{c}: {body}"))
+            }
+        },
+        Err(e) => Err(anyhow!("sling-network: {e}")),
+    }
+}
+
+/// Delete one shift. Only ever called by push_sync for shifts this app
+/// created and just verified (planning, unmodified). Same 429 policy as
+/// push_shift: up to PUSH_MAX_RETRIES with 30s/60s/90s backoff; sling-401
+/// propagates so the caller aborts the run.
+pub fn delete_shift(
+    token: &str,
+    cfg: &StudioConfig,
+    shift_id: i64,
+    viewdates: &str,
+    cachedates: &str,
+) -> Result<DeleteOutcome> {
+    let url = format!("{BASE_URL}/{}/shifts/{shift_id}", cfg.org_id);
+    let query: [(&str, &str); 2] = [("viewdates", viewdates), ("cachedates", cachedates)];
+    let mut last_err = anyhow!("delete_shift: no attempts");
+    for attempt in 1..=PUSH_MAX_RETRIES {
+        match http_delete(token, &url, &query) {
+            Ok(o) => return Ok(o),
+            Err(e) if e.to_string() == "sling-429" => {
+                last_err = e;
+                std::thread::sleep(std::time::Duration::from_secs(PUSH_RATE_LIMIT_BACKOFF_SECS * attempt as u64));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(anyhow!("delete failed after {PUSH_MAX_RETRIES} retries: {last_err}"))
+}
+
+/// The assigned user of a calendar event: singular `user` (responses), else
+/// the first of `users`.
+pub fn event_user_id(ev: &CalendarEvent) -> Option<i64> {
+    ev.user.as_ref().map(|u| u.id)
+        .or_else(|| ev.users.as_ref().and_then(|v| v.first()).map(|u| u.id))
+}
+
 /// GET /v1/users/concise → roster (with group memberships).
 pub fn fetch_users(token: &str) -> Result<Vec<SlingUser>> {
     let doc = http_get(token, &format!("{BASE_URL}/users/concise"))?;
@@ -566,7 +639,6 @@ pub fn build_push_specs(
                 specs.push(PushSpec {
                     proposal_shift_id: inp.proposal_shift_id, date: inp.date.clone(), start: inp.start.clone(),
                     end: inp.end.clone(), position_id: inp.position_id, user_id: *uid,
-                    class_name: inp.class_name.clone(), teacher_name: name.to_string(),
                 });
             }
         } else {
@@ -576,8 +648,6 @@ pub fn build_push_specs(
             specs.push(PushSpec {
                 proposal_shift_id: inp.proposal_shift_id, date: inp.date.clone(), start: inp.start.clone(),
                 end: inp.end.clone(), position_id: inp.position_id, user_id: uid,
-                class_name: inp.class_name.clone(),
-                teacher_name: inp.teacher_name.clone().unwrap_or_default(),
             });
         }
     }
@@ -977,13 +1047,13 @@ mod tests {
         name_to_id.insert("Teacher E".to_string(), 1005i64);
         let inputs = vec![
             ProposalShiftInput { proposal_shift_id: 10, date: "2026-06-01".into(), start: "05:45".into(),
-                end: "06:45".into(), position_id: 29470407, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+                end: "06:45".into(), position_id: 29470407, user_id: Some(1001),
                 class_name: "Empower".into(), is_coteach: false, coteach_label: None, is_dropped: false },
             ProposalShiftInput { proposal_shift_id: 11, date: "2026-06-02".into(), start: "09:00".into(),
-                end: "10:00".into(), position_id: 29303965, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+                end: "10:00".into(), position_id: 29303965, user_id: Some(1001),
                 class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Teacher E".into()), is_dropped: false },
             ProposalShiftInput { proposal_shift_id: 12, date: "2026-06-03".into(), start: "09:00".into(),
-                end: "10:00".into(), position_id: 29303965, user_id: None, teacher_name: None,
+                end: "10:00".into(), position_id: 29303965, user_id: None,
                 class_name: "Classic".into(), is_coteach: false, coteach_label: None, is_dropped: true },
         ];
         let specs = build_push_specs(&inputs, &name_to_id).unwrap();
@@ -996,7 +1066,7 @@ mod tests {
     fn build_push_specs_errors_on_unassigned() {
         let name_to_id = std::collections::HashMap::new();
         let inputs = vec![ProposalShiftInput { proposal_shift_id: 20, date: "2026-06-01".into(), start: "05:45".into(),
-            end: "06:45".into(), position_id: 29470407, user_id: None, teacher_name: None,
+            end: "06:45".into(), position_id: 29470407, user_id: None,
             class_name: "Empower".into(), is_coteach: false, coteach_label: None, is_dropped: false }];
         let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
         assert!(e.contains("no teacher"), "got: {e}");
@@ -1007,7 +1077,7 @@ mod tests {
         let mut name_to_id = std::collections::HashMap::new();
         name_to_id.insert("Teacher A".to_string(), 1001i64);
         let inputs = vec![ProposalShiftInput { proposal_shift_id: 30, date: "2026-06-02".into(), start: "09:00".into(),
-            end: "10:00".into(), position_id: 29303965, user_id: Some(1001), teacher_name: Some("Teacher A".into()),
+            end: "10:00".into(), position_id: 29303965, user_id: Some(1001),
             class_name: "Classic".into(), is_coteach: true, coteach_label: Some("Teacher A + Ghost".into()), is_dropped: false }];
         let e = build_push_specs(&inputs, &name_to_id).unwrap_err();
         assert!(e.contains("Ghost"), "got: {e}");
@@ -1065,8 +1135,7 @@ mod tests {
     #[test]
     fn build_shift_body_matches_sling_contract() {
         let s = PushSpec { proposal_shift_id: 1, date: "2026-06-01".into(), start: "05:45".into(),
-            end: "06:45".into(), position_id: 29470407, user_id: 1001,
-            class_name: "Empower".into(), teacher_name: "Teacher A".into() };
+            end: "06:45".into(), position_id: 29470407, user_id: 1001 };
         let body = build_shift_body(&s, 5);
         assert_eq!(body["dtstart"], "2026-06-01T05:45");
         assert_eq!(body["dtend"], "2026-06-01T06:45");

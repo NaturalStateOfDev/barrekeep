@@ -340,13 +340,54 @@ CREATE TABLE push_results (
   id                   BIGINT PRIMARY KEY DEFAULT nextval('seq_push_results'),
   push_id              BIGINT NOT NULL REFERENCES pushes(id),
   proposal_shift_id    BIGINT NOT NULL,  -- logically references proposal_shifts(id), see edits note
-  outcome              VARCHAR NOT NULL,  -- 'created' | 'failed' | 'skipped'
+  outcome              VARCHAR NOT NULL,  -- see outcomes below
   sling_shift_id       VARCHAR,  -- if created
   error_message        VARCHAR,  -- if failed
   attempted_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   retry_count          INTEGER NOT NULL DEFAULT 0
 );
 CREATE SEQUENCE seq_push_results;
+```
+
+Outcomes: `created` (first push), `updated` (re-created after a draft change —
+new `sling_shift_id`), `adopted` (another draft's identical shift now tracked
+for this draft; no Sling call), `deleted`, `skipped_missing` (gone from Sling),
+`skipped_conflict` (published / edited in Sling / pre-0013 — left alone),
+`failed`. The latest `created`/`updated`/`adopted`/`deleted`/`skipped_missing`
+row per `sling_shift_id` decides whether the app still owns that Sling shift
+(see `src-tauri/src/push_sync.rs`).
+
+### `push_result_snapshots` (migration 0013)
+
+What was actually sent to Sling for one `push_results` row. Insert-only; PK
+only, no FKs (side table rather than new `push_results` columns — see the
+migration header). Pre-0013 rows have none; a push baselines one (an
+`adopted` row + snapshot of Sling's state) only when Sling shows it planning
+and equal to its draft shift — otherwise sync never changes it.
+
+```sql
+CREATE TABLE push_result_snapshots (
+  push_result_id    BIGINT PRIMARY KEY,
+  sling_user_id     BIGINT NOT NULL,
+  sling_position_id BIGINT NOT NULL,
+  shift_date        VARCHAR NOT NULL,   -- 'YYYY-MM-DD', studio local
+  start_time        VARCHAR NOT NULL,   -- 'HH:MM'
+  end_time          VARCHAR NOT NULL
+);
+```
+
+### `draft_checks` (migration 0013)
+
+Last time a draft was re-validated against the month's pulled data
+(`check_draft_conflicts`). A draft is stale iff
+`month_pulls.pulled_at > max(generated_at, checked_at)`. Written with
+`INSERT OR REPLACE`; copied on duplicate.
+
+```sql
+CREATE TABLE draft_checks (
+  proposal_id BIGINT PRIMARY KEY,
+  checked_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
 ## Common queries
@@ -392,6 +433,7 @@ A fresh install starts empty; the roster, positions, and qualifications
 arrive via the Sling pull or the Teachers page's "Refresh from Sling".
 Weekly caps default to target 4 / max 5 on import and are edited in-app;
 position duration/special flags are edited in-app after import.
+
 
 ### `app_settings`
 

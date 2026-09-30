@@ -91,6 +91,8 @@ export interface ProposalSummary {
   is_push_candidate: boolean;
   /** At least one push to Sling is on record for this draft. */
   pushed: boolean;
+  /** Live Sling shifts this draft owns (push tracking, migration 0013). */
+  sling_shift_count: number;
 }
 
 export interface EditRow {
@@ -163,8 +165,12 @@ export interface ProposalShiftRow {
 export interface ProposalDetail {
   summary: ProposalSummary;
   shifts: ProposalShiftRow[];
+  /** The month's latest pull/refresh is newer than this draft's generation
+   *  AND its last conflict check. */
   is_stale: boolean;
   last_pulled_at: string | null;
+  /** Last time check_draft_conflicts validated this draft. */
+  last_checked_at: string | null;
 }
 
 export interface PullResult {
@@ -182,24 +188,6 @@ export interface AvailabilityBlock {
   source: string; // 'leave' | 'availability'
   starts_at: string; // ISO timestamp
   ends_at: string;
-}
-
-export interface PushPreviewItem {
-  date: string;
-  start: string;
-  end: string;
-  class_name: string;
-  teacher_name: string;
-}
-
-export interface PushPreview {
-  total: number;
-  skipped_count: number;
-  to_create: PushPreviewItem[];
-  /** The draft being pushed (always the month's push draft). */
-  draft_name: string;
-  /** Other drafts of this month that were pushed before. */
-  other_pushed_drafts: string[];
 }
 
 export type DraftDiffKind = "teacher" | "format" | "format_teacher" | "only_a" | "only_b";
@@ -250,23 +238,107 @@ export interface ProposalDiff {
   totals_b: DraftTotals;
 }
 
-export interface PushSummary {
+export type SyncActionKind = "baseline" | "adopt" | "skip" | "cleanup" | "delete" | "update" | "create";
+
+export interface ShiftView {
+  date: string;
+  start: string;
+  end: string;
+  class_name: string;
+  teacher_name: string;
+}
+
+export interface SyncAction {
+  kind: SyncActionKind;
+  proposal_shift_id: number;
+  sling_shift_id: number | null;
+  /** What's in Sling now (update/delete/cleanup) or was last pushed. */
+  before: ShiftView | null;
+  /** What the draft wants (create/update/adopt). */
+  after: ShiftView | null;
+  reason: string;
+  /** For cleanup/adopt: the other draft that owned the shift. */
+  from_draft: string | null;
+  /** For skips: the push_results outcome recorded on execute, if any. */
+  skip_outcome: string | null;
+}
+
+export interface CleanupOffer {
+  proposal_id: number;
+  draft_name: string;
+  /** Planning, unmodified shifts that can be removed. */
+  removable: number;
+  /** Shifts that will be left alone (published / edited in Sling / legacy). */
+  blocked: number;
+}
+
+export interface SyncPreview {
+  mode: "push" | "remove";
+  proposal_id: number;
+  draft_name: string;
+  target_month: string;
+  actions: SyncAction[];
+  unchanged: number;
+  cleanup: boolean;
+  cleanup_offers: CleanupOffer[];
+  /** Hand back to execute; it refuses if the plan changed since. */
+  plan_key: string;
+}
+
+export interface SyncSummary {
   push_id: number;
   created: number;
-  failed: number;
+  updated: number;
+  deleted: number;
+  adopted: number;
   skipped: number;
-  /** Set when the pre-push database backup failed (the push still ran). */
+  failed: number;
+  aborted: boolean;
+  /** Set when the pre-sync database backup failed (the sync still ran). */
   backup_warning: string | null;
 }
 
-export interface PushProgress {
+export interface SyncProgress {
   total: number;
   done: number;
   created: number;
+  updated: number;
+  deleted: number;
   failed: number;
-  skipped: number;
   last_label: string;
   last_outcome: string;
+}
+
+export type DraftConflictKind =
+  | "blocked"
+  | "leave"
+  | "teacher_inactive"
+  | "not_qualified"
+  | "over_cap"
+  | "unassigned";
+
+export interface DraftConflict {
+  proposal_shift_id: number;
+  shift_date: string;
+  start_time: string;
+  end_time: string;
+  class_name: string;
+  sling_user_id: number | null;
+  teacher_name: string | null;
+  kind: DraftConflictKind;
+  message: string;
+}
+
+export interface MonthRefresh {
+  target_month: string;
+  availability_count: number;
+  external_shift_count: number;
+}
+
+export interface AvailabilityRefreshResult {
+  months: MonthRefresh[];
+  roster: RosterSyncSummary;
+  refreshed_at: string;
 }
 
 export interface RosterSyncSummary {

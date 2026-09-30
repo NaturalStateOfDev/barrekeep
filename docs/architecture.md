@@ -95,7 +95,8 @@ Two kinds of copies sit next to it:
 
 - `backups/scheduler-YYYYMMDD-HHMMSS-<reason>.duckdb` — routine backups
   (`src-tauri/src/backup.rs`). Taken once per calendar day at startup
-  (`startup`), before every Sling push that creates shifts (`prepush`), and
+  (`startup`), before every Sling sync that changes shifts (`prepush`; `preremove` for
+  "remove this draft from Sling"), and
   from Settings → Backups → "Back up now" (`manual`). The newest 14 are kept;
   rotation deletes only files matching that name pattern. They are written
   through the open connection with DuckDB's

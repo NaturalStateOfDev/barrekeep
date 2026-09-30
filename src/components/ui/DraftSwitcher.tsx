@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, ChevronDown, Copy, GitCompare, Pencil, Upload } from "lucide-react";
+import { Archive, ArchiveRestore, ChevronDown, CloudOff, Copy, GitCompare, Pencil, Upload } from "lucide-react";
 import type { ProposalSummary } from "../../types";
 import { formatTimestamp } from "../../lib/dates";
 
@@ -17,6 +17,8 @@ interface Props {
   onRename: () => void;
   onArchiveToggle: () => void;
   onUseForPush: () => void;
+  /** Delete this (non-push) draft's planning shifts from Sling. */
+  onRemoveFromSling: () => void;
   onCompare: () => void;
 }
 
@@ -34,6 +36,7 @@ export function DraftSwitcher({
   onRename,
   onArchiveToggle,
   onUseForPush,
+  onRemoveFromSling,
   onCompare,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -82,6 +85,8 @@ export function DraftSwitcher({
                     <span className="bk-push-badge">Push draft</span>
                   ) : v.archived ? (
                     "archived"
+                  ) : v.sling_shift_count > 0 ? (
+                    `${v.sling_shift_count} in Sling`
                   ) : v.pushed ? (
                     "pushed before"
                   ) : (
@@ -137,6 +142,17 @@ export function DraftSwitcher({
                   </>
                 )}
               </button>
+              {!current.is_push_candidate && current.sling_shift_count > 0 && (
+                <button
+                  className="bk-switcher-new"
+                  onClick={act(onRemoveFromSling)}
+                  disabled={readonly}
+                  title="Delete this draft's planning shifts from Sling (published or Sling-edited shifts are left alone)"
+                >
+                  <CloudOff size={15} /> Remove its {current.sling_shift_count} shift
+                  {current.sling_shift_count === 1 ? "" : "s"} from Sling…
+                </button>
+              )}
               <button className="bk-switcher-new" onClick={act(onCompare)} disabled={drafts.length < 2}>
                 <GitCompare size={15} /> Compare drafts
               </button>

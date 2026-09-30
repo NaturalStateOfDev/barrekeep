@@ -16,6 +16,10 @@ import type {
   EditRow,
   AvailabilityBlock,
   ExternalShiftRow,
+  DraftConflict,
+  ShiftView,
+  SyncAction,
+  SyncPreview,
 } from "../types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -125,6 +129,7 @@ function mockSummary(
     created_from: "generate",
     is_push_candidate: false,
     pushed: false,
+    sling_shift_count: 0,
     ...over,
   };
 }
@@ -157,7 +162,217 @@ const PUSH_DRAFT = new Map<string, number>([
 ]);
 
 function summaryOf(p: MockProposal): ProposalSummary {
-  return { ...p.summary, is_push_candidate: PUSH_DRAFT.get(p.summary.target_month) === p.summary.id };
+  return {
+    ...p.summary,
+    is_push_candidate: PUSH_DRAFT.get(p.summary.target_month) === p.summary.id,
+    sling_shift_count: SLING.get(p.summary.id)?.size ?? 0,
+  };
+}
+
+// ---- Mock Sling tracking (mirrors push_sync.rs) ----
+// proposal id -> proposal_shift id -> the shift as last pushed (+ Sling status).
+type MockSlingShift = {
+  row: ProposalShiftRow;
+  sling_id: number;
+  status: "planning" | "published" | "deleted";
+  /** Pushed before sync tracking (no snapshot yet). */
+  legacy?: boolean;
+};
+const SLING = new Map<number, Map<number, MockSlingShift>>();
+let nextSlingId = 5_000_000;
+/** Drafts whose month data is newer than their last check (get_proposal.is_stale). */
+const STALE = new Set<number>([6]);
+/** Conflicts a check "finds": proposal id -> (date|start|user) keys with a kind. */
+const CONFLICT_SEEDS = new Map<number, Map<string, DraftConflict["kind"]>>();
+
+function seedSling(id: number, publishedFirst = false) {
+  const p = PROPOSALS.find((x) => x.summary.id === id);
+  if (!p) return;
+  const m = new Map<number, MockSlingShift>();
+  // Everything but the last 3 assigned shifts is "in Sling" (so a sync has creates).
+  const rows = p.shifts.filter((s) => !s.is_dropped && s.sling_user_id != null);
+  rows.slice(0, Math.max(0, rows.length - 3)).forEach((r, i) =>
+    m.set(r.id, {
+      row: { ...r },
+      sling_id: nextSlingId++,
+      // Exercise the preview: #0 published, #1 deleted in Sling, #2 a legacy push.
+      status: publishedFirst && i === 0 ? "published" : publishedFirst && i === 1 ? "deleted" : "planning",
+      legacy: publishedFirst && i === 2,
+    }),
+  );
+  SLING.set(id, m);
+  p.summary.pushed = true;
+}
+seedSling(7, true); // August "Draft 1" = push draft, pushed, first shift published since
+seedSling(6);
+
+const view = (r: ProposalShiftRow): ShiftView => ({
+  date: r.shift_date,
+  start: r.start_time,
+  end: r.end_time,
+  class_name: r.class_name,
+  teacher_name: r.teacher_name ?? "?",
+});
+const sameShift = (a: ProposalShiftRow, b: ProposalShiftRow) =>
+  a.shift_date === b.shift_date &&
+  a.start_time === b.start_time &&
+  a.end_time === b.end_time &&
+  a.sling_user_id === b.sling_user_id &&
+  a.sling_position_id === b.sling_position_id;
+const act = (kind: SyncAction["kind"], ps: number, x: Partial<SyncAction>): SyncAction => ({
+  kind,
+  proposal_shift_id: ps,
+  sling_shift_id: null,
+  before: null,
+  after: null,
+  reason: "",
+  from_draft: null,
+  skip_outcome: null,
+  ...x,
+});
+const KIND_ORDER: SyncAction["kind"][] = ["baseline", "adopt", "skip", "cleanup", "delete", "update", "create"];
+
+function mockSyncPlan(id: number, mode: "push" | "remove", cleanup: boolean): SyncPreview {
+  const p = findProposal(id);
+  const mine = SLING.get(id) ?? new Map<number, MockSlingShift>();
+  const actions: SyncAction[] = [];
+  let unchanged = 0;
+  const others = PROPOSALS.filter(
+    (x) => x.summary.target_month === p.summary.target_month && x.summary.id !== id && (SLING.get(x.summary.id)?.size ?? 0) > 0,
+  );
+  const adopted = new Set<number>();
+  if (mode === "remove") {
+    for (const [ps, t] of mine) {
+      actions.push(
+        t.status === "published"
+          ? act("skip", ps, { sling_shift_id: t.sling_id, before: view(t.row), reason: "is published in Sling — the app only changes planning shifts", skip_outcome: "skipped_conflict" })
+          : act("delete", ps, { sling_shift_id: t.sling_id, before: view(t.row), reason: "removing this draft's shifts from Sling" }),
+      );
+    }
+  } else {
+    for (const s of p.shifts) {
+      const t = mine.get(s.id);
+      const live = !s.is_dropped && s.sling_user_id != null;
+      if (t && live && t.status === "deleted")
+        actions.push(act("skip", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: view(s), reason: "deleted in Sling since last push — will be re-created on the next push unless you remove it from the draft", skip_outcome: "skipped_missing" }));
+      else if (t && live && sameShift(t.row, s) && t.legacy && t.status === "planning")
+        actions.push(act("baseline", s.id, { sling_shift_id: t.sling_id, before: view(s), after: view(s), reason: "pushed before sync tracking; matches the draft — tracked from now on" }));
+      else if (t && live && sameShift(t.row, s)) unchanged++;
+      else if (t && t.legacy)
+        actions.push(act("skip", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: live ? view(s) : null, reason: "pushed before sync tracking; differs from draft — fix in Sling or remove manually", skip_outcome: "skipped_conflict" }));
+      else if (t && t.status === "published")
+        actions.push(act("skip", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: live ? view(s) : null, reason: "is published in Sling — the app only changes planning shifts", skip_outcome: "skipped_conflict" }));
+      else if (t && live) actions.push(act("update", s.id, { sling_shift_id: t.sling_id, before: view(t.row), after: view(s), reason: "changed in the draft since the last push" }));
+      else if (t) actions.push(act("delete", s.id, { sling_shift_id: t.sling_id, before: view(t.row), reason: "no longer in the draft" }));
+      else if (live) {
+        let from: MockProposal | undefined;
+        let hit: MockSlingShift | undefined;
+        for (const o of others) {
+          for (const x of SLING.get(o.summary.id)!.values())
+            if (!adopted.has(x.sling_id) && x.status === "planning" && sameShift(x.row, s)) {
+              hit = x;
+              from = o;
+              break;
+            }
+          if (hit) break;
+        }
+        if (hit && from) {
+          adopted.add(hit.sling_id);
+          actions.push(act("adopt", s.id, { sling_shift_id: hit.sling_id, before: view(s), after: view(s), from_draft: from.summary.name, reason: "already in Sling from another draft — tracked for this draft now" }));
+        } else actions.push(act("create", s.id, { after: view(s), reason: "not in Sling yet" }));
+      }
+    }
+    if (cleanup)
+      for (const o of others)
+        for (const [ps, x] of SLING.get(o.summary.id)!)
+          if (!adopted.has(x.sling_id))
+            actions.push(
+              x.status === "published"
+                ? act("skip", ps, { sling_shift_id: x.sling_id, before: view(x.row), from_draft: o.summary.name, reason: "is published in Sling — the app only changes planning shifts", skip_outcome: "skipped_conflict" })
+                : act("cleanup", ps, { sling_shift_id: x.sling_id, before: view(x.row), from_draft: o.summary.name, reason: "pushed from another draft of this month" }),
+            );
+  }
+  actions.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+  const cleanup_offers = mode === "push"
+    ? others.map((o) => {
+        const rows = [...SLING.get(o.summary.id)!.values()].filter((x) => !adopted.has(x.sling_id));
+        return {
+          proposal_id: o.summary.id,
+          draft_name: o.summary.name,
+          removable: rows.filter((x) => x.status === "planning").length,
+          blocked: rows.filter((x) => x.status !== "planning").length,
+        };
+      }).filter((o) => o.removable + o.blocked > 0)
+    : [];
+  return {
+    mode,
+    proposal_id: id,
+    draft_name: p.summary.name,
+    target_month: p.summary.target_month,
+    actions,
+    unchanged,
+    cleanup,
+    cleanup_offers,
+    plan_key: JSON.stringify(actions.map((a) => [a.kind, a.proposal_shift_id, a.sling_shift_id])),
+  };
+}
+
+async function mockSyncExecute(id: number, mode: "push" | "remove", cleanup: boolean, planKey: string) {
+  const plan = mockSyncPlan(id, mode, cleanup);
+  if (plan.plan_key !== planKey) throw new Error("Sling or the draft changed since the preview — review the changes again before pushing.");
+  await sleep(1200);
+  const p = findProposal(id);
+  const mine = SLING.get(id) ?? new Map<number, MockSlingShift>();
+  const sum = { push_id: 1, created: 0, updated: 0, deleted: 0, adopted: 0, skipped: 0, failed: 0, aborted: false, backup_warning: null as string | null };
+  for (const a of plan.actions) {
+    const row = p.shifts.find((s) => s.id === a.proposal_shift_id);
+    if (a.kind === "create" && row) { mine.set(row.id, { row: { ...row }, sling_id: nextSlingId++, status: "planning" }); sum.created++; }
+    else if (a.kind === "update" && row) { mine.set(row.id, { row: { ...row }, sling_id: nextSlingId++, status: "planning" }); sum.updated++; }
+    else if (a.kind === "delete") { mine.delete(a.proposal_shift_id); sum.deleted++; }
+    else if (a.kind === "cleanup") { for (const m of SLING.values()) for (const [k, x] of m) if (x.sling_id === a.sling_shift_id) m.delete(k); sum.deleted++; }
+    else if (a.kind === "baseline") { const t = mine.get(a.proposal_shift_id); if (t) t.legacy = false; sum.adopted++; }
+    else if (a.kind === "skip" && a.skip_outcome === "skipped_missing") { mine.delete(a.proposal_shift_id); sum.skipped++; }
+    else if (a.kind === "adopt" && row) {
+      for (const m of SLING.values()) for (const [k, x] of m) if (x.sling_id === a.sling_shift_id) m.delete(k);
+      mine.set(row.id, { row: { ...row }, sling_id: a.sling_shift_id!, status: "planning" }); sum.adopted++;
+    } else sum.skipped++;
+  }
+  SLING.set(id, mine);
+  if (mode === "push") p.summary.pushed = true;
+  return sum;
+}
+
+function mockCheckConflicts(id: number): DraftConflict[] {
+  const p = findProposal(id);
+  STALE.delete(id);
+  const key = (s: ProposalShiftRow) => `${s.shift_date}|${s.start_time}|${s.sling_user_id}`;
+  let seeds = CONFLICT_SEEDS.get(id);
+  if (!seeds) {
+    // First check "discovers" new blocked time / leave on two assigned slots.
+    const rows = p.shifts.filter((s) => !s.is_dropped && s.sling_user_id != null);
+    seeds = new Map([[key(rows[3]), "blocked" as const], [key(rows[8]), "leave" as const]]);
+    CONFLICT_SEEDS.set(id, seeds);
+  }
+  const out: DraftConflict[] = [];
+  for (const s of p.shifts) {
+    const kind = !s.is_dropped ? seeds.get(key(s)) : undefined;
+    if (!kind) continue;
+    out.push({
+      proposal_shift_id: s.id,
+      shift_date: s.shift_date,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      class_name: s.class_name,
+      sling_user_id: s.sling_user_id,
+      teacher_name: s.teacher_name,
+      kind,
+      message:
+        kind === "blocked"
+          ? `${s.teacher_name} is marked unavailable (${s.start_time}–${s.end_time}) — overlaps ${s.start_time} ${s.class_name}`
+          : `${s.teacher_name} is on leave (all day) — overlaps ${s.start_time} ${s.class_name}`,
+    });
+  }
+  return out;
 }
 
 function ensurePushDraft(id: number) {
@@ -445,7 +660,13 @@ export function installDevMock() {
         return PROPOSALS.map(summaryOf).sort((a, b) => b.id - a.id);
       case "get_proposal": {
         const p = findProposal(args.proposalId);
-        return { summary: summaryOf(p), shifts: p.shifts, is_stale: p.summary.id === 6, last_pulled_at: "2026-07-01T08:00:00" };
+        return {
+          summary: summaryOf(p),
+          shifts: p.shifts,
+          is_stale: STALE.has(p.summary.id),
+          last_pulled_at: "2026-07-01T08:00:00",
+          last_checked_at: CONFLICT_SEEDS.has(p.summary.id) ? "2026-07-05T12:00:00" : null,
+        };
       }
       case "generate_proposal": {
         await sleep(900);
@@ -609,26 +830,33 @@ export function installDevMock() {
         }
         return null;
       }
-      case "push_proposal_dry_run": {
+      case "refresh_availability_from_sling":
+        await sleep(900);
+        if (!hasSlingToken) throw new Error("sling-401: token expired");
+        for (const x of PROPOSALS) STALE.add(x.summary.id);
+        return {
+          months: [...new Set(PROPOSALS.map((x) => x.summary.target_month))].sort().map((m) => ({
+            target_month: m,
+            availability_count: 4,
+            external_shift_count: 1,
+          })),
+          roster: { teachers_active: 6, teachers_deactivated: 0, positions_active: 6, positions_deactivated: 1, qualifications: 27 },
+          refreshed_at: "2026-07-05T12:00:00Z",
+        };
+      case "check_draft_conflicts":
+        return mockCheckConflicts(args.proposalId);
+      case "push_sync_preview":
         ensurePushDraft(args.proposalId);
         await sleep(500);
-        const p = findProposal(args.proposalId);
-        const items = p.shifts.filter((s) => !s.is_dropped && s.teacher_name);
-        return {
-          total: items.length,
-          skipped_count: 2,
-          to_create: items.slice(0, 40).map((s) => ({ date: s.shift_date, start: s.start_time, end: s.end_time, class_name: s.class_name, teacher_name: s.teacher_name! })),
-          draft_name: p.summary.name,
-          other_pushed_drafts: PROPOSALS.filter(
-            (x) => x.summary.target_month === p.summary.target_month && x.summary.id !== p.summary.id && x.summary.pushed,
-          ).map((x) => x.summary.name),
-        };
-      }
-      case "push_proposal_execute":
+        return mockSyncPlan(args.proposalId, "push", args.cleanup);
+      case "push_sync_execute":
         ensurePushDraft(args.proposalId);
-        await sleep(1800);
-        findProposal(args.proposalId).summary.pushed = true;
-        return { push_id: 1, created: 38, failed: 0, skipped: 2, backup_warning: null };
+        return mockSyncExecute(args.proposalId, "push", args.cleanup, args.planKey);
+      case "remove_draft_from_sling_preview":
+        await sleep(400);
+        return mockSyncPlan(args.proposalId, "remove", false);
+      case "remove_draft_from_sling_execute":
+        return mockSyncExecute(args.proposalId, "remove", false, args.planKey);
 
       // ---- Claude review ----
       case "review_proposal":
