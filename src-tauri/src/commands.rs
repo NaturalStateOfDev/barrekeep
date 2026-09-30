@@ -5,7 +5,6 @@
 // as plain strings (anyhow's full chain via {:#}).
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -379,8 +378,8 @@ fn build_propose_payload(
                 let pid: i32 = r.get(4)?;
                 Ok(serde_json::json!({
                     "type": "shift",
-                    "dtstart": format!("{date}T{start}:00-05:00"),
-                    "dtend": format!("{date}T{end}:00-05:00"),
+                    "dtstart": crate::sling::shift_iso(&date, &start),
+                    "dtend": crate::sling::shift_iso(&date, &end),
                     "user": uid.map(|u| serde_json::json!({"id": u})),
                     "position": {"id": pid},
                     "location": {"id": studio_cfg.home_location_id},
@@ -414,8 +413,8 @@ fn build_propose_payload(
                 let pid: i32 = r.get(4)?;
                 Ok(serde_json::json!({
                     "type": "shift",
-                    "dtstart": format!("{date}T{start}:00-05:00"),
-                    "dtend": format!("{date}T{end}:00-05:00"),
+                    "dtstart": crate::sling::shift_iso(&date, &start),
+                    "dtend": crate::sling::shift_iso(&date, &end),
                     "user": uid.map(|u| serde_json::json!({"id": u})),
                     "position": {"id": pid},
                     "location": {"id": studio_cfg.home_location_id},
@@ -459,18 +458,20 @@ fn spawn_propose(
     use std::io::Write;
     use std::process::Stdio;
 
-    let python_bin = if cfg!(windows) { "python" } else { "python3" };
+    // Probed once and cached (py -3 / python / python3, Store stub and
+    // version checked); Err is an actionable install message.
+    let python = crate::python::resolve()?;
     let script = script_path
         .to_str()
         .ok_or_else(|| "script path is not valid UTF-8".to_string())?;
-    let mut child = Command::new(python_bin)
+    let mut child = python.command()
         .args([script, "--json-out", "--from-stdin", "--target-month", target_month])
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to spawn {python_bin}: {e}"))?;
+        .map_err(|e| format!("failed to spawn {}: {e}", python.display()))?;
 
     {
         let stdin = child.stdin.as_mut().ok_or_else(|| "no stdin".to_string())?;
@@ -2710,6 +2711,8 @@ pub struct PushSummary {
     pub created: i64,
     pub failed: i64,
     pub skipped: i64,
+    /// Set when the pre-push database backup failed (the push still ran).
+    pub backup_warning: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -2849,7 +2852,7 @@ pub fn push_proposal_execute(
     token: State<'_, SlingToken>,
     proposal_id: i64,
 ) -> Result<PushSummary, String> {
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
 
     let token_str = {
         let t = token.0.lock().map_err(err)?;
@@ -2869,6 +2872,19 @@ pub fn push_proposal_execute(
         .collect();
     let skipped = (specs.len() - to_create.len()) as i64;
     let total = to_create.len() as i64;
+
+    // Routine backup before writing anything. Non-fatal: a failure is
+    // logged and reported with the summary, never blocks the push.
+    let backup_warning = if to_create.is_empty() {
+        None
+    } else {
+        let conn = db.0.lock().map_err(err)?;
+        let backup_state = app.state::<crate::backup::BackupState>();
+        match db_path(&app) {
+            Ok(path) => crate::backup::run(&conn, &path, "prepush", Some(&backup_state)).err(),
+            Err(e) => Some(format!("prepush backup failed: {e:#}")),
+        }
+    };
 
     // Open the audit row.
     let push_id: i64 = {
@@ -2928,7 +2944,7 @@ pub fn push_proposal_execute(
     if aborted_401 {
         return Err(format!("sling-401: token expired after creating {created} shift(s)"));
     }
-    Ok(PushSummary { push_id, created, failed, skipped })
+    Ok(PushSummary { push_id, created, failed, skipped, backup_warning })
 }
 
 #[tauri::command]

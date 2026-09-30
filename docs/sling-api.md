@@ -79,7 +79,7 @@ Body:
 
 **Note:** `users` is an array on POST, but `user` (singular) on PUT and in responses. Don't symmetrize.
 
-`dtstart`/`dtend` are sent as naive local time strings (no timezone offset). Sling echoes them back with the timezone applied (`-05:00`).
+`dtstart`/`dtend` are sent as naive local time strings (no timezone offset). Sling echoes them back with the timezone applied (`-05:00` during CDT, `-06:00` during CST). Query-side offsets (`dates=`, `viewdates`/`cachedates`) must likewise use each date's own America/Chicago offset — see `sling::month_range` / `view_cache_dates`.
 
 Returns array of one shift on success (200/201). Unwrap `resp[0]`.
 

@@ -6,6 +6,7 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
   AlgorithmVersion,
+  BackupEntry,
   Teacher,
   Position,
   ProposalSummary,
@@ -216,6 +217,12 @@ function findProposal(id: number): MockProposal {
   return p;
 }
 
+const DEV_BACKUPS: BackupEntry[] = [
+  { name: "scheduler-20260929-081502-startup.duckdb", path: "backups/scheduler-20260929-081502-startup.duckdb", size_bytes: 3_407_872, created_at: "2026-09-29 08:15:02", reason: "startup" },
+  { name: "scheduler-20260928-164410-prepush.duckdb", path: "backups/scheduler-20260928-164410-prepush.duckdb", size_bytes: 3_395_584, created_at: "2026-09-28 16:44:10", reason: "prepush" },
+  { name: "scheduler-20260928-090133-startup.duckdb", path: "backups/scheduler-20260928-090133-startup.duckdb", size_bytes: 3_383_296, created_at: "2026-09-28 09:01:33", reason: "startup" },
+];
+
 export function installDevMock() {
   // eslint-disable-next-line no-console
   console.info("[barrekeep] Tauri shell not detected — using dev preview data.");
@@ -233,6 +240,29 @@ export function installDevMock() {
       // ---- Meta / secrets ----
       case "db_info":
         return { path: "data/scheduler.duckdb", schema_version: 9, teacher_count: TEACHERS.length, position_count: POSITIONS.length };
+      case "check_python":
+        await sleep(300);
+        return { found: true, version: "3.12.4", command: "py -3", path: "C:\\Python312\\python.exe", error: null, min_version: "3.11" };
+      case "list_backups":
+        return { dir: "C:\\Users\\you\\AppData\\Local\\com.barrekeep.app\\backups", keep: 14, backups: DEV_BACKUPS, last_error: null };
+      case "backup_now": {
+        await sleep(400);
+        const d = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+        const entry = {
+          name: `scheduler-${stamp}-manual.duckdb`,
+          path: `backups/scheduler-${stamp}-manual.duckdb`,
+          size_bytes: 3_407_872,
+          created_at: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+          reason: "manual",
+        };
+        DEV_BACKUPS.unshift(entry);
+        DEV_BACKUPS.splice(14);
+        return entry;
+      }
+      case "open_backups_folder":
+        return null;
       case "has_sling_token":
         return hasSlingToken;
       case "set_sling_token":
@@ -434,7 +464,7 @@ export function installDevMock() {
       }
       case "push_proposal_execute":
         await sleep(1800);
-        return { push_id: 1, created: 38, failed: 0, skipped: 2 };
+        return { push_id: 1, created: 38, failed: 0, skipped: 2, backup_warning: null };
 
       // ---- Claude review ----
       case "review_proposal":

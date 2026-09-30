@@ -24,10 +24,17 @@ import type {
   PushSummary,
   DiscoveredStudio,
   RosterSyncSummary,
+  PythonStatus,
+  BackupsInfo,
+  BackupEntry,
 } from "../types";
 
 export const api = {
   dbInfo: () => invoke<DbInfo>("db_info"),
+  checkPython: () => invoke<PythonStatus>("check_python"),
+  listBackups: () => invoke<BackupsInfo>("list_backups"),
+  backupNow: () => invoke<BackupEntry>("backup_now"),
+  openBackupsFolder: () => invoke<void>("open_backups_folder"),
   listTeachers: () => invoke<Teacher[]>("list_teachers"),
   updateTeacherSettings: (slingUserId: number, weeklyTarget: number, weeklyMax: number) =>
     invoke<void>("update_teacher_settings", { slingUserId, weeklyTarget, weeklyMax }),

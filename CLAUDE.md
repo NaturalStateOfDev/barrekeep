@@ -99,9 +99,15 @@ When you (Claude) edit code in this repo:
   precision — parsers must accept either a string or a number.
 - **Cloudflare blocks default User-Agents.** HTTP requests must send
   browser-like headers (User-Agent, Origin, Referer, Sec-Fetch-*).
-- **DST transitions.** The studio observes US Central Time; the scripts
-  currently send a fixed `-05:00` offset on date queries. Spring-forward /
-  fall-back will need explicit timezone handling.
+- **DST transitions.** The studio observes US Central Time (America/Chicago).
+  Never hard-code `-05:00`/`-0500` — it's only right during CDT. Rust derives
+  every offset from `sling::STUDIO_TZ` (chrono-tz) via `studio_iso` /
+  `month_range` / `view_cache_dates`, each boundary with its OWN offset
+  (November 2026 = `…11-01T00:00:00-05:00` to `…11-30T23:59:59-06:00`).
+  `propose.py` uses a stdlib `_USCentral` tzinfo (zoneinfo needs the tzdata
+  package on Windows). Push bodies stay naive local times — Sling applies the
+  zone. The legacy `scripts/sling_extract.py` / `push_to_sling.py` /
+  `rollback_push.py` still carry fixed June-2026 `-05:00` constants.
 - **DuckDB UPDATEs are landmines near indexes and foreign keys.** An UPDATE
   that touches an indexed column (UNIQUE/PK) is executed as DELETE+INSERT
   internally, and fails with "still referenced by a foreign key in a
