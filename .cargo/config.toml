@@ -4,6 +4,10 @@
 # memory and time. Scoped to Linux, so the Windows laptop and the
 # windows-latest CI runners are untouched.
 #
-# Requires mold on the machine: sudo apt-get install -y mold
+# Requires mold on the machine:
+#   Debian/Ubuntu: sudo apt-get install -y mold
+#   Arch:          sudo pacman -S mold
+# Without mold, override for the session (RUSTFLAGS replaces these rustflags):
+#   export RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]

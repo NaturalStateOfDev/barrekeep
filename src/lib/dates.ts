@@ -173,24 +173,82 @@ export function prettyDayLong(iso: string): string {
   return `${days[d.getUTCDay()]}, ${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
-// DuckDB returns 'YYYY-MM-DD HH:MM:SS+TZ'. Trim to local-ish display:
-// 24h → "2026-07-03 09:20:44" (as stored); 12h → "2026-07-03 9:20 AM".
-export function formatTimestamp(iso: string, fmt: TimeFormat = DEFAULT_TIME_FORMAT): string {
-  const trimmed = iso.replace("T", " ").replace(/\.\d+/, "").slice(0, 19);
-  if (fmt === "24h") return trimmed;
-  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})(:\d{2})?$/.exec(trimmed);
-  return m ? `${m[1]} ${formatTime(m[2], fmt)}` : trimmed;
+/** The studio's time zone (matches `sling::STUDIO_TZ` in Rust). */
+export const STUDIO_TZ = "America/Chicago";
+
+// An offset (or Z) right after a time of day — not the "-20" of a bare date.
+const OFFSET_RE = /\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}(?::?\d{2})?)$/;
+
+/** Parse a backend timestamp into a Date. The backend sends TIMESTAMPTZ
+ *  values as ISO-8601 UTC ("2026-11-01T06:30:00Z"); older / other forms
+ *  ("2026-07-03 09:20:44+00", "…-05", "…+00:00") are accepted too. A string
+ *  without an offset is a local wall time. null when unparseable. */
+export function parseTimestamp(ts: string): Date | null {
+  let s = (ts ?? "").trim().replace(" ", "T");
+  // "+00" / "-05" → "+00:00" / "-05:00" (Date only accepts full offsets).
+  if (OFFSET_RE.test(s)) {
+    s = s.replace(/([+-]\d{2})$/, "$1:00").replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  }
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// Normalize a timestamp to comparable local wall-clock form 'YYYY-MM-DDTHH:MM:SS'.
-// DuckDB TIMESTAMPTZ casts render as 'YYYY-MM-DD HH:MM:SS[.frac]±TZ' (space
-// separator + offset, in the laptop's local zone = studio time); shift-local
-// strings are built as 'YYYY-MM-DDTHH:MM:SS'. Lexicographic comparison across
-// the two formats breaks at the separator (' ' < 'T'), so both sides must be
-// normalized before comparing.
+/** Wall-clock parts of `d` in `timeZone` (undefined = the viewer's local zone). */
+function zonedParts(d: Date, timeZone?: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    hh: get("hour"),
+    mm: get("minute"),
+    ss: get("second"),
+  };
+}
+
+/** A backend timestamp shown in local time: 24h → "2026-07-03 09:20:44";
+ *  12h → "2026-07-03 9:20 AM". Unparseable input is returned unchanged.
+ *  `timeZone` is for tests; the app shows the viewer's local zone. */
+export function formatTimestamp(
+  ts: string,
+  fmt: TimeFormat = DEFAULT_TIME_FORMAT,
+  timeZone?: string,
+): string {
+  const d = parseTimestamp(ts);
+  if (!d) return ts;
+  const p = zonedParts(d, timeZone);
+  if (fmt === "24h") return `${p.date} ${p.hh}:${p.mm}:${p.ss}`;
+  return `${p.date} ${formatTime(`${p.hh}:${p.mm}`, fmt)}`;
+}
+
+/** Local calendar date "YYYY-MM-DD" of a backend timestamp. */
+export function formatLocalDate(ts: string, timeZone?: string): string {
+  const d = parseTimestamp(ts);
+  return d ? zonedParts(d, timeZone).date : ts;
+}
+
+// Normalize a timestamp to comparable studio wall-clock form 'YYYY-MM-DDTHH:MM:SS'.
+// Availability blocks arrive as instants (ISO UTC 'Z', or any offset); shift
+// times are studio-local strings 'YYYY-MM-DDTHH:MM:SS' with no offset. An
+// instant is converted to studio time (America/Chicago, DST-aware); a string
+// without an offset is already studio-local and only trimmed. Both sides
+// must be normalized before comparing lexicographically.
 export function wallClock(ts: string): string {
-  return ts
-    .replace(" ", "T")
-    .replace(/(\.\d+)?([+-]\d{2}(:?\d{2})?)?$/, "")
-    .slice(0, 19);
+  const s = ts.trim().replace(" ", "T");
+  if (OFFSET_RE.test(s)) {
+    const d = parseTimestamp(s);
+    if (d) {
+      const p = zonedParts(d, STUDIO_TZ);
+      return `${p.date}T${p.hh}:${p.mm}:${p.ss}`;
+    }
+  }
+  return s.replace(/\.\d+$/, "").slice(0, 19);
 }

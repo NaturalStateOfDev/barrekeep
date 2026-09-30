@@ -568,7 +568,7 @@ mod tests {
     use super::*;
 
     fn conn() -> duckdb::Connection {
-        let c = duckdb::Connection::open_in_memory().unwrap();
+        let c = crate::db::open_in_memory().unwrap();
         crate::migrations::run(&c).unwrap();
         c.execute_batch(
             "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max) VALUES

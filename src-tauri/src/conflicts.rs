@@ -293,16 +293,17 @@ pub fn check_impl(conn: &duckdb::Connection, proposal_id: i64) -> Result<Vec<Dra
     // Blocks overlapping the month, padded a day each side (a leave that
     // starts in the previous month still blocks its first days).
     // (Compared as epoch seconds: the bundled DuckDB has no ICU, so
-    // TIMESTAMPTZ ± INTERVAL doesn't bind.)
+    // TIMESTAMPTZ ± INTERVAL doesn't bind, and epoch(TIMESTAMPTZ) would try
+    // to download the icu extension. epoch_us() is core.)
     let first = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").map_err(err)?;
     let lo = local_to_epoch(&(first - chrono::Duration::days(1)).to_string(), "00:00").ok_or("bad month")?;
     let hi = local_to_epoch(&(first + chrono::Duration::days(32)).to_string(), "00:00").ok_or("bad month")?;
     let blocks: Vec<Block> = conn
         .prepare(
             "SELECT sling_user_id, source,
-                    CAST(epoch(starts_at) AS BIGINT), CAST(epoch(ends_at) AS BIGINT)
+                    epoch_us(starts_at) // 1000000, epoch_us(ends_at) // 1000000
              FROM availability_blocks
-             WHERE epoch(starts_at) <= ? AND epoch(ends_at) >= ?",
+             WHERE epoch_us(starts_at) // 1000000 <= ? AND epoch_us(ends_at) // 1000000 >= ?",
         )
         .map_err(err)?
         .query_map(duckdb::params![hi, lo], |r| {
@@ -470,7 +471,7 @@ mod tests {
 
     #[test]
     fn check_impl_reads_timestamptz_blocks_and_clears_staleness() {
-        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
         crate::migrations::run(&conn).unwrap();
         conn.execute_batch(
             "INSERT INTO teachers (sling_user_id, display_name, weekly_target, weekly_max)

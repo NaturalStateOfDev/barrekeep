@@ -21,26 +21,34 @@ server, no cloud database.
 
 - **Shell:** Tauri (Rust-based, ships a small native installer)
 - **Frontend:** React + TypeScript + Vite, plain CSS (no Tailwind)
-- **Storage:** DuckDB embedded (single file at `data/scheduler.duckdb`)
+- **Storage:** DuckDB embedded — one file, `scheduler.duckdb`, in the app's local
+  data dir (`%LOCALAPPDATA%\com.barrekeep.app\` on Windows,
+  `~/.local/share/com.barrekeep.app/` on Linux; see `db.rs`)
 - **Secrets:** Tauri Stronghold plugin (OS keychain, never on disk in plaintext)
 - **AI:** Anthropic SDK for prompt-driven schedule analysis
 - **Sling integration:** in-process Rust (`src-tauri/src/sling.rs` — pull, push,
-  dedupe, rate limiting). Only `scripts/propose.py` (the schedule algorithm)
-  still runs as a sidecar, fed a JSON payload over stdin.
+  dedupe, rate limiting; `push_sync.rs` — incremental push/sync). Only
+  `scripts/propose.py` (the schedule algorithm) runs as a subprocess, fed a
+  JSON payload over stdin; `python.rs` finds a Python 3.11+ to run it.
 
 ## Repository layout
 
 See `docs/architecture.md` for the full map. The summary:
 
 - `src/` — React frontend
-- `src-tauri/` — Rust shell + Tauri config (commands, migrations, seed)
-- `scripts/` — Python utilities. `propose.py` is the schedule algorithm,
-  invoked with a JSON payload over stdin. `sling_extract.py` and
-  `push_to_sling.py` are Sling integration helpers.
+- `src-tauri/` — Rust shell + Tauri config. Beyond `commands.rs`, `sling.rs`
+  and `migrations.rs`: `drafts.rs` (multi-draft + push draft), `push_sync.rs`
+  (Sling sync), `conflicts.rs` (re-check a draft against fresh availability),
+  `backup.rs` (rotating DB backups), `python.rs` (Python discovery),
+  `studio_setup.rs` (studio-config auto-detect)
+- `scripts/` — `propose.py` is the schedule algorithm, invoked with a JSON
+  payload over stdin; `tests/` holds its regression + release smoke tests.
+  `legacy/` keeps the retired Python Sling scripts for reference only
+  (superseded by `sling.rs` + `push_sync.rs`; never run them).
 - `prompts/` — Markdown files, one per Claude prompt (proposer, verifier).
   Versioned in git; read at runtime.
-- `data/` — all local-only (gitignored). Holds the DuckDB database and any
-  local pulls/fixtures. Nothing under `data/` ships.
+- `data/` — all local-only (gitignored): local pulls/fixtures for dev. The
+  app's database is NOT here (see Storage above). Nothing under `data/` ships.
 - `docs/` — architecture, Sling API notes, data model
 - `.claude/` — skills and subagents used by Claude Code when working on this repo
 
@@ -48,10 +56,11 @@ See `docs/architecture.md` for the full map. The summary:
 
 - **Studio identifiers are runtime config, not compiled in.** The Sling org id,
   acting-user id, and home-location id live in the `studio_config` table
-  (Settings → Studio configuration). A pull errors until they're set. The
-  seeded roster is placeholder demo data; the real roster arrives via the pull.
+  (Settings → Studio configuration; auto-detected after a Sling login, never
+  overwritten once set). A pull errors until they're set.
 - **Sling rate limits.** Aggressive. Push must be batched (10 shifts per batch,
-  10s pause between batches, exponential backoff on 429). See `push_to_sling.py`.
+  10s pause between batches, 30/60/90s backoff on 429). See `sling.rs` and
+  `push_sync.rs`.
 - **Sling auth tokens expire** and are refreshed via the in-app Sling login (or
   pasted from a browser DevTools session). There is no programmatic OAuth flow.
 - **No publishing.** The app creates shifts as `status: "planning"` only. A
@@ -84,8 +93,10 @@ When you (Claude) edit code in this repo:
 4. **Match the existing Python scripts' style** in `scripts/`: type hints,
    urllib over requests (no extra dependency), explicit error handling, JSON
    audit logs.
-5. **Never delete from `data/scheduler.duckdb` without a backup.** The schedule
-   history is months of work.
+5. **Never delete from `scheduler.duckdb` without a backup.** The schedule
+   history is months of work. `backup.rs` keeps 14 rotating backups
+   (`backups/` next to the DB: daily at startup, before every Sling push, and
+   Settings → Back up now); take one before any manual surgery.
 
 ## Known gotchas (the kind that bite at 11pm)
 
@@ -104,10 +115,10 @@ When you (Claude) edit code in this repo:
   every offset from `sling::STUDIO_TZ` (chrono-tz) via `studio_iso` /
   `month_range` / `view_cache_dates`, each boundary with its OWN offset
   (November 2026 = `…11-01T00:00:00-05:00` to `…11-30T23:59:59-06:00`).
-  `propose.py` uses a stdlib `_USCentral` tzinfo (zoneinfo needs the tzdata
-  package on Windows). Push bodies stay naive local times — Sling applies the
-  zone. The legacy `scripts/sling_extract.py` / `push_to_sling.py` /
-  `rollback_push.py` still carry fixed June-2026 `-05:00` constants.
+  `propose.py` uses a stdlib `_USCentral` tzinfo (see the tzdata gotcha
+  below). Push bodies stay naive local times — Sling applies the
+  zone. The legacy `scripts/legacy/*.py` scripts still carry fixed
+  June-2026 `-05:00` constants.
 - **DuckDB UPDATEs are landmines near indexes and foreign keys.** An UPDATE
   that touches an indexed column (UNIQUE/PK) is executed as DELETE+INSERT
   internally, and fails with "still referenced by a foreign key in a
@@ -118,7 +129,14 @@ When you (Claude) edit code in this repo:
   The engine version is tilde-pinned in `src-tauri/Cargo.toml` (crate
   `1.1MMPP` = libduckdb `1.MM.PP`) because engine bumps change the on-disk
   format and are not backward-readable — bump deliberately, via the
-  dependabot PR.
+  dependabot PR. The `json` extension is compiled in; ICU is NOT (not
+  bundleable from the crates.io crate) and extension autoload is off
+  (`db.rs`), so ICU-only SQL like `epoch(TIMESTAMPTZ)`, `date_trunc` on a
+  TIMESTAMPTZ, or TIMESTAMPTZ ± INTERVAL fails — use core functions
+  (`epoch_us`) or do the date math in Rust. Read TIMESTAMPTZ as text only
+  via `db::utc_iso!(col)` (ISO UTC `…Z`; the frontend localizes it), and
+  compute "this month" with `sling::studio_month_at`, never SQL `now()`
+  (UTC — wrong after 7pm Central on a month's last day).
 - **Windows file locks are mandatory; never touch `scheduler.duckdb` on disk
   while a connection is open.** Copying, moving, or deleting the database
   file (or its WAL) while any DuckDB connection holds it fails on Windows
@@ -131,6 +149,18 @@ When you (Claude) edit code in this repo:
   connection, `CHECKPOINT`, explicitly `close()` it, then do the file op
   (see `migrations::backup_if_pending`). The Rust tests only reproduce
   this on a Windows runner.
+- **Tauri 2 runs plain synchronous `#[tauri::command]`s on the main (UI)
+  thread.** Anything slow — HTTP (Sling, Anthropic), spawning Python, DB
+  copies/backups — must be `#[tauri::command(async)]` or an `async fn`, or
+  the whole window freezes until it returns.
+- **Stock Windows Python has no tzdata**, so `propose.py` can't use
+  `zoneinfo`; it carries a built-in US Central table (`_USCentral`). Keep it
+  stdlib-only — the studio PC has a bare python.org install.
+- **Sling sync only touches shifts it owns and nobody has touched.** Push
+  never updates or deletes a Sling shift that is published, missing, not
+  created by the app, or modified in Sling since the last push (compared
+  against `push_result_snapshots`); pre-0013 pushes have no snapshot and are
+  left alone. Keep it that way — the manager edits in Sling too.
 - **Creating a webview window (the Sling login) must NOT happen on the UI
   thread on Windows.** `WebviewWindowBuilder::build()` blocks until WebView2's
   controller-ready notification arrives, and that only fires from the event

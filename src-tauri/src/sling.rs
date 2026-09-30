@@ -197,18 +197,6 @@ pub struct PullPayload {
     pub history_shifts: Vec<CalendarEvent>, // trailing 3 months, shifts only, home location only
 }
 
-/// Returns the set of group IDs for position-type groups only.
-/// Test-only: the live pull derives qualifications elsewhere; this pins the
-/// fixture's position-group shape.
-#[cfg(test)]
-pub fn position_group_ids(groups: &[SlingGroup]) -> std::collections::HashSet<i64> {
-    groups
-        .iter()
-        .filter(|g| g.kind == "position")
-        .map(|g| g.id)
-        .collect()
-}
-
 /// Returns a (location_id → name) map for location-type groups only.
 /// Users' Sling `groupIds` include both position and location ids, so
 /// intersecting against this map yields the user's location memberships.
@@ -240,7 +228,7 @@ pub fn compute_locations(
 }
 
 /// Filter an event list to (home location ∪ no-location) + the given kind(s).
-/// Matches scripts/sling_extract.py:is_home_teacher_event — events
+/// Matches scripts/legacy/sling_extract.py:is_home_teacher_event — events
 /// without a location are allowed through (Sling sometimes omits the
 /// field on past or planning-state shifts and on time-off events).
 pub fn filter_events<'a>(
@@ -254,7 +242,7 @@ pub fn filter_events<'a>(
             kinds.contains(&e.kind.as_str())
                 && e.location
                     .as_ref()
-                    .map_or(true, |l| l.id == home_location_id)
+                    .is_none_or(|l| l.id == home_location_id)
         })
         .collect()
 }
@@ -387,7 +375,7 @@ pub enum DeleteOutcome {
 
 /// DELETE with browser-like headers + percent-encoded query params. Sling
 /// answers 204 with an EMPTY body, so unlike GET/POST the 2xx branch must not
-/// parse JSON. Ported from scripts/rollback_push.py (method, URL, headers).
+/// parse JSON. Ported from scripts/legacy/rollback_push.py (method, URL, headers).
 fn http_delete(token: &str, url: &str, query: &[(&str, &str)]) -> Result<DeleteOutcome> {
     let mut req = http_agent()
         .delete(url)
@@ -512,6 +500,23 @@ pub fn studio_iso(ndt: chrono::NaiveDateTime) -> String {
     studio_local(ndt).format("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
+/// The studio's current month, "YYYY-MM", at instant `now`. Month
+/// boundaries follow studio time, not UTC (7pm Central on the 31st is
+/// already next month in UTC). Pass `chrono::Utc::now()` in the app.
+pub fn studio_month_at(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.with_timezone(&STUDIO_TZ).format("%Y-%m").to_string()
+}
+
+/// A `db::utc_iso!` string ("2026-11-02T11:00:00Z") re-expressed as
+/// studio-local ISO with its own offset ("2026-11-02T05:00:00-06:00"), for
+/// payloads that sit next to studio-local shift times (the Claude editor).
+/// Anything unparseable is returned unchanged.
+pub fn utc_iso_to_studio(utc: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(utc)
+        .map(|dt| dt.with_timezone(&STUDIO_TZ).format("%Y-%m-%dT%H:%M:%S%:z").to_string())
+        .unwrap_or_else(|_| utc.to_string())
+}
+
 /// studio_iso for a DB-style date ("YYYY-MM-DD") + "HH:MM" pair — the shape
 /// external_sling_shifts stores. None if either part fails to parse.
 pub fn studio_iso_hm(date: &str, hhmm: &str) -> Option<String> {
@@ -546,7 +551,7 @@ fn parse_month(target_month: &str) -> Result<(chrono::NaiveDate, chrono::NaiveDa
 /// the last day at 23:59:59, studio time. Each boundary carries its OWN
 /// offset — November 2026 is "2026-11-01T00:00:00-05:00" (still CDT) to
 /// "2026-11-30T23:59:59-06:00" (CST). Sling returns empty on historical
-/// /calendar queries when the offset is omitted (scripts/sling_extract.py).
+/// /calendar queries when the offset is omitted (scripts/legacy/sling_extract.py).
 pub fn month_range(target_month: &str) -> Result<(String, String)> {
     let (start, next) = parse_month(target_month)?;
     let end = next.pred_opt().unwrap();
@@ -560,7 +565,7 @@ pub fn month_range(target_month: &str) -> Result<(String, String)> {
 /// client's padding (prev day .. first-of-next-month + 4 days, cachedates
 /// one day wider each side). NB: offset is "-0500" (no colon) here, unlike
 /// the calendar `dates=` param which uses "-05:00". Each date uses its own
-/// studio offset ("-0600" in CST). Matches scripts/push_to_sling.py
+/// studio offset ("-0600" in CST). Matches scripts/legacy/push_to_sling.py
 /// VIEWDATES/CACHEDATES for June 2026.
 pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
     let (first, next_first) = parse_month(month)?;
@@ -604,14 +609,14 @@ pub fn spec_fingerprint(s: &PushSpec, home_location_id: i64) -> String {
 }
 
 /// Build the set of fingerprints already present at the home location.
-/// Only planning + published shifts count (matches push_to_sling.py).
+/// Only planning + published shifts count (matches legacy push_to_sling.py).
 pub fn existing_fingerprints(events: &[CalendarEvent], home_location_id: i64) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for ev in events {
         if ev.kind != "shift" { continue; }
         // Unlike filter_events (which lets location-less events through), we
         // require an explicit home-location match here — matches
-        // push_to_sling.py's existing_shifts_at_home. A shift returned without
+        // legacy push_to_sling.py's existing_shifts_at_home. A shift returned without
         // a location can't be confirmed as home, so it's conservatively not
         // counted as a duplicate; the push would re-attempt it, and re-push is
         // idempotent. Our own created shifts always echo back their location.
@@ -710,7 +715,7 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
     );
 
     // Offset matters: without it Sling returns empty for historical
-    // /calendar queries (scripts/sling_extract.py).
+    // /calendar queries (scripts/legacy/sling_extract.py).
     let hist_start_iso = history_start_iso(target_month)?;
     let hist_end_iso = start.clone();
     let nonce2 = chrono::Utc::now().timestamp_millis();
@@ -734,7 +739,7 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
         .into_iter()
         .filter(|e: &CalendarEvent|
             e.kind == "shift"
-            && e.location.as_ref().map_or(true, |l| l.id == cfg.home_location_id)
+            && e.location.as_ref().is_none_or(|l| l.id == cfg.home_location_id)
         )
         .collect();
     eprintln!(
@@ -859,6 +864,34 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Group IDs of position-type groups. The live pull derives
+    /// qualifications elsewhere; this only pins the fixture's group shape.
+    fn position_group_ids(groups: &[SlingGroup]) -> std::collections::HashSet<i64> {
+        groups
+            .iter()
+            .filter(|g| g.kind == "position")
+            .map(|g| g.id)
+            .collect()
+    }
+
+    #[test]
+    fn studio_month_follows_central_time_not_utc() {
+        let utc = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        // 7:30pm CDT on Sept 30 is already October in UTC.
+        assert_eq!(studio_month_at(utc("2026-10-01T00:30:00Z")), "2026-09");
+        assert_eq!(studio_month_at(utc("2026-10-01T05:00:00Z")), "2026-10");
+        // CST: New Year's Eve 11pm Central = 05:00Z Jan 1.
+        assert_eq!(studio_month_at(utc("2027-01-01T05:00:00Z")), "2026-12");
+        assert_eq!(studio_month_at(utc("2027-01-01T06:00:00Z")), "2027-01");
+    }
+
+    #[test]
+    fn utc_iso_to_studio_uses_the_instants_own_offset() {
+        assert_eq!(utc_iso_to_studio("2026-11-02T11:00:00Z"), "2026-11-02T05:00:00-06:00");
+        assert_eq!(utc_iso_to_studio("2026-10-31T10:45:00Z"), "2026-10-31T05:45:00-05:00");
+        assert_eq!(utc_iso_to_studio("garbage"), "garbage");
+    }
+
     #[test]
     fn month_range_returns_correct_bounds() {
         let (s, e) = month_range("2026-06").unwrap();
@@ -910,7 +943,7 @@ mod tests {
     #[test]
     fn view_cache_dates_reproduce_june_window() {
         let (view, cache) = view_cache_dates("2026-06").unwrap();
-        // Matches the constants the working push_to_sling.py used for June 2026.
+        // Matches the constants the legacy push_to_sling.py used for June 2026.
         assert_eq!(view, "2026-05-31T00:00:00-0500/2026-07-05T00:00:00-0500");
         assert_eq!(cache, "2026-05-30T00:00:00-0500/2026-07-06T00:00:00-0500");
     }

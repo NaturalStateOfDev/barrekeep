@@ -1,4 +1,5 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import { parseTimestamp } from "../../lib/dates";
 
 interface Props {
   lastPulledAt: string;
@@ -35,7 +36,9 @@ export function StaleBanner({ lastPulledAt, refreshing, readonly, onRefreshAvail
 }
 
 function prettyAgo(iso: string): string {
-  const then = new Date(iso).getTime();
+  const d = parseTimestamp(iso);
+  if (!d) return iso;
+  const then = d.getTime();
   const ms = Date.now() - then;
   const mins = Math.round(ms / 60000);
   if (mins < 60) return `${mins} min ago`;

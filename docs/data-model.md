@@ -1,11 +1,11 @@
 # Data model
 
-DuckDB schema for `data/scheduler.duckdb`. The DDL below is the source of truth; `src/lib/migrations.ts` runs equivalent statements at app startup.
+DuckDB schema for `scheduler.duckdb`, which lives in the app's local data dir (`%LOCALAPPDATA%\com.barrekeep.app\` on Windows, `~/.local/share/com.barrekeep.app/` on Linux). The source of truth is the forward-only SQL in `src-tauri/migrations/NNNN_*.sql` (0001–0013), applied at startup by `src-tauri/src/migrations.rs`; the DDL below mirrors the resulting schema.
 
 ## Conventions
 
 - All ids are `INTEGER` unless they come from Sling, which uses string-form bigints (`VARCHAR`).
-- All timestamps are `TIMESTAMPTZ`.
+- All timestamps are `TIMESTAMPTZ`. Read them as text only via `db::utc_iso!(col)` → ISO-8601 UTC (`2026-11-01T06:30:00Z`); never `CAST(col AS VARCHAR)`, whose zone depends on whether ICU is loaded. The frontend shows them in local time.
 - All money values are `DECIMAL(10, 4)` so we don't lose fractional cents on Anthropic API costs.
 - Soft-deletes via `deleted_at TIMESTAMPTZ NULL` rather than hard deletes, so undo is always possible.
 

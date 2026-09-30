@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { ruleLines } from "../../lib/rules";
+import { formatLocalDate } from "../../lib/dates";
 import { useTimeFormat } from "../../lib/timeFormat";
 import type { AlgorithmVersion, Teacher } from "../../types";
 
@@ -102,7 +103,7 @@ export function AlgorithmCard({ refreshToken, teachers }: Props) {
             {active.description}
             <span className="muted">
               {" · adopted "}
-              {active.adopted_at.slice(0, 10)}
+              {formatLocalDate(active.adopted_at)}
               {active.last_used_month && ` · last used ${active.last_used_month}`}
             </span>
           </>
@@ -156,7 +157,7 @@ export function AlgorithmCard({ refreshToken, teachers }: Props) {
                 </td>
                 <td>{v.description}</td>
                 <td className="muted">{v.created_by}</td>
-                <td className="muted">{v.adopted_at.slice(0, 10)}</td>
+                <td className="muted">{formatLocalDate(v.adopted_at)}</td>
                 <td className="muted">{v.last_used_month ?? "—"}</td>
                 <td className="muted">
                   <code style={{ fontSize: 11 }}>{scriptBadge(v)}</code>

@@ -26,7 +26,7 @@ see the calendar request URL.
 
 ## Cloudflare WAF
 
-Sling sits behind Cloudflare. Default Python user-agent is blocked with a 1010 error. All requests must include browser-like headers:
+Sling sits behind Cloudflare. Default HTTP-client user-agents (Python, ureq) are blocked with a 1010 error. All requests must include browser-like headers:
 
 ```
 User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ...
@@ -37,7 +37,7 @@ Sec-Fetch-Mode: cors
 Sec-Fetch-Site: same-site
 ```
 
-See `scripts/push_to_sling.py` for the full working header set.
+See the header helpers in `src-tauri/src/sling.rs` for the full working header set.
 
 ## Endpoints
 
@@ -114,7 +114,7 @@ Same browser-like headers as POST (plus `Accept: application/json, text/plain, *
 
 Returns **204 with an empty body** on success — don't parse JSON. The app treats
 **404** as "already gone" (deleted in Sling's UI or by an earlier run), not an
-error. 401/429 as elsewhere. Ported from `scripts/rollback_push.py` into
+error. 401/429 as elsewhere. Ported from the legacy `scripts/legacy/rollback_push.py` into
 `sling::delete_shift` (same 429 backoff as creates: 30s/60s/90s, max 3 tries).
 
 ## Incremental push (sync) and safety rules
@@ -169,7 +169,7 @@ fixed `-05:00` the calendar query uses.
 
 - **Observed limit:** approximately 20 requests per minute. After ~20 rapid requests, Sling returns `429 Too many requests`.
 - **Recovery time:** ~30 seconds (sometimes longer)
-- **Strategy:** batch in 10s with 10 second pauses between batches; on 429, exponential backoff (30s, 60s, 90s) up to 3 retries per shift.
+- **Strategy:** batch in 10s (1s between calls, 10s pause between batches — `push_sync.rs` `BATCH_SIZE` / `INTRA_DELAY_SECS` / `INTER_DELAY_SECS`); on 429, linear backoff (30s, 60s, 90s) up to 3 retries per shift (`sling.rs` `PUSH_MAX_RETRIES`).
 
 ## Position IDs (the studio)
 

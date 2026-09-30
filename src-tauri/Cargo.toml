@@ -26,7 +26,13 @@ serde_json = "1"
 # the on-disk storage format and are NOT backward-readable — only happen
 # via a deliberate Cargo.toml change (dependabot opens those PRs weekly),
 # while crate-level patch fixes still flow through the lockfile.
-duckdb = { version = "~1.10504", features = ["bundled"] }
+#
+# `json` compiles the json extension in (it was downloaded from
+# extensions.duckdb.org at first use). icu can't be bundled from the
+# crates.io crate (its `icu` feature needs `bundled-cmake`, which requires a
+# duckdb-rs git checkout), so the SQL sticks to core functions instead and
+# db.rs turns extension autoinstall/autoload off.
+duckdb = { version = "~1.10504", features = ["bundled", "json"] }
 thiserror = "2"
 anyhow = "1"
 # HTTP client for the Anthropic API. Sync (blocking) is fine as long as the
