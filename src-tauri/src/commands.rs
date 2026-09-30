@@ -660,11 +660,11 @@ pub struct ProposalSummary {
 
 /// Shared SELECT for ProposalSummary rows (list + get). Callers append
 /// WHERE / ORDER BY.
-const PROPOSAL_SUMMARY_SQL: &str = "SELECT
+const PROPOSAL_SUMMARY_SQL: &str = concat!("SELECT
         p.id,
         p.target_month,
         p.algorithm_version,
-        CAST(p.generated_at AS VARCHAR),
+        ", crate::db::utc_iso!("p.generated_at"), ",
         p.is_current,
         (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id) AS shift_count,
         (SELECT count(*) FROM proposal_shifts ps WHERE ps.proposal_id = p.id AND ps.is_dropped) AS dropped_count,
@@ -680,7 +680,7 @@ const PROPOSAL_SUMMARY_SQL: &str = "SELECT
      FROM proposals p
      LEFT JOIN proposal_drafts d ON d.proposal_id = p.id
      LEFT JOIN month_push_candidate m
-        ON m.target_month = p.target_month AND m.proposal_id = p.id";
+        ON m.target_month = p.target_month AND m.proposal_id = p.id");
 
 fn summary_from_row(r: &duckdb::Row<'_>) -> duckdb::Result<ProposalSummary> {
     Ok(ProposalSummary {
@@ -747,14 +747,14 @@ pub(crate) fn staleness(
     proposal_id: i64,
 ) -> Result<(bool, Option<String>, Option<String>), String> {
     conn.query_row(
-        "SELECT
+        concat!("SELECT
             COALESCE(mp.pulled_at > greatest(p.generated_at, COALESCE(dc.checked_at, p.generated_at)), FALSE),
-            CAST(mp.pulled_at AS VARCHAR),
-            CAST(dc.checked_at AS VARCHAR)
+            ", crate::db::utc_iso!("mp.pulled_at"), ",
+            ", crate::db::utc_iso!("dc.checked_at"), "
          FROM proposals p
          LEFT JOIN month_pulls mp ON mp.target_month = p.target_month
          LEFT JOIN draft_checks dc ON dc.proposal_id = p.id
-         WHERE p.id = ?",
+         WHERE p.id = ?"),
         duckdb::params![proposal_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
@@ -1022,7 +1022,7 @@ pub fn list_edits_for_proposal(
     let conn = db.0.lock().map_err(err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT
+            concat!("SELECT
                 e.id,
                 e.proposal_shift_id,
                 CAST(ps.shift_date AS VARCHAR),
@@ -1036,7 +1036,7 @@ pub fn list_edits_for_proposal(
                 p_old.class_name AS old_class_name,
                 p_new.class_name AS new_class_name,
                 e.reason,
-                CAST(e.edited_at AS VARCHAR),
+                ", crate::db::utc_iso!("e.edited_at"), ",
                 e.reverted
              FROM edits e
              JOIN proposal_shifts ps ON ps.id = e.proposal_shift_id
@@ -1054,7 +1054,7 @@ pub fn list_edits_for_proposal(
                 ON e.field = 'sling_position_id'
                AND CAST(p_new.sling_position_id AS VARCHAR) = e.new_value
              WHERE ps.proposal_id = ?
-             ORDER BY e.edited_at DESC",
+             ORDER BY e.edited_at DESC"),
         )
         .map_err(err)?;
     let rows = stmt
@@ -1378,11 +1378,11 @@ pub fn list_reviews_for_proposal(
     let conn = db.0.lock().map_err(err)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, model, input_tokens, output_tokens, cost_usd, duration_ms,
-                    CAST(ran_at AS VARCHAR), output_text
+            concat!("SELECT id, model, input_tokens, output_tokens, cost_usd, duration_ms,
+                    ", crate::db::utc_iso!("ran_at"), ", output_text
              FROM claude_runs
              WHERE proposal_id = ?
-             ORDER BY ran_at DESC",
+             ORDER BY ran_at DESC"),
         )
         .map_err(err)?;
     let rows = stmt
@@ -1529,8 +1529,9 @@ fn build_editor_payload(
             json!({
                 "sling_user_id": b.sling_user_id,
                 "source": b.source,
-                "starts_at": b.starts_at,
-                "ends_at": b.ends_at,
+                // Studio-local with offset, like the shift times beside it.
+                "starts_at": crate::sling::utc_iso_to_studio(&b.starts_at),
+                "ends_at": crate::sling::utc_iso_to_studio(&b.ends_at),
             })
         })
         .collect();
@@ -2906,9 +2907,10 @@ fn query_availability_blocks(
 ) -> Result<Vec<AvailabilityBlockRow>, String> {
     let (start, end) = crate::sling::month_range(target_month).map_err(err)?;
     let mut stmt = conn.prepare(
-        "SELECT sling_user_id, source, CAST(starts_at AS VARCHAR), CAST(ends_at AS VARCHAR)
+        concat!("SELECT sling_user_id, source, ", crate::db::utc_iso!("starts_at"), ", ",
+            crate::db::utc_iso!("ends_at"), "
          FROM availability_blocks
-         WHERE starts_at <= CAST(? AS TIMESTAMPTZ) AND ends_at >= CAST(? AS TIMESTAMPTZ)"
+         WHERE starts_at <= CAST(? AS TIMESTAMPTZ) AND ends_at >= CAST(? AS TIMESTAMPTZ)")
     ).map_err(err)?;
     let rows = stmt.query_map(duckdb::params![&end, &start], |r| {
         Ok(AvailabilityBlockRow {
@@ -3123,7 +3125,7 @@ pub fn refresh_availability_from_sling(
         let t = token.0.lock().map_err(err)?;
         t.clone().ok_or_else(|| "no Sling token — log in to Sling first".to_string())?
     };
-    let current = chrono::Local::now().format("%Y-%m").to_string();
+    let current = crate::sling::studio_month_at(chrono::Utc::now());
     let (cfg, months) = {
         let conn = db.0.lock().map_err(err)?;
         (load_studio_config_checked(&conn)?, refresh_months(&conn, &current)?)

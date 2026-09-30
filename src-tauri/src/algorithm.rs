@@ -424,8 +424,8 @@ pub fn shipped_script_sha(project_root: &Path) -> Option<String> {
         .map(|b| sha256_hex(&b))
 }
 
-const VERSION_COLUMNS: &str = "version, description, CAST(rules AS VARCHAR), script_file, created_by,
-     CAST(adopted_at AS VARCHAR), baseline_sha256";
+const VERSION_COLUMNS: &str = concat!("version, description, CAST(rules AS VARCHAR), script_file, created_by,
+     ", crate::db::utc_iso!("adopted_at"), ", baseline_sha256");
 
 type VersionRow = (i32, String, String, Option<String>, String, String, Option<String>);
 
@@ -716,6 +716,31 @@ pub fn resolve_active_script(
 /// their predecessor's file). Returns the moved file names. Deletion stays
 /// manual-only.
 pub fn archive_sweep(conn: &duckdb::Connection, algo_dir: &Path) -> Result<Vec<String>, String> {
+    archive_sweep_at(conn, algo_dir, chrono::Utc::now())
+}
+
+/// "YYYY-MM" ARCHIVE_UNUSED_MONTHS before the studio's month at `now`.
+fn archive_cutoff_month(now: chrono::DateTime<chrono::Utc>) -> Result<String, String> {
+    let current = crate::sling::studio_month_at(now);
+    let (y, m): (i32, i32) = {
+        let (y, m) = current.split_once('-').ok_or("bad month")?;
+        (y.parse().map_err(err)?, m.parse().map_err(err)?)
+    };
+    let mut y2 = y;
+    let mut m2 = m - ARCHIVE_UNUSED_MONTHS as i32;
+    while m2 < 1 {
+        m2 += 12;
+        y2 -= 1;
+    }
+    Ok(format!("{y2:04}-{m2:02}"))
+}
+
+/// `archive_sweep` with an injected clock (tests).
+fn archive_sweep_at(
+    conn: &duckdb::Connection,
+    algo_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<String>, String> {
     let versions = list_versions(conn, algo_dir, None)?;
     if versions.is_empty() {
         return Ok(Vec::new());
@@ -723,24 +748,8 @@ pub fn archive_sweep(conn: &duckdb::Connection, algo_dir: &Path) -> Result<Vec<S
     let active = active_version(conn)?;
     let active_num = active.as_ref().map(|v| v.version).unwrap_or(BASELINE_VERSION);
     let active_file = active.and_then(|v| v.script_file);
-    let cutoff_month = {
-        // "YYYY-MM" ARCHIVE_UNUSED_MONTHS ago, computed from the DB clock so
-        // tests and app agree on "now".
-        let now: String = conn
-            .query_row("SELECT strftime(now(), '%Y-%m')", [], |r| r.get(0))
-            .map_err(err)?;
-        let (y, m): (i32, u32) = {
-            let parts: Vec<&str> = now.split('-').collect();
-            (parts[0].parse().map_err(err)?, parts[1].parse().map_err(err)?)
-        };
-        let mut y2 = y;
-        let mut m2 = m as i32 - ARCHIVE_UNUSED_MONTHS as i32;
-        while m2 < 1 {
-            m2 += 12;
-            y2 -= 1;
-        }
-        format!("{y2:04}-{m2:02}")
-    };
+    // Studio month (US Central), not the DB's UTC now().
+    let cutoff_month = archive_cutoff_month(now)?;
 
     let mut moved = Vec::new();
     for v in &versions {
@@ -1090,21 +1099,34 @@ mod tests {
         // v12..15 are within 3 of active regardless of use.
         c.execute_batch(
             "INSERT INTO proposals (target_month, algorithm_version, parameters, generated_at)
-             VALUES (strftime(now(), '%Y-%m'), 'v11', '{}', now());
+             VALUES ('2026-09', 'v11', '{}', TIMESTAMPTZ '2026-09-01 12:00:00+00');
              INSERT INTO proposals (target_month, algorithm_version, parameters, generated_at)
-             VALUES (strftime(CAST(now() AS TIMESTAMP) - INTERVAL 200 DAYS, '%Y-%m'), 'v10', '{}',
-                     CAST(now() AS TIMESTAMP) - INTERVAL 200 DAYS);",
+             VALUES ('2026-02', 'v10', '{}', TIMESTAMPTZ '2026-02-01 12:00:00+00');",
         )
         .unwrap();
+        let now = utc("2026-09-15T12:00:00Z");
 
-        let moved = archive_sweep(&c, &dir).unwrap();
+        let moved = archive_sweep_at(&c, &dir, now).unwrap();
         assert_eq!(moved, vec!["propose_v10.py".to_string()]);
         assert!(dir.join("archive/propose_v10.py").exists());
         assert!(dir.join("propose_v11.py").exists(), "recently used stays");
         assert!(dir.join("propose_v12.py").exists(), "within 3 of active stays");
 
         // Idempotent: second sweep moves nothing.
-        assert!(archive_sweep(&c, &dir).unwrap().is_empty());
+        assert!(archive_sweep_at(&c, &dir, now).unwrap().is_empty());
+    }
+
+    fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn archive_cutoff_uses_the_studio_month_not_utc() {
+        // 2026-10-01 00:30Z is still Sept 30, 7:30pm CDT at the studio.
+        assert_eq!(archive_cutoff_month(utc("2026-10-01T00:30:00Z")).unwrap(), "2026-06");
+        assert_eq!(archive_cutoff_month(utc("2026-10-01T05:00:00Z")).unwrap(), "2026-07");
+        // January wraps into the previous year.
+        assert_eq!(archive_cutoff_month(utc("2027-01-15T12:00:00Z")).unwrap(), "2026-10");
     }
 
     #[test]

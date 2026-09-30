@@ -5,7 +5,7 @@ DuckDB schema for `scheduler.duckdb`, which lives in the app's local data dir (`
 ## Conventions
 
 - All ids are `INTEGER` unless they come from Sling, which uses string-form bigints (`VARCHAR`).
-- All timestamps are `TIMESTAMPTZ`.
+- All timestamps are `TIMESTAMPTZ`. Read them as text only via `db::utc_iso!(col)` → ISO-8601 UTC (`2026-11-01T06:30:00Z`); never `CAST(col AS VARCHAR)`, whose zone depends on whether ICU is loaded. The frontend shows them in local time.
 - All money values are `DECIMAL(10, 4)` so we don't lose fractional cents on Anthropic API costs.
 - Soft-deletes via `deleted_at TIMESTAMPTZ NULL` rather than hard deletes, so undo is always possible.
 

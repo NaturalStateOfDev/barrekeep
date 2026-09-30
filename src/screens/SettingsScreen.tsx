@@ -658,6 +658,7 @@ const BACKUP_REASON_LABELS: Record<string, string> = {
 };
 
 function BackupsCard() {
+  const tf = useTimeFormat();
   const [info, setInfo] = useState<BackupsInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -745,7 +746,7 @@ function BackupsCard() {
           <tbody>
             {info.backups.map((b) => (
               <tr key={b.name} title={b.name}>
-                <td>{b.created_at}</td>
+                <td>{tf.timestamp(b.created_at)}</td>
                 <td className="muted">{BACKUP_REASON_LABELS[b.reason.replace(/\d+$/, "")] ?? b.reason}</td>
                 <td style={{ textAlign: "right" }}>{formatBytes(b.size_bytes)}</td>
               </tr>

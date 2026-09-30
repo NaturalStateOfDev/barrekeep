@@ -186,7 +186,7 @@ export interface PullResult {
 export interface AvailabilityBlock {
   sling_user_id: number;
   source: string; // 'leave' | 'availability'
-  starts_at: string; // ISO timestamp
+  starts_at: string; // instant, ISO-8601 UTC ("…Z"); compare via wallClock()
   ends_at: string;
 }
 

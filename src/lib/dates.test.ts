@@ -9,6 +9,7 @@ import {
   formatTimeShort,
   formatTimeRange,
   formatTimestamp,
+  formatLocalDate,
   formatTimesInText,
   formatSlotLabel,
 } from "./dates";
@@ -98,10 +99,16 @@ describe("isReadOnlyMonth", () => {
 import { wallClock } from "./dates";
 
 describe("wallClock", () => {
-  it("normalizes DuckDB TIMESTAMPTZ casts (space + offset)", () => {
+  it("converts instants (UTC Z or any offset) to studio wall-clock time", () => {
+    // Backend form: ISO UTC with Z. Aug = CDT (-05:00), Nov 2 = CST (-06:00).
+    expect(wallClock("2026-08-20T13:00:00Z")).toBe("2026-08-20T08:00:00");
+    expect(wallClock("2026-11-02T11:00:00Z")).toBe("2026-11-02T05:00:00");
+    // Across midnight UTC: still the previous studio day.
+    expect(wallClock("2026-10-01T00:30:00Z")).toBe("2026-09-30T19:30:00");
+    // Older DuckDB cast forms.
     expect(wallClock("2026-08-20 08:00:00-05")).toBe("2026-08-20T08:00:00");
-    expect(wallClock("2026-08-20 08:00:00+00")).toBe("2026-08-20T08:00:00");
-    expect(wallClock("2026-08-20 08:00:00.123-05:30")).toBe("2026-08-20T08:00:00");
+    expect(wallClock("2026-08-20 13:00:00+00")).toBe("2026-08-20T08:00:00");
+    expect(wallClock("2026-08-20 08:00:00.123-05:00")).toBe("2026-08-20T08:00:00");
   });
 
   it("passes through shift-local ISO strings unchanged", () => {
@@ -154,10 +161,30 @@ describe("time display", () => {
     expect(formatTimeRange("09:45", "10:35", "24h")).toBe("09:45–10:35");
   });
 
-  it("formatTimestamp keeps the stored form in 24h and converts in 12h", () => {
-    expect(formatTimestamp("2026-07-03 09:20:44+00")).toBe("2026-07-03 9:20 AM");
-    expect(formatTimestamp("2026-07-03T21:05:00.123", "12h")).toBe("2026-07-03 9:05 PM");
-    expect(formatTimestamp("2026-07-03 09:20:44.5-05", "24h")).toBe("2026-07-03 09:20:44");
+  it("formatTimestamp parses UTC 'Z' strings and shows them in the given zone", () => {
+    const chi = "America/Chicago";
+    expect(formatTimestamp("2026-07-03T14:20:44Z", "12h", chi)).toBe("2026-07-03 9:20 AM");
+    expect(formatTimestamp("2026-07-03T14:20:44Z", "24h", chi)).toBe("2026-07-03 09:20:44");
+    expect(formatTimestamp("2026-07-03T14:20:44Z", "24h", "UTC")).toBe("2026-07-03 14:20:44");
+    // Evening Central = next day UTC; the local date is shown.
+    expect(formatTimestamp("2026-10-01T00:30:00Z", "12h", chi)).toBe("2026-09-30 7:30 PM");
+    // CST (-06:00) after fall-back.
+    expect(formatTimestamp("2026-11-01T18:00:00Z", "12h", chi)).toBe("2026-11-01 12:00 PM");
+    // Older forms still parse.
+    expect(formatTimestamp("2026-07-03 14:20:44+00", "24h", chi)).toBe("2026-07-03 09:20:44");
+    expect(formatTimestamp("2026-07-03 09:20:44.5-05", "24h", chi)).toBe("2026-07-03 09:20:44");
+    expect(formatTimestamp("not a date")).toBe("not a date");
+  });
+
+  it("formatTimestamp treats offset-less strings as local wall time", () => {
+    // Local in, local out, whatever the machine's zone.
+    expect(formatTimestamp("2026-07-03T21:05:00", "12h")).toBe("2026-07-03 9:05 PM");
+    expect(formatTimestamp("2026-07-03 21:05:00", "24h")).toBe("2026-07-03 21:05:00");
+  });
+
+  it("formatLocalDate gives the calendar date in the given zone", () => {
+    expect(formatLocalDate("2026-10-01T00:30:00Z", "America/Chicago")).toBe("2026-09-30");
+    expect(formatLocalDate("2026-10-01T00:30:00Z", "UTC")).toBe("2026-10-01");
   });
 
   it("formatTimesInText rewrites times inside app messages only in 12h", () => {

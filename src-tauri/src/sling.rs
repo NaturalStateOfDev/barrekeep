@@ -500,6 +500,23 @@ pub fn studio_iso(ndt: chrono::NaiveDateTime) -> String {
     studio_local(ndt).format("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
+/// The studio's current month, "YYYY-MM", at instant `now`. Month
+/// boundaries follow studio time, not UTC (7pm Central on the 31st is
+/// already next month in UTC). Pass `chrono::Utc::now()` in the app.
+pub fn studio_month_at(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.with_timezone(&STUDIO_TZ).format("%Y-%m").to_string()
+}
+
+/// A `db::utc_iso!` string ("2026-11-02T11:00:00Z") re-expressed as
+/// studio-local ISO with its own offset ("2026-11-02T05:00:00-06:00"), for
+/// payloads that sit next to studio-local shift times (the Claude editor).
+/// Anything unparseable is returned unchanged.
+pub fn utc_iso_to_studio(utc: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(utc)
+        .map(|dt| dt.with_timezone(&STUDIO_TZ).format("%Y-%m-%dT%H:%M:%S%:z").to_string())
+        .unwrap_or_else(|_| utc.to_string())
+}
+
 /// studio_iso for a DB-style date ("YYYY-MM-DD") + "HH:MM" pair — the shape
 /// external_sling_shifts stores. None if either part fails to parse.
 pub fn studio_iso_hm(date: &str, hhmm: &str) -> Option<String> {
@@ -855,6 +872,24 @@ mod tests {
             .filter(|g| g.kind == "position")
             .map(|g| g.id)
             .collect()
+    }
+
+    #[test]
+    fn studio_month_follows_central_time_not_utc() {
+        let utc = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        // 7:30pm CDT on Sept 30 is already October in UTC.
+        assert_eq!(studio_month_at(utc("2026-10-01T00:30:00Z")), "2026-09");
+        assert_eq!(studio_month_at(utc("2026-10-01T05:00:00Z")), "2026-10");
+        // CST: New Year's Eve 11pm Central = 05:00Z Jan 1.
+        assert_eq!(studio_month_at(utc("2027-01-01T05:00:00Z")), "2026-12");
+        assert_eq!(studio_month_at(utc("2027-01-01T06:00:00Z")), "2027-01");
+    }
+
+    #[test]
+    fn utc_iso_to_studio_uses_the_instants_own_offset() {
+        assert_eq!(utc_iso_to_studio("2026-11-02T11:00:00Z"), "2026-11-02T05:00:00-06:00");
+        assert_eq!(utc_iso_to_studio("2026-10-31T10:45:00Z"), "2026-10-31T05:45:00-05:00");
+        assert_eq!(utc_iso_to_studio("garbage"), "garbage");
     }
 
     #[test]

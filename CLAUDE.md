@@ -133,7 +133,10 @@ When you (Claude) edit code in this repo:
   bundleable from the crates.io crate) and extension autoload is off
   (`db.rs`), so ICU-only SQL like `epoch(TIMESTAMPTZ)`, `date_trunc` on a
   TIMESTAMPTZ, or TIMESTAMPTZ ± INTERVAL fails — use core functions
-  (`epoch_us`) or do the date math in Rust.
+  (`epoch_us`) or do the date math in Rust. Read TIMESTAMPTZ as text only
+  via `db::utc_iso!(col)` (ISO UTC `…Z`; the frontend localizes it), and
+  compute "this month" with `sling::studio_month_at`, never SQL `now()`
+  (UTC — wrong after 7pm Central on a month's last day).
 - **Windows file locks are mandatory; never touch `scheduler.duckdb` on disk
   while a connection is open.** Copying, moving, or deleting the database
   file (or its WAL) while any DuckDB connection holds it fails on Windows
