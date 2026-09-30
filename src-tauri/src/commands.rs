@@ -1561,7 +1561,7 @@ fn validate_claude_edits(
     };
 
     for e in edits.iter_mut() {
-        let mut fail = |note: String| (false, Some(note));
+        let fail = |note: String| (false, Some(note));
         let (valid, note) = match shift_info.get(&e.proposal_shift_id) {
             None => fail("that slot is not in this proposal".to_string()),
             Some((is_coteach, current_uid, current_pid)) => {

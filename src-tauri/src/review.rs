@@ -74,11 +74,11 @@ pub struct ReviewPayload {
 pub struct ApiCall {
     pub payload: ReviewPayload,
     pub raw_input: String,
-    pub raw_output: String,
     pub model: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
-    pub cache_creation_input_tokens: u32,
+    // Cache-write tokens are priced into `cost_usd` (see compute_cost) but
+    // not stored separately; the audit row only records cache reads.
     pub cache_read_input_tokens: u32,
     pub cost_usd: f64,
     pub duration_ms: u32,
@@ -212,10 +212,8 @@ pub fn run_review(api_key: &str, model: &str, user_payload: &Value) -> anyhow::R
     Ok(ApiCall {
         payload,
         raw_input: call.raw_input,
-        raw_output: call.raw_output,
         input_tokens: call.usage.input_tokens,
         output_tokens: call.usage.output_tokens,
-        cache_creation_input_tokens: call.usage.cache_creation_input_tokens,
         cache_read_input_tokens: call.usage.cache_read_input_tokens,
         model: call.model,
         cost_usd,

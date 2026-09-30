@@ -1,0 +1,12 @@
+# Pinned Rust toolchain for local builds AND CI/release (both workflows run
+# `rustup toolchain install`, which reads this file). Keep in step with
+# mise.toml's `rust = ...` — see the comment there for why 1.88 is the floor.
+#
+# Why pin at all: Swatinem/rust-cache hashes the rustc version into its cache
+# key, so an unpinned `stable` silently invalidates the (25-minute, DuckDB-
+# from-C++) cache every time a new stable ships. Bump deliberately, together
+# with mise.toml.
+[toolchain]
+channel = "1.88.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

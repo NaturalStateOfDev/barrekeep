@@ -1,20 +1,39 @@
 version: 2
+
+# One PR per ecosystem per month for minor + patch updates (grouped), and an
+# individual PR for each major bump so it can be read, tested, and landed (or
+# declined) on its own. Every PR runs the full ci workflow (tests + clippy).
+#
+# The duckdb crates are excluded from the cargo group so an engine bump always
+# arrives as its own PR: duckdb is tilde-pinned in src-tauri/Cargo.toml because
+# engine bumps change the on-disk format (see CLAUDE.md) — land deliberately.
+
 updates:
-  # Keeps the SHA-pinned third-party actions in release.yml updated via
+  # Keeps the SHA-pinned third-party actions in the workflows updated via
   # reviewable PRs (preserves the pinning style + version comment).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
 
   # Frontend (package.json / package-lock.json)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
 
   # Rust shell
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+        exclude-patterns: ["duckdb", "libduckdb-sys"]

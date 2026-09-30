@@ -188,6 +188,9 @@ pub struct PullPayload {
 }
 
 /// Returns the set of group IDs for position-type groups only.
+/// Test-only: the live pull derives qualifications elsewhere; this pins the
+/// fixture's position-group shape.
+#[cfg(test)]
 pub fn position_group_ids(groups: &[SlingGroup]) -> std::collections::HashSet<i64> {
     groups
         .iter()

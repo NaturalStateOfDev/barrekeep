@@ -9,6 +9,7 @@
 # 1.88 is the floor: a handful of transitive deps (duckdb 1.10502, plist 1.9,
 # serde_with 3.20, etc.) require Rust 1.85–1.88. Bumping below this re-runs
 # us into "requires Rust X" resolver failures.
+# Keep in step with rust-toolchain.toml (which CI and release builds use).
 rust = "1.88"
 node = "22"
 python = "3.12"
