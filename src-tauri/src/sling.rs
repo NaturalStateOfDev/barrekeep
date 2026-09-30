@@ -228,7 +228,7 @@ pub fn compute_locations(
 }
 
 /// Filter an event list to (home location ∪ no-location) + the given kind(s).
-/// Matches scripts/sling_extract.py:is_home_teacher_event — events
+/// Matches scripts/legacy/sling_extract.py:is_home_teacher_event — events
 /// without a location are allowed through (Sling sometimes omits the
 /// field on past or planning-state shifts and on time-off events).
 pub fn filter_events<'a>(
@@ -375,7 +375,7 @@ pub enum DeleteOutcome {
 
 /// DELETE with browser-like headers + percent-encoded query params. Sling
 /// answers 204 with an EMPTY body, so unlike GET/POST the 2xx branch must not
-/// parse JSON. Ported from scripts/rollback_push.py (method, URL, headers).
+/// parse JSON. Ported from scripts/legacy/rollback_push.py (method, URL, headers).
 fn http_delete(token: &str, url: &str, query: &[(&str, &str)]) -> Result<DeleteOutcome> {
     let mut req = http_agent()
         .delete(url)
@@ -534,7 +534,7 @@ fn parse_month(target_month: &str) -> Result<(chrono::NaiveDate, chrono::NaiveDa
 /// the last day at 23:59:59, studio time. Each boundary carries its OWN
 /// offset — November 2026 is "2026-11-01T00:00:00-05:00" (still CDT) to
 /// "2026-11-30T23:59:59-06:00" (CST). Sling returns empty on historical
-/// /calendar queries when the offset is omitted (scripts/sling_extract.py).
+/// /calendar queries when the offset is omitted (scripts/legacy/sling_extract.py).
 pub fn month_range(target_month: &str) -> Result<(String, String)> {
     let (start, next) = parse_month(target_month)?;
     let end = next.pred_opt().unwrap();
@@ -548,7 +548,7 @@ pub fn month_range(target_month: &str) -> Result<(String, String)> {
 /// client's padding (prev day .. first-of-next-month + 4 days, cachedates
 /// one day wider each side). NB: offset is "-0500" (no colon) here, unlike
 /// the calendar `dates=` param which uses "-05:00". Each date uses its own
-/// studio offset ("-0600" in CST). Matches scripts/push_to_sling.py
+/// studio offset ("-0600" in CST). Matches scripts/legacy/push_to_sling.py
 /// VIEWDATES/CACHEDATES for June 2026.
 pub fn view_cache_dates(month: &str) -> Result<(String, String)> {
     let (first, next_first) = parse_month(month)?;
@@ -592,14 +592,14 @@ pub fn spec_fingerprint(s: &PushSpec, home_location_id: i64) -> String {
 }
 
 /// Build the set of fingerprints already present at the home location.
-/// Only planning + published shifts count (matches push_to_sling.py).
+/// Only planning + published shifts count (matches legacy push_to_sling.py).
 pub fn existing_fingerprints(events: &[CalendarEvent], home_location_id: i64) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for ev in events {
         if ev.kind != "shift" { continue; }
         // Unlike filter_events (which lets location-less events through), we
         // require an explicit home-location match here — matches
-        // push_to_sling.py's existing_shifts_at_home. A shift returned without
+        // legacy push_to_sling.py's existing_shifts_at_home. A shift returned without
         // a location can't be confirmed as home, so it's conservatively not
         // counted as a duplicate; the push would re-attempt it, and re-push is
         // idempotent. Our own created shifts always echo back their location.
@@ -698,7 +698,7 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
     );
 
     // Offset matters: without it Sling returns empty for historical
-    // /calendar queries (scripts/sling_extract.py).
+    // /calendar queries (scripts/legacy/sling_extract.py).
     let hist_start_iso = history_start_iso(target_month)?;
     let hist_end_iso = start.clone();
     let nonce2 = chrono::Utc::now().timestamp_millis();
@@ -908,7 +908,7 @@ mod tests {
     #[test]
     fn view_cache_dates_reproduce_june_window() {
         let (view, cache) = view_cache_dates("2026-06").unwrap();
-        // Matches the constants the working push_to_sling.py used for June 2026.
+        // Matches the constants the legacy push_to_sling.py used for June 2026.
         assert_eq!(view, "2026-05-31T00:00:00-0500/2026-07-05T00:00:00-0500");
         assert_eq!(cache, "2026-05-30T00:00:00-0500/2026-07-06T00:00:00-0500");
     }

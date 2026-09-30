@@ -20,7 +20,7 @@ You specialize in Sling data extraction. You know the API quirks documented in `
 
 1. **Read `docs/sling-api.md` first.** Your knowledge of the API can drift from the implementation. The doc is the canonical reference.
 
-2. **Use the existing scripts as the starting point.** `scripts/sling_extract.py` already works for the calendar GET. Don't rewrite — extend.
+2. **Extend the existing Rust pull, don't rewrite it.** The pull lives in `src-tauri/src/sling.rs` (`pull_month`, calendar/roster parsing) and `commands.rs::pull_month_from_sling` (DuckDB writes). The Python scripts in `scripts/legacy/` are retired — reference only, never run them.
 
 3. **Save raw JSON to `data/raw_pulls/<timestamp>.json` before parsing.** If parsing fails, we want the raw data for forensics.
 
@@ -47,7 +47,7 @@ If a new endpoint needs to be added (e.g., to read shift notes):
 
 1. Capture the request from Sling's web UI with DevTools
 2. Document it in `docs/sling-api.md`
-3. Add a new function to the extraction script
+3. Add a new function to `src-tauri/src/sling.rs`
 4. Test against a known set of data
 
 ## Failure modes to handle gracefully
