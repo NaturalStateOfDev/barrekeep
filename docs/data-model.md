@@ -1,6 +1,6 @@
 # Data model
 
-DuckDB schema for `data/scheduler.duckdb`. The DDL below is the source of truth; `src/lib/migrations.ts` runs equivalent statements at app startup.
+DuckDB schema for `scheduler.duckdb`, which lives in the app's local data dir (`%LOCALAPPDATA%\com.barrekeep.app\` on Windows, `~/.local/share/com.barrekeep.app/` on Linux). The source of truth is the forward-only SQL in `src-tauri/migrations/NNNN_*.sql` (0001–0013), applied at startup by `src-tauri/src/migrations.rs`; the DDL below mirrors the resulting schema.
 
 ## Conventions
 

@@ -9,10 +9,9 @@
 │  │  WebView (Microsoft Edge WebView2 on Windows)       │ │
 │  │  ┌──────────────────────────────────────────────┐  │ │
 │  │  │  React app (src/)                             │  │ │
-│  │  │  - CalendarView                               │  │ │
-│  │  │  - ScheduleEditor                             │  │ │
-│  │  │  - PromptManager                              │  │ │
-│  │  │  - PushPanel                                  │  │ │
+│  │  │  - screens/ (month calendar, settings, ...)   │  │ │
+│  │  │  - components/ (calendar, claude tab,         │  │ │
+│  │  │    compare view, push modal, studio setup)    │  │ │
 │  │  └──────────────────────────────────────────────┘  │ │
 │  └────────────────────────────────────────────────────┘ │
 │                       │                                   │
@@ -20,21 +19,38 @@
 │                       │                                   │
 │  ┌────────────────────────────────────────────────────┐ │
 │  │  Rust command handlers (src-tauri/src/)            │ │
-│  │  - DuckDB queries (via duckdb crate)                │ │
+│  │  - DuckDB queries (duckdb crate, bundled engine)    │ │
 │  │  - Stronghold (token storage)                       │ │
-│  │  - Spawn Python sidecars (Sling pull/push)          │ │
+│  │  - Sling pull / push / sync (in-process HTTP)       │ │
 │  │  - Anthropic API calls                              │ │
+│  │  - Spawn propose.py (python.rs finds Python)        │ │
 │  └────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────┘
-                        │
-              ┌─────────┴────────┐
-              ▼                  ▼
-       ┌─────────────┐    ┌─────────────────┐
-       │  DuckDB     │    │  Python sidecars │
-       │  scheduler  │    │  - sling_extract │
-       │  .duckdb    │    │  - push_to_sling │
-       └─────────────┘    └─────────────────┘
+          │                  │                    │
+          ▼                  ▼                    ▼
+   ┌─────────────┐   ┌───────────────┐   ┌─────────────────┐
+   │  DuckDB     │   │  Sling API    │   │  propose.py      │
+   │  scheduler  │   │  (HTTPS via   │   │  (subprocess,    │
+   │  .duckdb    │   │   ureq)       │   │   JSON on stdin) │
+   └─────────────┘   └───────────────┘   └─────────────────┘
 ```
+
+Rust modules at a glance (`src-tauri/src/`):
+
+| Module | Role |
+|---|---|
+| `commands.rs` | Most Tauri commands: pull, generate, edits, Claude, settings |
+| `sling.rs` | Sling HTTP: browser-like headers, roster/calendar pull, shift POST/DELETE, dedupe, rate limiting, studio-TZ offsets |
+| `push_sync.rs` | Incremental push ("sync") of the push draft, cleanup, "remove from Sling" |
+| `drafts.rs` | Multiple drafts per month; the push draft (`month_push_candidate`) |
+| `conflicts.rs` | Re-check a draft against freshly pulled availability |
+| `studio_setup.rs` | Auto-detect org / acting user / home location after a Sling login |
+| `algorithm.rs` | Versioned algorithm rules and scripts (`algorithm_versions`) |
+| `review.rs`, `editor.rs` | Claude review; Claude-driven draft edits |
+| `python.rs` | Find a usable Python 3.11+ for `propose.py` |
+| `backup.rs` | Rotating database backups |
+| `migrations.rs`, `db.rs` | Forward-only schema migrations; connection setup |
+| `secrets.rs`, `sling_login.rs` | Stronghold vault; in-app Sling login window |
 
 ## Why this shape
 
@@ -42,18 +58,19 @@
 
 **Why React and not Svelte/Solid/vanilla:** The existing widget code is JS/HTML and ports cleanly to React. The library ecosystem for calendar/scheduling components is largest in React. TypeScript adds compile-time safety on the schedule data shape.
 
-**Why DuckDB and not SQLite:** Both are embedded, both work. DuckDB has better performance for the analytical queries this app does (group by teacher, compute weekly load) and natively reads/writes CSV and Parquet, so importing existing CSVs is a one-liner.
+**Why DuckDB and not SQLite:** Both are embedded, both work. DuckDB has better performance for the analytical queries this app does (group by teacher, compute weekly load) and natively reads/writes CSV and Parquet, so importing existing CSVs is a one-liner. The engine is compiled into the app together with its `json` extension, and extension autoinstall/autoload is off (`db.rs`), so the app never downloads DuckDB extensions at runtime. ICU is not bundled — stick to core SQL functions for TIMESTAMPTZ (e.g. `epoch_us`, not `epoch`).
 
-**Why Python sidecars and not pure Rust:** The existing Python push/pull scripts work and have been debugged through multiple production runs. Rewriting in Rust is busywork that can be deferred until the scripts grow features that benefit from being in-process. Tauri can shell out to Python with `Command::new`.
+**Why Sling in Rust but the algorithm in Python:** Sling pull/push began as Python scripts and moved in-process (`sling.rs`, `push_sync.rs`) so the app can stream progress, read the token from Stronghold and write DuckDB directly; the old scripts are kept for reference in `scripts/legacy/` and are never invoked. The schedule algorithm (`scripts/propose.py`) stays in Python: it changes most often, is easy to test on its own, and Claude can draft changes to it (`algorithm_versions`). The app runs it as a subprocess with a JSON payload, built from DuckDB, on stdin.
 
 ## Data flow: a typical month
 
-1. **Pull availability.** User clicks "Pull from Sling for July." Tauri calls the Python sidecar `sling_extract.py`, which fetches calendar events for the target month, parses leave + availability blocks, and writes the result to DuckDB tables `events` and `blocks`.
-2. **Generate proposal.** User clicks "Generate proposal." Tauri runs the rule-based proposer (in Rust or Python sidecar) which reads from DuckDB and writes to a `proposals` table with a generation id.
-3. **Optional Claude pass.** User clicks "Have Claude review." App reads the proposal, sends it + the prompt from `prompts/verifier.md` to the Anthropic API, and writes Claude's suggestions to a `suggestions` table linked to the proposal.
+1. **Pull availability.** User clicks "Pull from Sling." The app (`commands.rs::pull_month_from_sling` over `sling.rs`) fetches the roster, position groups, the target month's calendar events and 3 months of shift history, keeps only the home location, and writes `teachers` / `positions` / `teacher_qualifications` (roster sync), `availability_blocks` (Sling `availability` = BLOCKED time), `external_sling_shifts` and `month_pulls`. After a Sling login the app also auto-detects the studio configuration (`studio_setup.rs`); it never overwrites a configuration that is already set.
+2. **Generate proposal.** User clicks "Generate." The app builds a JSON payload from DuckDB, runs `propose.py` (found via `python.rs`) with it on stdin, and stores the result as a new draft: a `proposals` row plus its `proposal_shifts`.
+3. **Optional Claude pass.** "Have Claude review" sends the draft + `prompts/verifier.md` to the Anthropic API; the Claude tab can also edit the draft from an instruction, or propose rule / code changes to the algorithm. Every call is logged in `claude_runs` (cost audit).
 4. **Edit in calendar view.** User clicks cells, swaps teachers. Each edit becomes a row in the `edits` table (so we have full undo/redo and audit history).
    A month can hold several **drafts** (generate again, or Duplicate a draft for a what-if); the draft menu next to the month title switches, renames, archives and duplicates them, the Compare tab diffs two drafts (changed slots + per-teacher weekday/time consistency), and a Claude prompt can target several drafts at once (one call per draft). See `src-tauri/src/drafts.rs`.
-5. **Push to Sling.** User clicks "Push to Sling" on the month's **push draft** (`month_push_candidate`; "Use for push" in the draft menu) — push refuses any other draft, because Sling dedupe would ADD a second draft's differing shifts on top of the first. The app builds the shift list from `proposal_shifts` in DuckDB, dedupes against shifts already in Sling, and POSTs the missing ones in-process (Rust, `sling.rs::push_shift`) as `status: "planning"`, batched + rate-limit-aware. A dry-run preview is shown for confirmation first; live progress streams via the `push-progress` event. Audit goes to the `pushes` and `push_results` tables. (The legacy `scripts/push_to_sling.py` is retained for reference only and is no longer invoked.)
+   **Refresh availability** re-pulls Sling and re-checks an existing draft against it (`conflicts.rs`, `draft_checks`) instead of regenerating; a draft whose month was pulled again since it was generated or last checked shows as stale.
+5. **Push to Sling.** User clicks "Push to Sling" on the month's **push draft** (`month_push_candidate`; "Use for push" in the draft menu) — push refuses any other draft, because Sling dedupe would ADD a second draft's differing shifts on top of the first. Push is an incremental **sync** (`push_sync.rs`): it creates the draft's missing shifts and replaces (DELETE + POST) or removes shifts the app created earlier whose slot changed — always as `status: "planning"`, batched + rate-limit-aware. It never touches a shift that is published, missing from Sling, not created by the app, or edited in Sling since the last push (compared against `push_result_snapshots`). A dry-run preview is shown for confirmation first; live progress streams via the `push-progress` event. A backup is taken before any change; audit goes to `pushes`, `push_results` and `push_result_snapshots`.
 6. **Publish.** User goes to Sling's web UI to publish.
 
 ## DuckDB schema overview
@@ -61,16 +78,22 @@
 See `docs/data-model.md` for full DDL. Tables:
 
 - `teachers` — roster + Sling user IDs + manager overrides
+- `teacher_qualifications` — who can teach which position (from Sling position groups)
 - `positions` — Sling position IDs + class type names + duration
+- `studio_config` — Sling org / acting-user / home-location ids (runtime config)
 - `availability_blocks` — pulled from Sling per month
+- `external_sling_shifts` / `month_pulls` — shifts already in Sling; when each month was last pulled
 - `proposals` — one row per draft (generation run or duplicate), with metadata
 - `proposal_drafts` / `month_push_candidate` / `claude_run_targets` — draft names + archive flag, the month's push draft, and which drafts a Claude prompt targeted (migration 0012)
 - `proposal_shifts` — the actual generated schedule rows, FK to proposals
 - `edits` — every manual edit, with before/after, timestamp, reason
+- `draft_checks` — when each draft was last re-checked against pulled data (migration 0013)
 - `prompts` — versioned prompt library (also mirrors prompts/*.md files)
 - `claude_runs` — record of every Anthropic API call: prompt, input, output, cost, timestamp
+- `algorithm_versions` / `app_settings` — versioned algorithm rules and scripts; misc settings
 - `pushes` — record of every push-to-Sling run with summary
 - `push_results` — per-shift result of each push (Sling shift id, status, error if any)
+- `push_result_snapshots` — what each app-created shift looked like when pushed, so sync can tell whether it was edited in Sling (migration 0013)
 
 ## State that lives outside DuckDB
 
@@ -129,10 +152,12 @@ inspected read-only with the DuckDB CLI of the pinned version (see
 
 | What | Where |
 |---|---|
-| New UI screen | `src/components/` |
+| New UI screen | `src/screens/` (reusable pieces in `src/components/`) |
 | New shared logic for the frontend | `src/lib/` |
 | New TypeScript type | `src/types.ts` |
-| New Rust command | `src-tauri/src/commands/` |
-| New Python sidecar | `scripts/` |
+| New Rust command | `src-tauri/src/commands.rs`, or the feature's module (`drafts.rs`, `push_sync.rs`, ...), registered in `lib.rs` |
+| New Sling API call | `src-tauri/src/sling.rs` (read `docs/sling-api.md` first) |
+| Schema change | new `src-tauri/migrations/NNNN_*.sql` + `migrations.rs` |
+| Algorithm change | `scripts/propose.py` (+ `scripts/tests/test_propose_rules.py`) |
 | New Claude prompt | `prompts/` |
 | Architectural decision | `docs/decisions/NNNN-title.md` |

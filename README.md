@@ -8,8 +8,9 @@ Claude), lets you review and edit it in a calendar UI, and pushes the approved
 draft back to Sling as **planning-status** (unpublished) shifts — a manager
 publishes from Sling's web UI as the final step.
 
-Single-user, local-first. No server, no cloud database. Ships with a
-placeholder demo roster; you configure your own studio at runtime.
+Single-user, local-first. No server, no cloud database. Ships with no data:
+the roster, positions and qualifications arrive from your Sling account, and
+the studio is configured at runtime.
 
 > Setting up a dev machine, generating updater signing keys, or cutting a
 > release? See **[SETUP.md](./SETUP.md)**.
@@ -24,8 +25,13 @@ placeholder demo roster; you configure your own studio at runtime.
   over-cap teachers, qualification conflicts, leave conflicts) and one-click
   fixes.
 - **Edit** teacher assignments and weekly caps inline.
-- **Push** approved drafts to Sling (batched + rate-limit-aware), as planning
-  status only.
+- **Drafts** — several per month, compare two side by side, pick one as the
+  month's push draft.
+- **Push / sync** the push draft to Sling (batched + rate-limit-aware), as
+  planning status only. Re-pushing updates only shifts the app created and
+  nobody has touched in Sling since.
+- **Refresh availability** — re-pull Sling and re-check an existing draft
+  without regenerating it.
 - **In-app Sling login** (captures the bearer token) or paste one manually;
   tokens persist in the OS keychain (Stronghold).
 - **Auto-update** — installs pick up new signed releases from GitHub.
@@ -37,12 +43,13 @@ placeholder demo roster; you configure your own studio at runtime.
 - **Storage:** DuckDB (single-file embedded database)
 - **Secrets:** Tauri Stronghold plugin (OS keychain)
 - **AI:** Anthropic SDK (optional, for prompt-driven schedule review)
-- **Sling integration:** Python sidecars in `scripts/` + Rust (`ureq`)
+- **Sling integration:** in-process Rust (`ureq`) — `sling.rs`, `push_sync.rs`
+- **Algorithm:** `scripts/propose.py`, run as a Python subprocess
 
 ## Quick start
 
 ```bash
-npm install
+npm ci
 npm run tauri dev          # hot-reload frontend, recompile Rust on change
 npm run tauri build        # -> src-tauri/target/release/bundle/
 ```
@@ -52,23 +59,28 @@ npm run tauri build        # -> src-tauri/target/release/bundle/
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/), [Node.js 20+](https://nodejs.org/),
-  [Python 3.11+](https://www.python.org/)
+- [Rust](https://rustup.rs/) 1.88 (pinned in `rust-toolchain.toml`),
+  [Node.js 22](https://nodejs.org/), [Python 3.11+](https://www.python.org/)
 - Windows: [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
   + [MSVC C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
-  Linux: `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`.
+  Linux: WebKitGTK/GTK dev packages and `mold` — see [SETUP.md](./SETUP.md)
+  for apt and pacman package lists.
+- The installed app needs Python 3.11+ on PATH too (it runs `propose.py`);
+  Settings → Python checks it. See SETUP.md → Studio PC requirements.
 
 ### First-run configuration
 
-On first launch the app seeds a **placeholder demo roster** and creates its
+On first launch the app starts empty and creates its
 database at `%LOCALAPPDATA%\com.barrekeep.app\scheduler.duckdb` (Windows) /
 `~/.local/share/com.barrekeep.app/` (Linux). Then, in **Settings**:
 
-1. **Studio configuration** — enter your Sling **org id**, **acting-user id**
-   (an admin whose calendar feed is read), and **home location id**. Find them
-   in a Sling DevTools session (they appear in the calendar request URL). These
-   are stored locally only; nothing studio-specific is compiled into the app.
-2. **Sling token** — log in via the in-app browser, or paste a bearer token.
+1. **Sling token** — log in via the in-app browser, or paste a bearer token.
+2. **Studio configuration** — after a Sling login the app detects your Sling
+   **org id**, **acting-user id** (whose calendar feed is read) and **home
+   location id**, saving them when there's one obvious choice and asking
+   otherwise. You can also enter them by hand (they appear in the calendar
+   request URL in a Sling DevTools session). They're stored locally only;
+   nothing studio-specific is compiled into the app.
 3. (Optional) **Anthropic key** — to enable Claude-assisted review.
 
 Then pick a month → **Pull from Sling** → **Generate** → review → **Push**.
@@ -80,11 +92,12 @@ Then pick a month → **Pull from Sling** → **Generate** → review → **Push
 ├── CLAUDE.md          # orientation for working on the project
 ├── docs/              # architecture, Sling API notes, data model
 ├── prompts/           # Claude prompts as versioned markdown
-├── scripts/           # Python utilities (Sling pull/push, the algorithm)
+├── scripts/           # propose.py (the algorithm), tests, version bump;
+│                      # legacy/ = retired Sling scripts, reference only
 ├── src/               # React frontend
 ├── src-tauri/         # Rust shell + DuckDB
 │   ├── migrations/    # forward-only SQL, applied at startup
-│   └── src/           # commands.rs, sling.rs, seed.rs, secrets.rs, ...
+│   └── src/           # commands.rs, sling.rs, push_sync.rs, drafts.rs, ...
 └── .claude/           # skills + subagents for Claude Code
 ```
 
@@ -106,8 +119,6 @@ This started as a tool for one studio and is being generalized. Current edges:
 - **Per-studio scheduling rules** (priority slots, blocklists, hard
   assignments, month-specific overrides) ship empty/generic; they're currently
   code-level extension points rather than UI-configurable.
-- **DST.** Date queries send a fixed `-05:00` (US Central) offset; spring-/
-  fall-back will need real timezone handling.
 
 ## License
 
