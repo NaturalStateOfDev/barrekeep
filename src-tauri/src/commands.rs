@@ -278,7 +278,7 @@ pub fn list_qualified_pairs(db: State<'_, Db>) -> Result<Vec<String>, String> {
         .query_map([], |r| {
             let u: i32 = r.get(0)?;
             let p: i32 = r.get(1)?;
-            Ok(format!("{}:{}", u, p))
+            Ok(format!("{u}:{p}"))
         })
         .map_err(err)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
@@ -421,7 +421,7 @@ fn build_propose_payload(
         // Month events: availability + leave (overlapping the month, see
         // query_availability_blocks) + existing shifts for the target month.
         let month_events: Vec<serde_json::Value> = {
-            let mut events: Vec<serde_json::Value> = query_availability_blocks(&conn, &target_month)?
+            let mut events: Vec<serde_json::Value> = query_availability_blocks(conn, target_month)?
                 .into_iter()
                 .map(|b| serde_json::json!({
                     "type": b.source,
@@ -1698,6 +1698,10 @@ fn record_run_target(conn: &duckdb::Connection, run_id: i64, proposal_id: i64) -
     Ok(())
 }
 
+// One argument per claude_runs column. The two callers pass fields from
+// different result types (editor run vs code draft), so a shared params
+// struct would only duplicate the field copying at each call site.
+#[allow(clippy::too_many_arguments)]
 fn persist_claude_run(
     conn: &duckdb::Connection,
     proposal_id: i64,

@@ -197,18 +197,6 @@ pub struct PullPayload {
     pub history_shifts: Vec<CalendarEvent>, // trailing 3 months, shifts only, home location only
 }
 
-/// Returns the set of group IDs for position-type groups only.
-/// Test-only: the live pull derives qualifications elsewhere; this pins the
-/// fixture's position-group shape.
-#[cfg(test)]
-pub fn position_group_ids(groups: &[SlingGroup]) -> std::collections::HashSet<i64> {
-    groups
-        .iter()
-        .filter(|g| g.kind == "position")
-        .map(|g| g.id)
-        .collect()
-}
-
 /// Returns a (location_id → name) map for location-type groups only.
 /// Users' Sling `groupIds` include both position and location ids, so
 /// intersecting against this map yields the user's location memberships.
@@ -254,7 +242,7 @@ pub fn filter_events<'a>(
             kinds.contains(&e.kind.as_str())
                 && e.location
                     .as_ref()
-                    .map_or(true, |l| l.id == home_location_id)
+                    .is_none_or(|l| l.id == home_location_id)
         })
         .collect()
 }
@@ -734,7 +722,7 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
         .into_iter()
         .filter(|e: &CalendarEvent|
             e.kind == "shift"
-            && e.location.as_ref().map_or(true, |l| l.id == cfg.home_location_id)
+            && e.location.as_ref().is_none_or(|l| l.id == cfg.home_location_id)
         )
         .collect();
     eprintln!(
@@ -858,6 +846,16 @@ pub fn is_schedulable_teacher(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Group IDs of position-type groups. The live pull derives
+    /// qualifications elsewhere; this only pins the fixture's group shape.
+    fn position_group_ids(groups: &[SlingGroup]) -> std::collections::HashSet<i64> {
+        groups
+            .iter()
+            .filter(|g| g.kind == "position")
+            .map(|g| g.id)
+            .collect()
+    }
 
     #[test]
     fn month_range_returns_correct_bounds() {

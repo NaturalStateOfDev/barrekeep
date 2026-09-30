@@ -358,7 +358,7 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
                         Some(ev)
                             if t.snapshot.is_none()
                                 && ev.status.as_deref() == Some("planning")
-                                && ev.location.as_ref().map_or(true, |l| l.id == home) =>
+                                && ev.location.as_ref().is_none_or(|l| l.id == home) =>
                         {
                             plan.actions.push(SyncAction {
                                 kind: ActionKind::Baseline,
@@ -458,9 +458,9 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
             }
             let Some(ev) = by_id.get(&t.sling_shift_id) else { return false };
             ev.status.as_deref() == Some("planning")
-                && ev.location.as_ref().map_or(true, |l| l.id == home)
+                && ev.location.as_ref().is_none_or(|l| l.id == home)
                 && event_state(ev).as_ref() == Some(&want)
-                && t.snapshot.as_ref().map_or(true, |snap| *snap == want)
+                && t.snapshot.as_ref().is_none_or(|snap| *snap == want)
         });
         match found {
             Some(t) => {
@@ -526,7 +526,7 @@ pub fn build_push_plan(inp: &PlanInput<'_>) -> SyncPlan {
     let kept: Vec<CalendarEvent> = inp
         .events
         .iter()
-        .filter(|e| e.id.map_or(true, |id| !removing.contains(&id)))
+        .filter(|e| e.id.is_none_or(|id| !removing.contains(&id)))
         .cloned()
         .collect();
     let existing = existing_fingerprints(&kept, home);

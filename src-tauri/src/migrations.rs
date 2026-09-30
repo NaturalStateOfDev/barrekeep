@@ -321,7 +321,9 @@ mod tests {
         .unwrap();
         run(&conn).expect("apply 0012");
 
-        let snapshot = |c: &Connection| -> (Vec<(i64, String)>, Vec<(String, i64)>, i64) {
+        // (drafts, push candidates, claude_run_targets count)
+        type Snapshot = (Vec<(i64, String)>, Vec<(String, i64)>, i64);
+        let snapshot = |c: &Connection| -> Snapshot {
             let drafts = c
                 .prepare("SELECT proposal_id, name FROM proposal_drafts ORDER BY proposal_id")
                 .unwrap()
