@@ -2,7 +2,7 @@
 // list (see src-tauri/src/push_sync.rs and conflicts.rs).
 
 import type { DraftConflictKind, ProposalSummary, ShiftView, SyncAction, SyncActionKind, SyncPreview } from "../types";
-import { formatDayShort, formatTimeShort } from "./dates";
+import { formatDayShort, formatTime, formatTimeRange, type TimeFormat } from "./dates";
 
 export interface SyncGroups {
   create: SyncAction[];
@@ -37,19 +37,19 @@ export function hasWork(p: SyncPreview): boolean {
   return p.actions.some((a) => a.kind !== "skip" || a.skip_outcome != null);
 }
 
-export function shiftLabel(v: ShiftView): string {
-  return `${formatDayShort(v.date)} ${formatTimeShort(v.start)} ${v.class_name} — ${v.teacher_name}`;
+export function shiftLabel(v: ShiftView, fmt?: TimeFormat): string {
+  return `${formatDayShort(v.date)} ${formatTime(v.start, fmt)} ${v.class_name} — ${v.teacher_name}`;
 }
 
-/** "teacher Alex → Kay", "time 9:00a → 9:30a", "class Classic → Define". */
-export function updateLabel(a: SyncAction): string {
+/** "Alex → Kay", "9:00 – 9:50 AM → 9:30 – 10:20 AM", "Classic → Define". */
+export function updateLabel(a: SyncAction, fmt?: TimeFormat): string {
   const b = a.before;
   const n = a.after;
   if (!b || !n) return "";
   const parts: string[] = [];
   if (b.teacher_name !== n.teacher_name) parts.push(`${b.teacher_name} → ${n.teacher_name}`);
   if (b.date !== n.date || b.start !== n.start || b.end !== n.end)
-    parts.push(`${formatTimeShort(b.start)}–${formatTimeShort(b.end)} → ${formatTimeShort(n.start)}–${formatTimeShort(n.end)}`);
+    parts.push(`${formatTimeRange(b.start, b.end, fmt)} → ${formatTimeRange(n.start, n.end, fmt)}`);
   if (b.class_name !== n.class_name) parts.push(`${b.class_name} → ${n.class_name}`);
   return parts.join(", ");
 }

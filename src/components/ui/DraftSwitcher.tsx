@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Archive, ArchiveRestore, ChevronDown, CloudOff, Copy, GitCompare, Pencil, Upload } from "lucide-react";
 import type { ProposalSummary } from "../../types";
-import { formatTimestamp } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 
 interface Props {
   /** Drafts of the active month to list (archived ones only when shown), newest first. */
@@ -40,6 +40,7 @@ export function DraftSwitcher({
   onCompare,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const tf = useTimeFormat();
   const current = drafts.find((v) => v.id === value);
   if (!current) return null;
 
@@ -76,7 +77,7 @@ export function DraftSwitcher({
                 <span>
                   {v.name}
                   <span className="meta">
-                    {" "}· {v.algorithm_version} · {formatTimestamp(v.generated_at)}
+                    {" "}· {v.algorithm_version} · {tf.timestamp(v.generated_at)}
                     {v.created_from === "duplicate" && " · copy"}
                   </span>
                 </span>

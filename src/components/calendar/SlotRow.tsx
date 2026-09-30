@@ -1,5 +1,5 @@
 import type { ProposalShiftRow } from "../../types";
-import { formatTimeShort } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 import { Avatar } from "../ui/Avatar";
 import { ClassChip } from "../ui/ClassChip";
 
@@ -11,13 +11,14 @@ interface Props {
 
 export function SlotRow({ shift, hasWarning, onClick }: Props) {
   const unassigned = shift.sling_user_id == null && !shift.coteach_label;
+  const tf = useTimeFormat();
   return (
     <div
       className={`bk-slot-row${shift.is_dropped ? " bk-dropped" : ""}`}
       onClick={onClick}
       role="button"
     >
-      <span className="bk-slot-time">{formatTimeShort(shift.start_time)}</span>
+      <span className="bk-slot-time">{tf.timeShort(shift.start_time)}</span>
       <ClassChip className={shift.class_name} />
       <span style={{ display: "inline-flex", gap: 2 }}>
         {unassigned ? (

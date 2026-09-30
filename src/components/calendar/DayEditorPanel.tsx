@@ -3,7 +3,8 @@ import { X, UserRoundCog, Shapes, AlertTriangle } from "lucide-react";
 import type { ProposalShiftRow, Teacher, Position, AvailabilityBlock } from "../../types";
 import type { Issue } from "../../lib/issues";
 import { candidatesFor } from "../../lib/candidates";
-import { formatTimeShort, prettyDayLong } from "../../lib/dates";
+import { prettyDayLong } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 import { Avatar } from "../ui/Avatar";
 import { ClassChip } from "../ui/ClassChip";
 
@@ -41,6 +42,7 @@ export function DayEditorPanel({
   onChangeFormat,
 }: Props) {
   const [editing, setEditing] = useState<EditingState>(null);
+  const tf = useTimeFormat();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -97,7 +99,7 @@ export function DayEditorPanel({
             return (
               <div key={s.id} className="bk-day-slot">
                 <div className="bk-day-slot-head">
-                  <span className="bk-day-slot-time">{formatTimeShort(s.start_time)}</span>
+                  <span className="bk-day-slot-time">{tf.time(s.start_time)}</span>
                   <ClassChip className={s.class_name} size="md" />
                   <span className={`bk-day-slot-teacher${unassigned && !s.is_dropped ? " bk-unassigned" : ""}`}>
                     {s.coteach_label ? (

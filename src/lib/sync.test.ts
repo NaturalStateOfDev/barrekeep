@@ -64,7 +64,10 @@ describe("sync helpers", () => {
     expect(updateLabel(action("update", { before: view("Alex"), after: view("Kay") }))).toBe("Alex → Kay");
     expect(
       updateLabel(action("update", { before: view("Alex"), after: view("Alex", "09:30", "10:30", "Define") })),
-    ).toBe("9:00a–10:00a → 9:30a–10:30a, Classic → Define");
+    ).toBe("9:00 – 10:00 AM → 9:30 – 10:30 AM, Classic → Define");
+    expect(
+      updateLabel(action("update", { before: view("Alex"), after: view("Alex", "09:30", "10:30") }), "24h"),
+    ).toBe("09:00–10:00 → 09:30–10:30");
   });
 
   it("labels the push button by whether the draft is already in Sling", () => {

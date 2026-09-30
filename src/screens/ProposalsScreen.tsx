@@ -35,12 +35,11 @@ import { codifyInstruction } from "../lib/rules";
 import { draftsForMonth, pushDraftFor, representativeDraft } from "../lib/drafts";
 import { pushLabel } from "../lib/sync";
 import { isStudioNotConfigured, openStudioSetup } from "../lib/studioSetup";
+import { useTimeFormat } from "../lib/timeFormat";
 import {
   monthWindow,
   isReadOnlyMonth,
   monthLabel,
-  formatTimestamp,
-  formatTimeShort,
   WEEKDAYS_SHORT,
 } from "../lib/dates";
 import type {
@@ -66,6 +65,7 @@ type Tab = (typeof TABS)[number];
 
 export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) {
   const today = todayIso();
+  const tf = useTimeFormat();
   const [proposals, setProposals] = useState<ProposalSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [mode, setMode] = useState<"detail" | "new">("detail");
@@ -167,9 +167,9 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   const issues: Issue[] = useMemo(
     () =>
       detail
-        ? computeIssues(detail.shifts, teachers, qualifiedPairs, blocks, externalShifts, [])
+        ? computeIssues(detail.shifts, teachers, qualifiedPairs, blocks, externalShifts, [], tf.fmt)
         : [],
-    [detail, teachers, qualifiedPairs, blocks, externalShifts],
+    [detail, teachers, qualifiedPairs, blocks, externalShifts, tf.fmt],
   );
 
   const kpis = useMemo(() => computeKpis(detail?.shifts ?? []), [detail]);
@@ -761,6 +761,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
 
 function ProposalShiftsTable({ detail }: { detail: ProposalDetail }) {
   const { summary, shifts } = detail;
+  const tf = useTimeFormat();
   return (
     <div className="card">
       <div className="row">
@@ -794,7 +795,7 @@ function ProposalShiftsTable({ detail }: { detail: ProposalDetail }) {
               <td>{s.shift_date}</td>
               <td className="muted">{weekday(s.shift_date)}</td>
               <td>
-                {formatTimeShort(s.start_time)}–{formatTimeShort(s.end_time)}
+                {tf.range(s.start_time, s.end_time)}
               </td>
               <td>
                 <ClassChip className={s.class_name} size="md" />
@@ -825,6 +826,7 @@ function ProposalShiftsTable({ detail }: { detail: ProposalDetail }) {
 
 function EditHistory({ proposalId }: { proposalId: number }) {
   const [edits, setEdits] = useState<EditRow[] | null>(null);
+  const tf = useTimeFormat();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -862,9 +864,9 @@ function EditHistory({ proposalId }: { proposalId: number }) {
         <tbody>
           {edits.map((e) => (
             <tr key={e.id} className={e.reverted ? "dropped" : ""}>
-              <td className="muted">{formatTimestamp(e.edited_at)}</td>
+              <td className="muted">{tf.timestamp(e.edited_at)}</td>
               <td>
-                {e.shift_date} {e.start_time}
+                {e.shift_date} {tf.time(e.start_time)}
               </td>
               <td>{e.class_name}</td>
               <td>
@@ -901,6 +903,7 @@ function ClaudeReviewSection({
   onVersionAdopted: () => void;
 }) {
   const [reviews, setReviews] = useState<ReviewRunSummary[] | null>(null);
+  const tf = useTimeFormat();
   const [hasKey, setHasKey] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -964,7 +967,7 @@ function ClaudeReviewSection({
           <div className="muted" style={{ fontSize: 12 }}>
             {latest.model} · {latest.input_tokens.toLocaleString()} in /{" "}
             {latest.output_tokens.toLocaleString()} out · ${latest.cost_usd.toFixed(4)} ·{" "}
-            {(latest.duration_ms / 1000).toFixed(1)}s · {formatTimestamp(latest.ran_at)}
+            {(latest.duration_ms / 1000).toFixed(1)}s · {tf.timestamp(latest.ran_at)}
           </div>
           <p style={{ marginTop: 12 }}>{latest.overall_assessment}</p>
           {latest.suggestions.length === 0 ? (
@@ -999,7 +1002,7 @@ function ClaudeReviewSection({
                 style={{ fontSize: 12, paddingLeft: 12, borderLeft: "2px solid var(--border-hairline)" }}
               >
                 <div>
-                  {formatTimestamp(r.ran_at)} · {r.model} · ${r.cost_usd.toFixed(4)}
+                  {tf.timestamp(r.ran_at)} · {r.model} · ${r.cost_usd.toFixed(4)}
                 </div>
                 <div style={{ marginTop: 4 }}>{r.overall_assessment}</div>
                 <div style={{ marginTop: 4 }}>

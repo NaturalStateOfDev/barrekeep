@@ -1,5 +1,5 @@
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
-import { isoWeekKey, wallClock } from "./dates";
+import { formatTime, isoWeekKey, wallClock, type TimeFormat } from "./dates";
 
 export type IssueKind =
   | "unassigned"
@@ -40,6 +40,8 @@ export function computeIssues(
   blocks: AvailabilityBlock[],
   externalShifts: ExternalShiftInput[],
   newUsers: NewUserInput[],
+  /** Display format for times in messages (stored values stay 24h). */
+  fmt?: TimeFormat,
 ): Issue[] {
   const out: Issue[] = [];
   const teacherById = new Map(teachers.map((t) => [t.sling_user_id, t]));
@@ -52,7 +54,7 @@ export function computeIssues(
         kind: "unassigned",
         shift_id: s.id,
         shift_date: s.shift_date,
-        message: `${s.start_time} ${s.class_name} unassigned`,
+        message: `${formatTime(s.start_time, fmt)} ${s.class_name} unassigned`,
       });
     }
   }
@@ -118,7 +120,7 @@ export function computeIssues(
         kind: "leave_conflict",
         shift_id: s.id,
         shift_date: s.shift_date,
-        message: `${t?.display_name ?? "?"} has leave overlapping ${s.start_time} ${s.class_name}`,
+        message: `${t?.display_name ?? "?"} has leave overlapping ${formatTime(s.start_time, fmt)} ${s.class_name}`,
       });
     }
   }
@@ -150,7 +152,7 @@ export function computeIssues(
         kind: "external_shift",
         shift_id: null,
         shift_date: ext.shift_date,
-        message: `Sling shift ${ext.shift_date} ${ext.start_time} (pos ${ext.sling_position_id}) not in proposal`,
+        message: `Sling shift ${ext.shift_date} ${formatTime(ext.start_time, fmt)} (pos ${ext.sling_position_id}) not in proposal`,
         ref: ext.sling_shift_id,
       });
     }

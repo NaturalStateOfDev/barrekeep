@@ -1,6 +1,7 @@
 import type { Issue } from "../../lib/issues";
 import type { Teacher, ProposalShiftRow } from "../../types";
-import { formatDayShort, formatTimeShort } from "../../lib/dates";
+import { formatDayShort } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 
 interface Props {
   issue: Issue;
@@ -24,6 +25,7 @@ const SEVERITY: Record<Issue["kind"], string> = {
 
 export function IssueCard({ issue, slot, suggestedTeacher, readonly, onApply, onDismiss, onOpenDay }: Props) {
   const severity = SEVERITY[issue.kind];
+  const tf = useTimeFormat();
   const canApply = suggestedTeacher != null || issue.kind === "external_shift";
 
   return (
@@ -34,7 +36,7 @@ export function IssueCard({ issue, slot, suggestedTeacher, readonly, onApply, on
       {slot && (
         <div className="bk-issue-slot">
           <span className="bk-issue-day">{formatDayShort(slot.shift_date)}</span>
-          <span className="bk-issue-time">{formatTimeShort(slot.start_time)}</span>
+          <span className="bk-issue-time">{tf.timeShort(slot.start_time)}</span>
           <span className="bk-issue-class">{slot.class_name}</span>
         </div>
       )}

@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { buildMonthGrid, isoWeekKey, initials, monthWindow, isReadOnlyMonth } from "./dates";
+import {
+  buildMonthGrid,
+  isoWeekKey,
+  initials,
+  monthWindow,
+  isReadOnlyMonth,
+  formatTime,
+  formatTimeShort,
+  formatTimeRange,
+  formatTimestamp,
+  formatTimesInText,
+  formatSlotLabel,
+} from "./dates";
 
 describe("buildMonthGrid", () => {
   it("produces 6 weeks of 7 days for June 2026", () => {
@@ -102,5 +114,64 @@ describe("wallClock", () => {
     const blockEnd = wallClock("2026-08-20 12:00:00-05");
     const shiftStart = wallClock("2026-08-20T05:45:00");
     expect(blockEnd > shiftStart).toBe(true);
+  });
+});
+
+describe("time display", () => {
+  it("formatTime renders 12-hour by default", () => {
+    expect(formatTime("00:00")).toBe("12:00 AM");
+    expect(formatTime("12:00")).toBe("12:00 PM");
+    expect(formatTime("09:05")).toBe("9:05 AM");
+    expect(formatTime("23:59")).toBe("11:59 PM");
+    expect(formatTime("13:30:00")).toBe("1:30 PM");
+  });
+
+  it("formatTime passes 24-hour through as HH:MM", () => {
+    expect(formatTime("09:05", "24h")).toBe("09:05");
+    expect(formatTime("23:59", "24h")).toBe("23:59");
+    expect(formatTime("7:30", "24h")).toBe("07:30");
+    expect(formatTime("13:30:00", "24h")).toBe("13:30");
+  });
+
+  it("returns unparseable input unchanged", () => {
+    expect(formatTime("")).toBe("");
+    expect(formatTime("soon")).toBe("soon");
+    expect(formatTime("25:00")).toBe("25:00");
+  });
+
+  it("formatTimeShort is the compact form", () => {
+    expect(formatTimeShort("05:45")).toBe("5:45a");
+    expect(formatTimeShort("13:00")).toBe("1:00p");
+    expect(formatTimeShort("00:10")).toBe("12:10a");
+    expect(formatTimeShort("05:45", "24h")).toBe("05:45");
+  });
+
+  it("formatTimeRange collapses a shared AM/PM", () => {
+    expect(formatTimeRange("09:45", "10:35")).toBe("9:45 – 10:35 AM");
+    expect(formatTimeRange("11:30", "12:20")).toBe("11:30 AM – 12:20 PM");
+    expect(formatTimeRange("17:30", "18:20")).toBe("5:30 – 6:20 PM");
+    expect(formatTimeRange("09:45", "10:35", "12h", true)).toBe("9:45a–10:35a");
+    expect(formatTimeRange("09:45", "10:35", "24h")).toBe("09:45–10:35");
+  });
+
+  it("formatTimestamp keeps the stored form in 24h and converts in 12h", () => {
+    expect(formatTimestamp("2026-07-03 09:20:44+00")).toBe("2026-07-03 9:20 AM");
+    expect(formatTimestamp("2026-07-03T21:05:00.123", "12h")).toBe("2026-07-03 9:05 PM");
+    expect(formatTimestamp("2026-07-03 09:20:44.5-05", "24h")).toBe("2026-07-03 09:20:44");
+  });
+
+  it("formatTimesInText rewrites times inside app messages only in 12h", () => {
+    const msg = "Alex is marked unavailable (05:00–06:00) — overlaps 05:45 Classic";
+    expect(formatTimesInText(msg)).toBe(
+      "Alex is marked unavailable (5:00 AM–6:00 AM) — overlaps 5:45 AM Classic",
+    );
+    expect(formatTimesInText(msg, "24h")).toBe(msg);
+    expect(formatTimesInText("cap (3 / 2) at 2026-08-01")).toBe("cap (3 / 2) at 2026-08-01");
+  });
+
+  it("formatSlotLabel formats the time of a weekday slot", () => {
+    expect(formatSlotLabel("Mon 17:30")).toBe("Mon 5:30 PM");
+    expect(formatSlotLabel("Mon 17:30", "24h")).toBe("Mon 17:30");
+    expect(formatSlotLabel("")).toBe("");
   });
 });

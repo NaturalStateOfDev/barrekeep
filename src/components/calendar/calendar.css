@@ -318,7 +318,8 @@
 .bk-day-slot-time {
   font-variant-numeric: tabular-nums;
   font-weight: var(--weight-semibold);
-  min-width: 52px;
+  min-width: 68px;
+  white-space: nowrap;
 }
 
 .bk-day-slot-teacher {

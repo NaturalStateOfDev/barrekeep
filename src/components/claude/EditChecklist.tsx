@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Check } from "lucide-react";
 import { api } from "../../lib/api";
-import { formatDayShort, formatTimeShort } from "../../lib/dates";
+import { formatDayShort } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 import type { Position, ProposalDetail, ProposedEdit, Teacher } from "../../types";
 
 interface Props {
@@ -21,13 +22,14 @@ export function EditChecklist({ edits, detail, positions, teachers, readonly = f
     () => new Set(edits.filter((e) => e.valid).map((_, i) => i).filter((i) => edits[i].valid)),
   );
   const [applied, setApplied] = useState<Set<number>>(new Set());
+  const tf = useTimeFormat();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const slotLabel = (e: ProposedEdit): string => {
     const s = detail.shifts.find((x) => x.id === e.proposal_shift_id);
     if (!s) return `slot #${e.proposal_shift_id}`;
-    return `${formatDayShort(s.shift_date)} ${formatTimeShort(s.start_time)} ${s.class_name}`;
+    return `${formatDayShort(s.shift_date)} ${tf.time(s.start_time)} ${s.class_name}`;
   };
 
   const actionLabel = (e: ProposedEdit): string => {

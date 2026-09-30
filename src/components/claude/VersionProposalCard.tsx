@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { GitBranchPlus } from "lucide-react";
 import { api } from "../../lib/api";
 import { confirmLabel, diffLines, ruleDiffLabel, unexpectedSlots } from "../../lib/rules";
+import { formatTime, type TimeFormat } from "../../lib/dates";
+import { useTimeFormat } from "../../lib/timeFormat";
 import { LoadingBlock } from "../ui/LoadingBlock";
 import type {
   CandidatePreview,
@@ -19,8 +21,8 @@ interface Props {
   onAdopted: (version: number) => void;
 }
 
-function changeLabel(c: SlotChange): string {
-  const when = `${c.weekday} ${c.date.slice(5)} ${c.start}`;
+function changeLabel(c: SlotChange, fmt: TimeFormat): string {
+  const when = `${c.weekday} ${c.date.slice(5)} ${formatTime(c.start, fmt)}`;
   if (c.kind === "added") return `${when} · new slot: ${c.class_after} — ${c.teacher_after}`;
   if (c.kind === "removed") return `${when} · slot gone: ${c.class_before} — ${c.teacher_before}`;
   const cls =
@@ -49,6 +51,7 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
   const [showDiff, setShowDiff] = useState(true);
   const [showChanges, setShowChanges] = useState(false);
   const inFlight = useRef(false);
+  const tf = useTimeFormat();
 
   const teacherName = useMemo(() => {
     const byId = new Map(teachers.map((t) => [String(t.sling_user_id), t.display_name]));
@@ -148,7 +151,7 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
                   }
                 >
                   <strong>{e.kind === "added" ? "+ " : e.kind === "removed" ? "− " : "~ "}</strong>
-                  {ruleDiffLabel(e, teacherName)}
+                  {ruleDiffLabel(e, teacherName, tf.fmt)}
                 </li>
               ))}
             </ul>
@@ -220,10 +223,10 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
                   </strong>
                   <ul className="bk-change-list">
                     {unexpected.added.map((c, i) => (
-                      <li key={`a${i}`} className="bk-change-added">+ {changeLabel(c)}</li>
+                      <li key={`a${i}`} className="bk-change-added">+ {changeLabel(c, tf.fmt)}</li>
                     ))}
                     {unexpected.removed.map((c, i) => (
-                      <li key={`r${i}`} className="bk-change-removed">− {changeLabel(c)}</li>
+                      <li key={`r${i}`} className="bk-change-removed">− {changeLabel(c, tf.fmt)}</li>
                     ))}
                   </ul>
                   <div style={{ marginTop: 6 }}>
@@ -245,7 +248,7 @@ export function VersionProposalCard({ proposal, runId, scriptContent, teachers, 
                             c.kind === "removed" ? "bk-change-removed" : c.kind === "added" ? "bk-change-added" : ""
                           }
                         >
-                          {changeLabel(c)}
+                          {changeLabel(c, tf.fmt)}
                           {c.expected && <span className="muted"> (time shift)</span>}
                         </li>
                       ))}

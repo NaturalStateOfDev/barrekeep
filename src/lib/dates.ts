@@ -82,12 +82,81 @@ export function monthLabel(ym: string): string {
   return `${MONTH_NAMES[m - 1]} ${y}`;
 }
 
-// "05:45" → "5:45a"; "13:00" → "1:00p"
-export function formatTimeShort(hhmm: string): string {
-  const [h, m] = hhmm.split(":").map(Number);
-  const period = h >= 12 ? "p" : "a";
-  const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-  return `${hour12}:${String(m).padStart(2, "0")}${period}`;
+// ---- Time display ------------------------------------------------------
+// Stored values, API payloads, algorithm rules, Sling requests and Claude
+// prompts all use 24-hour "HH:MM". These helpers are DISPLAY-ONLY; the user's
+// choice (Settings → Display, app_settings.time_format) reaches components via
+// useTimeFormat() in ./timeFormat.
+
+export type TimeFormat = "12h" | "24h";
+export const DEFAULT_TIME_FORMAT: TimeFormat = "12h";
+
+/** Parse "HH:MM" or "HH:MM:SS"; null when it isn't a time. */
+function parseHhmm(hhmm: string): [number, number] | null {
+  const m = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/.exec((hhmm ?? "").trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return [h, min];
+}
+
+function parts12(h: number): [number, "AM" | "PM"] {
+  return [h % 12 === 0 ? 12 : h % 12, h >= 12 ? "PM" : "AM"];
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** "09:45" → "9:45 AM" (12h) or "09:45" (24h). Unparseable input is returned unchanged. */
+export function formatTime(hhmm: string, fmt: TimeFormat = DEFAULT_TIME_FORMAT): string {
+  const t = parseHhmm(hhmm);
+  if (!t) return hhmm;
+  const [h, m] = t;
+  if (fmt === "24h") return `${pad2(h)}:${pad2(m)}`;
+  const [h12, period] = parts12(h);
+  return `${h12}:${pad2(m)} ${period}`;
+}
+
+/** Compact form for tight spaces: "05:45" → "5:45a" (12h) or "05:45" (24h). */
+export function formatTimeShort(hhmm: string, fmt: TimeFormat = DEFAULT_TIME_FORMAT): string {
+  const t = parseHhmm(hhmm);
+  if (!t) return hhmm;
+  const [h, m] = t;
+  if (fmt === "24h") return `${pad2(h)}:${pad2(m)}`;
+  const [h12, period] = parts12(h);
+  return `${h12}:${pad2(m)}${period === "AM" ? "a" : "p"}`;
+}
+
+/** "09:45","10:35" → "9:45 – 10:35 AM"; across noon "11:30 AM – 12:20 PM";
+ *  24h "09:45–10:35". `compact` uses the short forms ("9:45a–10:35a"). */
+export function formatTimeRange(
+  start: string,
+  end: string,
+  fmt: TimeFormat = DEFAULT_TIME_FORMAT,
+  compact = false,
+): string {
+  if (fmt === "24h" || compact) return `${formatTimeShort(start, fmt)}–${formatTimeShort(end, fmt)}`;
+  const a = parseHhmm(start);
+  const b = parseHhmm(end);
+  if (a && b && parts12(a[0])[1] === parts12(b[0])[1]) {
+    const [h12] = parts12(a[0]);
+    return `${h12}:${pad2(a[1])} – ${formatTime(end, fmt)}`;
+  }
+  return `${formatTime(start, fmt)} – ${formatTime(end, fmt)}`;
+}
+
+/** Reformat every "HH:MM" inside an app-generated message (e.g. the
+ *  backend's conflict text "Alex is marked unavailable (05:00–06:00)").
+ *  Not for Claude's free text. 24h returns the text unchanged. */
+export function formatTimesInText(text: string, fmt: TimeFormat = DEFAULT_TIME_FORMAT): string {
+  if (fmt === "24h") return text;
+  return text.replace(/(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])/g, (m) => formatTime(m, fmt));
+}
+
+/** "Mon 09:45" (weekday + time slot label) → "Mon 9:45 AM". */
+export function formatSlotLabel(label: string, fmt: TimeFormat = DEFAULT_TIME_FORMAT): string {
+  const i = label.lastIndexOf(" ");
+  return i < 0 ? label : `${label.slice(0, i)} ${formatTime(label.slice(i + 1), fmt)}`;
 }
 
 // "2026-06-09" → "Tue Jun 9"
@@ -104,9 +173,13 @@ export function prettyDayLong(iso: string): string {
   return `${days[d.getUTCDay()]}, ${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
-// DuckDB returns 'YYYY-MM-DD HH:MM:SS+TZ'. Trim to local-ish display.
-export function formatTimestamp(iso: string): string {
-  return iso.replace("T", " ").replace(/\.\d+/, "").slice(0, 19);
+// DuckDB returns 'YYYY-MM-DD HH:MM:SS+TZ'. Trim to local-ish display:
+// 24h → "2026-07-03 09:20:44" (as stored); 12h → "2026-07-03 9:20 AM".
+export function formatTimestamp(iso: string, fmt: TimeFormat = DEFAULT_TIME_FORMAT): string {
+  const trimmed = iso.replace("T", " ").replace(/\.\d+/, "").slice(0, 19);
+  if (fmt === "24h") return trimmed;
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})(:\d{2})?$/.exec(trimmed);
+  return m ? `${m[1]} ${formatTime(m[2], fmt)}` : trimmed;
 }
 
 // Normalize a timestamp to comparable local wall-clock form 'YYYY-MM-DDTHH:MM:SS'.

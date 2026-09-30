@@ -14,6 +14,7 @@ import {
 } from "../lib/updater";
 import type { BackupsInfo, DbInfo, PythonStatus } from "../types";
 import { onStudioConfigChanged, openStudioSetup } from "../lib/studioSetup";
+import { useTimeFormat } from "../lib/timeFormat";
 
 function StatusValue({ state, okLabel, warnLabel, mutedLabel }: {
   state: boolean | null;
@@ -34,6 +35,7 @@ export function SettingsScreen() {
       <div style={{ display: "flex", flexDirection: "column", maxWidth: 620 }}>
         <SlingTokenCard />
         <StudioConfigCard />
+        <DisplayCard />
         <AnthropicKeyCard />
         <SlingCredentialsCard />
         <UpdatesCard />
@@ -196,6 +198,37 @@ function StudioConfigCard() {
         </button>
       </div>
       {status && <div className="ok">{status}</div>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+function DisplayCard() {
+  const tf = useTimeFormat();
+  const [error, setError] = useState<string | null>(null);
+  const onToggle = async (use24: boolean) => {
+    setError(null);
+    try {
+      await tf.setFormat(use24 ? "24h" : "12h");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  return (
+    <div className="card">
+      <strong>Display</strong>
+      <label className="row" style={{ marginTop: 12, gap: 8, cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          checked={tf.fmt === "24h"}
+          onChange={(e) => onToggle(e.target.checked)}
+        />
+        Use 24-hour time
+      </label>
+      <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+        Class times show as {tf.time("17:30")} ({tf.range("09:45", "10:35")}). Display only —
+        Sling, rules and Claude always use 24-hour times.
+      </p>
       {error && <div className="error">{error}</div>}
     </div>
   );
