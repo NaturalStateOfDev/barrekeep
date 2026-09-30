@@ -121,12 +121,15 @@ Two kinds of copies sit next to it:
   (`startup`), before every Sling sync that changes shifts (`prepush`; `preremove` for
   "remove this draft from Sling"), and
   from Settings → Backups → "Back up now" (`manual`). The newest 14 are kept;
-  rotation deletes only files matching that name pattern. They are written
-  through the open connection with DuckDB's
-  `ATTACH '<file>' AS b; COPY FROM DATABASE scheduler TO b; DETACH b` — never
-  by copying the live file, which Windows refuses while it's open (os error
-  32). A failed backup is logged to `logs\barrekeep.log` and shown as a
-  warning; it never blocks startup or a push.
+  rotation deletes only files matching that name pattern. Each is an exact
+  file copy: holding the `Db` mutex, the app `CHECKPOINT`s and closes its
+  (only) connection — Windows refuses to copy the file while it's open (os
+  error 32) — copies to `<name>.partial`, renames, and reopens the
+  connection whether or not the copy worked. (Not DuckDB's
+  `COPY FROM DATABASE`: it inserts child tables before their parents and
+  fails with a foreign-key violation on any populated database.) A failed
+  backup is logged to `logs\barrekeep.log` and shown as a warning; it never
+  blocks startup or a push.
 - `scheduler.duckdb.backup-vN` — taken automatically right before a schema
   migration (`migrations::backup_if_pending`), N = the schema version it holds.
 

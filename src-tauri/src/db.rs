@@ -50,8 +50,8 @@ pub fn open_file<P: AsRef<std::path::Path>>(path: P) -> duckdb::Result<Connectio
     Connection::open_with_flags(path, config()?)
 }
 
-/// In-memory connection with the app's config (tests).
-#[cfg(test)]
+/// In-memory connection with the app's config (tests, and the placeholder
+/// that holds the Db slot while backup::create_backup copies the file).
 pub fn open_in_memory() -> duckdb::Result<Connection> {
     Connection::open_in_memory_with_flags(config()?)
 }

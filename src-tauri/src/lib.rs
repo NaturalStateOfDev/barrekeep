@@ -156,7 +156,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let db = db::Db::open(app.handle())?;
     let backup_state = backup::BackupState::default();
     {
-        let conn = db.0.lock().expect("db poisoned at startup");
+        let mut conn = db.0.lock().expect("db poisoned at startup");
         logging::write_line("startup", "running migrations");
         migrations::run(&conn)?;
         seed::run_if_empty(&conn)?;
@@ -174,11 +174,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             },
             Err(e) => logging::write_line("algorithm", &format!("no algorithms dir: {e}")),
         }
-        // Routine backup, at most once per calendar day. Goes through the
-        // open connection (DuckDB COPY FROM DATABASE), never a file copy.
+        // Routine backup, at most once per calendar day. Briefly closes and
+        // reopens this connection around a file copy (backup::create_backup).
         // Failure is logged + surfaced in Settings, never fatal.
         logging::write_line("startup", "daily backup check");
-        backup::run_startup(&conn, &path, &backup_state);
+        backup::run_startup(&mut conn, &path, &backup_state);
     }
     app.manage(db);
     app.manage(backup_state);
