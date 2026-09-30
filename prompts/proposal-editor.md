@@ -107,3 +107,13 @@ fits it tries other class formats, then the lead teacher as a last resort
 - `sun_time_shifts`: same shape and direction as sat_time_shifts, for SUNDAY
   slots; the end time moves by the same amount as the start (the class keeps
   its length).
+- `slot_continuity_bonus`: number ≥ 0, default 0 (off). Teacher consistency
+  within the month ("Jane always teaches Tuesdays at 8:45 and 9:45"): when a
+  slot is filled, every teacher who was already assigned that same weekday +
+  start time earlier in the target month ranks as an exact-slot (primary)
+  candidate for it and gains this much per earlier assignment. 1.0 = mild
+  preference, 3.0 = strong (it outweighs the variety penalty, which is 0.3
+  per class by default); 0 = history and rotation alone decide. It never
+  overrides blocks, availability, caps or qualifications. Use it for "keep
+  teachers on the same days/times" requests; it trades load variety for
+  consistency.

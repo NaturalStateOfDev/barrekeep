@@ -168,4 +168,36 @@ assert dec7 and all(s["sling_user_id"] != 501 or s["is_dropped"] for s in dec7),
 assert any(s["sling_user_id"] == 501 for s in mon if s["shift_date"] == "2026-12-14"), \
     "501 should keep the unblocked Mondays"
 
+# 9. slot_continuity_bonus: 0 is byte-identical to baseline; > 0 keeps a
+# teacher on the same weekday+time all month. Rotate the Mon 09:00 history
+# across three teachers so the variety penalty alone spreads the slot.
+zero_bonus = copy.deepcopy(payload)
+zero_bonus["rules"] = {"slot_continuity_bonus": 0}
+assert run(zero_bonus) == base, "slot_continuity_bonus 0 must be byte-identical"
+
+rotating = copy.deepcopy(payload)
+mon9_history = [e for e in rotating["history_events"] if "T09:00" in e["dtstart"]]
+assert len(mon9_history) == 3
+for e, uid in zip(mon9_history, (501, 502, 503)):
+    e["user"] = {"id": uid}
+
+
+def mon9_teachers(p):
+    shifts = json.loads(run(p))["shifts"]
+    return [s["sling_user_id"] for s in shifts
+            if s["weekday"] == "Mon" and s["start_time"] == "09:00"]
+
+
+rot_base = mon9_teachers(rotating)
+consistent = copy.deepcopy(rotating)
+consistent["rules"] = {"slot_continuity_bonus": 2.0}
+rot_bonus = mon9_teachers(consistent)
+assert len(rot_base) == len(rot_bonus) == 5
+assert len(set(rot_base)) > 1, f"fixture should rotate without the bonus: {rot_base}"
+assert len(set(rot_bonus)) < len(set(rot_base)), (rot_base, rot_bonus)
+assert len(set(rot_bonus)) == 1, f"bonus should keep one teacher on Mon 09:00: {rot_bonus}"
+out9 = json.loads(run(consistent))
+assert out9["parameters"]["slot_continuity_bonus"] == 2.0
+assert "slot_continuity_bonus" not in json.loads(run(rotating))["parameters"]
+
 print("OK")

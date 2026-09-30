@@ -54,6 +54,10 @@ pub struct Rules {
     pub sat_time_shifts: HashMap<String, String>,
     #[serde(default)]
     pub sun_time_shifts: HashMap<String, String>,
+    /// Ranking bonus per earlier assignment of the same teacher to the same
+    /// weekday + start time this month (0/absent = disabled = baseline).
+    #[serde(default)]
+    pub slot_continuity_bonus: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -175,6 +179,13 @@ pub fn validate_rules(raw: &Value) -> Result<Rules, String> {
             ));
         }
     }
+    if let Some(b) = rules.slot_continuity_bonus {
+        if !b.is_finite() || b < 0.0 {
+            return Err(format!(
+                "slot_continuity_bonus: {b} — use a number ≥ 0 (0 = off; 1.0 is a mild, 3.0 a strong preference)"
+            ));
+        }
+    }
     check_time_shifts(&rules.sat_time_shifts, "sat_time_shifts")?;
     check_time_shifts(&rules.sun_time_shifts, "sun_time_shifts")?;
     Ok(rules)
@@ -280,6 +291,7 @@ const RULE_KEY_ORDER: &[&str] = &[
     "variety_penalty_per_class",
     "sat_time_shifts",
     "sun_time_shifts",
+    "slot_continuity_bonus",
 ];
 
 fn identity_fields(key: &str) -> &'static [&'static str] {
@@ -810,6 +822,12 @@ mod tests {
         .is_err());
         assert!(validate_rules(&json!({"variety_penalty_multiplier": {"501": -1.0}})).is_err());
         assert!(validate_rules(&json!({"variety_penalty_per_class": -0.1})).is_err());
+        assert!(validate_rules(&json!({"slot_continuity_bonus": -1.0})).is_err());
+        assert_eq!(
+            validate_rules(&json!({"slot_continuity_bonus": 2.5})).unwrap().slot_continuity_bonus,
+            Some(2.5)
+        );
+        assert!(validate_rules(&json!({"slot_continuity_bonus": 0})).is_ok());
         let ok = validate_rules(&json!({
             "teacher_class_blocklist": [{"sling_user_id": 501, "class_name": "Reform", "reason": "r"}],
             "priority_slots": [{"sling_user_id": 501, "weekday": "Mon", "time": "09:00"}],

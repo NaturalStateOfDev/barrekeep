@@ -4,9 +4,11 @@
 // from the design-system UI kit / seed.rs — real data comes from Sling.
 
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { consistencyStats } from "./drafts";
 import type {
   AlgorithmVersion,
   BackupEntry,
+  DraftSlotDiff,
   Teacher,
   Position,
   ProposalSummary,
@@ -56,7 +58,9 @@ function addMinutes(hhmm: string, minutes: number): string {
 
 let nextShiftId = 1000;
 
-function buildShifts(ym: string): ProposalShiftRow[] {
+/** "consistent" keeps each weekday+time with one teacher all month (the
+ *  slot_continuity_bonus what-if); "rotate" is the default rotation. */
+function buildShifts(ym: string, mode: "rotate" | "consistent" = "rotate"): ProposalShiftRow[] {
   const [y, m] = ym.split("-").map(Number);
   const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
   const weekdayTemplate = [
@@ -78,7 +82,7 @@ function buildShifts(ym: string): ProposalShiftRow[] {
     const tmpl = dow === 6 ? satTemplate : weekdayTemplate;
     tmpl.forEach((slot, i) => {
       const pos = positionByName.get(slot.format)!;
-      const teacher = TEACHERS[(d + i) % TEACHERS.length];
+      const teacher = TEACHERS[((mode === "consistent" ? dow : d) + i) % TEACHERS.length];
       const unassigned = d === 12 && slot.time === "09:00";
       const notQualified = d === 12 && slot.time === "17:30"; // Casey on Reform
       const dropped = d === 5 && slot.time === "18:45";
@@ -108,25 +112,133 @@ interface MockProposal {
   shifts: ProposalShiftRow[];
 }
 
+function mockSummary(
+  over: Pick<ProposalSummary, "id" | "target_month" | "algorithm_version" | "generated_at" | "is_current" | "name"> &
+    Partial<ProposalSummary>,
+): ProposalSummary {
+  return {
+    shift_count: 0,
+    dropped_count: 0,
+    edit_count: 0,
+    archived: false,
+    parent_proposal_id: null,
+    created_from: "generate",
+    is_push_candidate: false,
+    pushed: false,
+    ...over,
+  };
+}
+
 const PROPOSALS: MockProposal[] = [
   {
-    summary: { id: 7, target_month: "2026-08", algorithm_version: "v3", generated_at: "2026-07-03 09:14:02", is_current: true, shift_count: 0, dropped_count: 1, edit_count: 0 },
+    summary: mockSummary({ id: 8, target_month: "2026-08", algorithm_version: "v10", generated_at: "2026-07-04 11:02:40", is_current: true, name: "Consistent days" }),
+    shifts: buildShifts("2026-08", "consistent"),
+  },
+  {
+    summary: mockSummary({ id: 7, target_month: "2026-08", algorithm_version: "v3", generated_at: "2026-07-03 09:14:02", is_current: false, name: "Draft 1", dropped_count: 1 }),
     shifts: buildShifts("2026-08"),
   },
   {
-    summary: { id: 6, target_month: "2026-07", algorithm_version: "v3", generated_at: "2026-06-24 08:02:11", is_current: true, shift_count: 0, dropped_count: 0, edit_count: 5 },
+    summary: mockSummary({ id: 6, target_month: "2026-07", algorithm_version: "v3", generated_at: "2026-06-24 08:02:11", is_current: true, name: "Draft 1", edit_count: 5, pushed: true }),
     shifts: buildShifts("2026-07"),
   },
   {
-    summary: { id: 5, target_month: "2026-06", algorithm_version: "v2", generated_at: "2026-05-26 10:41:37", is_current: true, shift_count: 0, dropped_count: 2, edit_count: 2 },
+    summary: mockSummary({ id: 5, target_month: "2026-06", algorithm_version: "v2", generated_at: "2026-05-26 10:41:37", is_current: true, name: "Draft 1", dropped_count: 2, edit_count: 2, pushed: true }),
     shifts: buildShifts("2026-06"),
   },
 ];
 for (const p of PROPOSALS) p.summary.shift_count = p.shifts.filter((s) => !s.is_dropped).length;
 
+/** Mirrors month_push_candidate: month -> the draft Push sends. */
+const PUSH_DRAFT = new Map<string, number>([
+  ["2026-08", 7],
+  ["2026-07", 6],
+  ["2026-06", 5],
+]);
+
+function summaryOf(p: MockProposal): ProposalSummary {
+  return { ...p.summary, is_push_candidate: PUSH_DRAFT.get(p.summary.target_month) === p.summary.id };
+}
+
+function ensurePushDraft(id: number) {
+  const p = findProposal(id);
+  const push = PUSH_DRAFT.get(p.summary.target_month);
+  if (push !== id) {
+    const other = push != null ? PROPOSALS.find((x) => x.summary.id === push) : undefined;
+    throw new Error(
+      `"${p.summary.name}" is not the push draft for ${p.summary.target_month}` +
+        (other ? ` — "${other.summary.name}" is` : "") +
+        `. Mark this draft as the push draft ("Use for push") first.`,
+    );
+  }
+}
+
+/** Rough stand-in for drafts::diff_impl (pairs rows per date+time in order). */
+function mockDiff(a: MockProposal, b: MockProposal) {
+  const key = (s: ProposalShiftRow) => `${s.shift_date}|${s.start_time}`;
+  const label = (s: ProposalShiftRow) =>
+    s.is_dropped ? "Dropped" : s.coteach_label ?? s.teacher_name ?? "Unassigned";
+  const group = (rows: ProposalShiftRow[]) => {
+    const m = new Map<string, ProposalShiftRow[]>();
+    for (const s of rows) m.set(key(s), [...(m.get(key(s)) ?? []), s]);
+    return m;
+  };
+  const ga = group(a.shifts);
+  const gb = group(b.shifts);
+  const keys = [...new Set([...ga.keys(), ...gb.keys()])].sort();
+  const changes: DraftSlotDiff[] = [];
+  for (const k of keys) {
+    const ra = ga.get(k) ?? [];
+    const rb = gb.get(k) ?? [];
+    const [date, start] = k.split("|");
+    const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(date + "T12:00:00Z").getUTCDay()];
+    for (let i = 0; i < Math.max(ra.length, rb.length); i++) {
+      const x = ra[i];
+      const y = rb[i];
+      if (x && y) {
+        const fmt = x.class_name !== y.class_name;
+        const tch = label(x) !== label(y);
+        if (!fmt && !tch) continue;
+        changes.push({ date, weekday, start, class_a: x.class_name, class_b: y.class_name, teacher_a: label(x), teacher_b: label(y), kind: fmt && tch ? "format_teacher" : fmt ? "format" : "teacher" });
+      } else if (x) {
+        changes.push({ date, weekday, start, class_a: x.class_name, class_b: null, teacher_a: label(x), teacher_b: null, kind: "only_a" });
+      } else if (y) {
+        changes.push({ date, weekday, start, class_a: null, class_b: y.class_name, teacher_a: null, teacher_b: label(y), kind: "only_b" });
+      }
+    }
+  }
+  const sa = consistencyStats(a.shifts);
+  const sb = consistencyStats(b.shifts);
+  const totals = (m: typeof sa) => {
+    const classes = [...m.values()].reduce((n, s) => n + s.classes, 0);
+    const distinct_slots = [...m.values()].reduce((n, s) => n + s.distinct_slots, 0);
+    return { classes, distinct_slots, classes_per_slot: distinct_slots ? classes / distinct_slots : 0 };
+  };
+  const uids = [...new Set([...sa.keys(), ...sb.keys()])];
+  return {
+    target_month: a.summary.target_month,
+    a_id: a.summary.id,
+    b_id: b.summary.id,
+    a_name: a.summary.name,
+    b_name: b.summary.name,
+    changes,
+    teachers: uids
+      .map((uid) => ({
+        sling_user_id: uid,
+        name: TEACHERS.find((t) => t.sling_user_id === uid)?.display_name ?? `teacher ${uid}`,
+        a: sa.get(uid) ?? null,
+        b: sb.get(uid) ?? null,
+      }))
+      .sort((x, y) => x.name.localeCompare(y.name)),
+    totals_a: totals(sa),
+    totals_b: totals(sb),
+  };
+}
+
 const EDITS: EditRow[] = [];
 let nextEditId = 1;
-let nextProposalId = 8;
+let nextProposalId = 9;
+let nextRunId = 42;
 
 const BLOCKS: AvailabilityBlock[] = [
   { sling_user_id: 1930004, source: "leave", starts_at: "2026-08-20T08:00:00", ends_at: "2026-08-20T12:00:00" },
@@ -330,32 +442,77 @@ export function installDevMock() {
 
       // ---- Proposals ----
       case "list_proposals":
-        return PROPOSALS.map((p) => p.summary).sort((a, b) => b.id - a.id);
+        return PROPOSALS.map(summaryOf).sort((a, b) => b.id - a.id);
       case "get_proposal": {
         const p = findProposal(args.proposalId);
-        return { summary: p.summary, shifts: p.shifts, is_stale: p.summary.id === 6, last_pulled_at: "2026-07-01T08:00:00" };
+        return { summary: summaryOf(p), shifts: p.shifts, is_stale: p.summary.id === 6, last_pulled_at: "2026-07-01T08:00:00" };
       }
       case "generate_proposal": {
         await sleep(900);
         const id = nextProposalId++;
         const shifts = buildShifts(args.targetMonth);
-        for (const other of PROPOSALS.filter((x) => x.summary.target_month === args.targetMonth)) {
-          other.summary.is_current = false;
-        }
+        const inMonth = PROPOSALS.filter((x) => x.summary.target_month === args.targetMonth);
+        for (const other of inMonth) other.summary.is_current = false;
         PROPOSALS.unshift({
-          summary: {
+          summary: mockSummary({
             id,
             target_month: args.targetMonth,
             algorithm_version: "v3",
             generated_at: "2026-07-05 12:00:00",
             is_current: true,
+            name: args.name?.trim() || `Draft ${inMonth.length + 1}`,
             shift_count: shifts.filter((s) => !s.is_dropped).length,
             dropped_count: shifts.filter((s) => s.is_dropped).length,
-            edit_count: 0,
-          },
+          }),
           shifts,
         });
+        // The push draft is only set when the month has none.
+        if (!PUSH_DRAFT.has(args.targetMonth)) PUSH_DRAFT.set(args.targetMonth, id);
         return { proposal_id: id, target_month: args.targetMonth, algorithm_version: "v3", shift_count: shifts.length, dropped_count: 1, stderr_tail: "" };
+      }
+      case "duplicate_proposal": {
+        await sleep(300);
+        const src = findProposal(args.proposalId);
+        const id = nextProposalId++;
+        PROPOSALS.unshift({
+          summary: {
+            ...src.summary,
+            id,
+            name: args.name?.trim() || `Copy of ${src.summary.name}`,
+            is_current: false,
+            archived: false,
+            parent_proposal_id: src.summary.id,
+            created_from: "duplicate",
+            edit_count: 0,
+            pushed: false,
+          },
+          shifts: src.shifts.map((s) => ({ ...s, id: nextShiftId++ })),
+        });
+        return id;
+      }
+      case "rename_proposal": {
+        const name = String(args.name ?? "").trim();
+        if (!name) throw new Error("draft name can't be empty");
+        findProposal(args.proposalId).summary.name = name;
+        return null;
+      }
+      case "archive_proposal":
+      case "unarchive_proposal": {
+        const p = findProposal(args.proposalId);
+        if (cmd === "archive_proposal" && PUSH_DRAFT.get(p.summary.target_month) === p.summary.id)
+          throw new Error("This is the month's push draft — mark another draft as the push draft before archiving it.");
+        p.summary.archived = cmd === "archive_proposal";
+        return null;
+      }
+      case "set_push_candidate": {
+        const p = findProposal(args.proposalId);
+        if (p.summary.archived) throw new Error("An archived draft can't be the push draft — unarchive it first.");
+        PUSH_DRAFT.set(args.targetMonth, args.proposalId);
+        return null;
+      }
+      case "diff_proposals": {
+        await sleep(200);
+        return mockDiff(findProposal(args.a), findProposal(args.b));
       }
       case "edit_proposal_shift_teacher": {
         for (const p of PROPOSALS) {
@@ -453,6 +610,7 @@ export function installDevMock() {
         return null;
       }
       case "push_proposal_dry_run": {
+        ensurePushDraft(args.proposalId);
         await sleep(500);
         const p = findProposal(args.proposalId);
         const items = p.shifts.filter((s) => !s.is_dropped && s.teacher_name);
@@ -460,10 +618,16 @@ export function installDevMock() {
           total: items.length,
           skipped_count: 2,
           to_create: items.slice(0, 40).map((s) => ({ date: s.shift_date, start: s.start_time, end: s.end_time, class_name: s.class_name, teacher_name: s.teacher_name! })),
+          draft_name: p.summary.name,
+          other_pushed_drafts: PROPOSALS.filter(
+            (x) => x.summary.target_month === p.summary.target_month && x.summary.id !== p.summary.id && x.summary.pushed,
+          ).map((x) => x.summary.name),
         };
       }
       case "push_proposal_execute":
+        ensurePushDraft(args.proposalId);
         await sleep(1800);
+        findProposal(args.proposalId).summary.pushed = true;
         return { push_id: 1, created: 38, failed: 0, skipped: 2, backup_warning: null };
 
       // ---- Claude review ----
@@ -482,7 +646,7 @@ export function installDevMock() {
         const b = assigned[9] ?? assigned[1];
         const other = TEACHERS.find((t) => t.sling_user_id !== a.sling_user_id)!;
         return {
-          run_id: 42,
+          run_id: nextRunId++,
           summary:
             "Rebalanced two slots per the instruction. Casey keeps getting swapped off Reform — proposed a standing rule.",
           edits: [

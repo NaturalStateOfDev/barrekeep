@@ -41,6 +41,8 @@ export function ruleEntryLabel(
       return `Saturday ${identity} class moves to ${value}`;
     case "sun_time_shifts":
       return `Sunday ${identity} class moves to ${value}`;
+    case "slot_continuity_bonus":
+      return `Keep teachers on the same weekday+time: bonus ${value} per repeat`;
     default:
       return `${key}${identity ? ` ${identity}` : ""}: ${JSON.stringify(value)}`;
   }

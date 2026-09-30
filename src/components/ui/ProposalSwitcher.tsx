@@ -4,7 +4,7 @@ import { monthLabel } from "../../lib/dates";
 
 export interface MonthEntry {
   month: string; // "YYYY-MM"
-  /** The month's current (or newest) proposal — selected when the month is picked. */
+  /** The month's push draft (or newest draft) — selected when the month is picked. */
   proposalId: number;
   draftCount: number;
 }
@@ -22,7 +22,7 @@ interface Props {
 /** The Proposals page title: a serif month heading that drops down over the
  *  scheduled months, with a "Start a new month…" entry at the bottom.
  *  Draft/version history for the selected month lives in the sibling
- *  VersionSwitcher. */
+ *  DraftSwitcher. */
 export function ProposalSwitcher({ months, value, fallbackTitle, onChange, onNew }: Props) {
   const [open, setOpen] = useState(false);
   const current = value != null ? months.find((m) => m.month === value) : undefined;
