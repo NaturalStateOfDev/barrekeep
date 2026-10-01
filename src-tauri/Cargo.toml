@@ -32,7 +32,7 @@ serde_json = "1"
 # crates.io crate (its `icu` feature needs `bundled-cmake`, which requires a
 # duckdb-rs git checkout), so the SQL sticks to core functions instead and
 # db.rs turns extension autoinstall/autoload off.
-duckdb = { version = "~1.10504", features = ["bundled", "json"] }
+duckdb = { version = "~1.10505", features = ["bundled", "json"] }
 thiserror = "2"
 anyhow = "1"
 # HTTP client for the Anthropic API. Sync (blocking) is fine as long as the
