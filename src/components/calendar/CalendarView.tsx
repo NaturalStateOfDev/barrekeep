@@ -7,6 +7,7 @@ import type {
   AvailabilityBlock,
   DraftConflict,
 } from "../../types";
+import type { AvailabilityLookup } from "../../lib/availability";
 import { api } from "../../lib/api";
 import type { Issue } from "../../lib/issues";
 import { StaleBanner } from "./StaleBanner";
@@ -21,6 +22,8 @@ interface Props {
   positions: Position[];
   qualifiedPairs: Set<string>;
   blocks: AvailabilityBlock[];
+  /** Computed availability for the month (null until loaded). */
+  availability: AvailabilityLookup | null;
   issues: Issue[];
   onProposalChanged: () => void;
   onRegenerate: () => void;
@@ -40,6 +43,7 @@ export function CalendarView({
   positions,
   qualifiedPairs,
   blocks,
+  availability,
   issues,
   onProposalChanged,
   onRegenerate,
@@ -125,6 +129,7 @@ export function CalendarView({
         teachers={teachers}
         qualifiedPairs={qualifiedPairs}
         blocks={blocks}
+        availability={availability}
         readonly={!!readonly}
         onApplySwap={async (shiftId, userId) => {
           await handleAssign(shiftId, userId);
@@ -141,6 +146,7 @@ export function CalendarView({
           positions={positions}
           qualifiedPairs={qualifiedPairs}
           blocks={blocks}
+          availability={availability}
           warnings={dayWarnings}
           readonly={!!readonly}
           onClose={() => setSelectedDay(null)}

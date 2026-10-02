@@ -103,6 +103,54 @@ describe("computeIssues — leave_conflict", () => {
       starts_at: "2026-06-01T04:00:00", ends_at: "2026-06-01T07:00:00" }];
     const out = computeIssues([s], [t], new Set(["1:100"]), blocks, [], []);
     expect(out.some((x) => x.kind === "leave_conflict")).toBe(true);
+    expect(out.find((x) => x.kind === "leave_conflict")!.message).toBe("A is on leave during 5:00 AM Classic");
+  });
+});
+
+describe("computeIssues — unavailable_conflict", () => {
+  const t = teacher(1, "A", 5);
+  const s = shift({ sling_user_id: 1, shift_date: "2026-06-01", start_time: "05:00", end_time: "06:00" });
+  const during = (source: string) => [
+    { sling_user_id: 1, source, starts_at: "2026-06-01T04:00:00", ends_at: "2026-06-01T07:00:00" },
+  ];
+  const issue = (source: string) =>
+    computeIssues([s], [t], new Set(["1:100"]), during(source), [], []).filter((x) =>
+      x.kind.endsWith("_conflict"),
+    );
+
+  it("calls a Sling availability block unavailable, not leave", () => {
+    const out = issue("availability");
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("unavailable_conflict");
+    expect(out[0].message).toBe("A is unavailable during 5:00 AM Classic");
+    expect(out[0].message).not.toMatch(/leave/i);
+  });
+
+  it("flags recurring availability sets the same way", () => {
+    expect(issue("availability_set")[0]).toMatchObject({
+      kind: "unavailable_conflict",
+      message: "A is unavailable during 5:00 AM Classic",
+    });
+  });
+
+  it("flags pending sets as blocked and says they are pending", () => {
+    expect(issue("availability_set_pending")[0]).toMatchObject({
+      kind: "unavailable_conflict",
+      message: "A is unavailable (pending approval in Sling) during 5:00 AM Classic",
+    });
+  });
+
+  it("uses the 24h format when asked", () => {
+    const out = computeIssues([s], [t], new Set(["1:100"]), during("availability"), [], [], "24h");
+    expect(out.find((x) => x.kind === "unavailable_conflict")!.message).toBe("A is unavailable during 05:00 Classic");
+  });
+
+  it("reports one issue per slot even with several overlapping blocks", () => {
+    const blocks = [...during("availability_set_pending"), ...during("leave"), ...during("availability")];
+    const out = computeIssues([s], [t], new Set(["1:100"]), blocks, [], []).filter((x) =>
+      x.kind.endsWith("_conflict"),
+    );
+    expect(out.map((x) => x.kind)).toEqual(["leave_conflict"]);
   });
 });
 

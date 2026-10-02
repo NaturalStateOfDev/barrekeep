@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { X, UserRoundCog, Shapes, AlertTriangle } from "lucide-react";
 import type { ProposalShiftRow, Teacher, Position, AvailabilityBlock } from "../../types";
+import type { AvailabilityLookup } from "../../lib/availability";
 import type { Issue } from "../../lib/issues";
-import { candidatesFor } from "../../lib/candidates";
+import { availabilityTag, candidatesFor } from "../../lib/candidates";
 import { prettyDayLong } from "../../lib/dates";
 import { useTimeFormat } from "../../lib/timeFormat";
 import { Avatar } from "../ui/Avatar";
@@ -16,6 +17,7 @@ interface Props {
   positions: Position[];
   qualifiedPairs: Set<string>;
   blocks: AvailabilityBlock[];
+  availability: AvailabilityLookup | null;
   warnings: Issue[];
   readonly: boolean;
   onClose: () => void;
@@ -24,7 +26,8 @@ interface Props {
 }
 
 /** Slide-in day editor: every class that day, with a candidate list to
- *  (re)assign a teacher. Candidates show qualification / leave / cap notes. */
+ *  (re)assign a teacher. Candidates show qualification and availability
+ *  ("available" / "unavailable" / "on leave" / "at cap") notes. */
 type EditingState = { id: number; kind: "teacher" | "format" } | null;
 
 export function DayEditorPanel({
@@ -35,6 +38,7 @@ export function DayEditorPanel({
   positions,
   qualifiedPairs,
   blocks,
+  availability,
   warnings,
   readonly,
   onClose,
@@ -167,7 +171,9 @@ export function DayEditorPanel({
                     ) : editing?.id === s.id && editing.kind === "teacher" ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <div className="bk-candidate-label">Assign teacher</div>
-                        {candidatesFor(s, allShifts, teachers, qualifiedPairs, blocks).map((c) => (
+                        {candidatesFor(s, allShifts, teachers, qualifiedPairs, blocks, availability).map((c) => {
+                          const tag = availabilityTag(c);
+                          return (
                           <button
                             key={c.teacher.sling_user_id}
                             className={`bk-candidate${c.current ? " bk-current" : ""}`}
@@ -189,14 +195,11 @@ export function DayEditorPanel({
                               <span className={`bk-cand-tag ${c.qualified ? "ok" : "off"}`}>
                                 {c.qualified ? "trained" : "not trained"}
                               </span>
-                              <span
-                                className={`bk-cand-tag ${c.on_leave ? "danger" : c.at_cap ? "warn" : "ok"}`}
-                              >
-                                {c.on_leave ? "on leave" : c.at_cap ? "at cap" : "available"}
-                              </span>
+                              <span className={`bk-cand-tag ${tag.tone}`}>{tag.text}</span>
                             </span>
                           </button>
-                        ))}
+                          );
+                        })}
                         {s.sling_user_id != null && (
                           <button
                             className="bk-candidate"

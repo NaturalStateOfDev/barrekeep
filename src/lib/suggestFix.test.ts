@@ -68,4 +68,36 @@ describe("suggestSwap", () => {
     const result = suggestSwap(target, [], [a], new Set(["1:100"]), blocks);
     expect(result).toBeNull();
   });
+
+  it("excludes teachers blocked by any source: unavailable, recurring, pending", () => {
+    const target = shift({ shift_date: "2026-06-01", start_time: "05:00", end_time: "06:00" });
+    const a = teacher(1, "A", 5);
+    for (const source of ["availability", "availability_set", "availability_set_pending"]) {
+      const blocks = [{
+        sling_user_id: 1,
+        source,
+        starts_at: "2026-06-01T04:30:00-05:00",
+        ends_at: "2026-06-01T07:30:00-05:00",
+      }];
+      expect(suggestSwap(target, [], [a], new Set(["1:100"]), blocks), source).toBeNull();
+    }
+  });
+
+  it("suggests only teachers whose available windows contain the slot", () => {
+    const target = shift({ shift_date: "2026-06-01", start_time: "05:00", end_time: "06:00" });
+    const a = teacher(1, "A", 5);
+    const b = teacher(2, "B", 5);
+    const availability = {
+      day_ranges: [{ date: "2026-06-01", open: "05:00", close: "19:00", widened: false }],
+      windows: [
+        { sling_user_id: 1, date: "2026-06-01", start: "07:00", end: "19:00" },
+        { sling_user_id: 2, date: "2026-06-01", start: "05:00", end: "19:00" },
+      ],
+    };
+    const pairs = new Set(["1:100", "2:100"]);
+    expect(suggestSwap(target, [], [a, b], pairs, [], availability)?.sling_user_id).toBe(2);
+    expect(suggestSwap(target, [], [a], pairs, [], availability)).toBeNull();
+    // Not loaded yet → blocks alone decide.
+    expect(suggestSwap(target, [], [a], pairs, [])?.sling_user_id).toBe(1);
+  });
 });

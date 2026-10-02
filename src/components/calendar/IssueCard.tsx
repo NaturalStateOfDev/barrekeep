@@ -16,6 +16,7 @@ interface Props {
 const SEVERITY: Record<Issue["kind"], string> = {
   unassigned: "danger",
   leave_conflict: "danger",
+  unavailable_conflict: "danger",
   teacher_deactivated: "danger",
   qualification: "warn",
   over_cap: "info",
@@ -68,7 +69,8 @@ function labelForKind(k: Issue["kind"]): string {
     case "unassigned": return "Unassigned";
     case "over_cap": return "Over cap";
     case "qualification": return "Not qualified";
-    case "leave_conflict": return "Leave conflict";
+    case "leave_conflict": return "On leave";
+    case "unavailable_conflict": return "Unavailable";
     case "teacher_deactivated": return "Deactivated";
     case "external_shift": return "External shift";
     case "new_teacher": return "New teacher";

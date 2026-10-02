@@ -1,18 +1,20 @@
 import { useState } from "react";
-import { CalendarDays, Users, Shapes, Settings } from "lucide-react";
+import { CalendarClock, CalendarDays, Users, Shapes, Settings } from "lucide-react";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { BackupWarningBanner } from "./components/BackupWarningBanner";
 import { StudioSetup } from "./components/StudioSetup";
 import { TimeFormatProvider } from "./lib/timeFormat";
 import { ProposalsScreen } from "./screens/ProposalsScreen";
+import { AvailabilityScreen } from "./screens/AvailabilityScreen";
 import { TeachersScreen } from "./screens/TeachersScreen";
 import { PositionsScreen } from "./screens/PositionsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 
-type View = "proposals" | "teachers" | "positions" | "settings";
+type View = "proposals" | "availability" | "teachers" | "positions" | "settings";
 
 const NAV: Array<[View, typeof CalendarDays, string]> = [
   ["proposals", CalendarDays, "Proposals"],
+  ["availability", CalendarClock, "Availability"],
   ["teachers", Users, "Teachers"],
   ["positions", Shapes, "Class types"],
 ];
@@ -52,6 +54,7 @@ export function App() {
           {view === "proposals" && <ProposalsScreen onGoSettings={goSettings} />}
           {view === "teachers" && <TeachersScreen onGoSettings={goSettings} />}
           {view === "positions" && <PositionsScreen />}
+          {view === "availability" && <AvailabilityScreen onGoSettings={goSettings} />}
           {view === "settings" && <SettingsScreen />}
         </main>
       </div>
