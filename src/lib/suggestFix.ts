@@ -1,17 +1,6 @@
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
-import { isoWeekKey, wallClock } from "./dates";
-
-function overlaps(
-  blocks: AvailabilityBlock[],
-  userId: number,
-  shiftStartIso: string,
-  shiftEndIso: string,
-): boolean {
-  return blocks.some((b) => {
-    if (b.sling_user_id !== userId) return false;
-    return wallClock(b.starts_at) < shiftEndIso && wallClock(b.ends_at) > shiftStartIso;
-  });
-}
+import { isoWeekKey } from "./dates";
+import { slotAvailability, type AvailabilityLookup } from "./availability";
 
 function weeklyCount(
   userId: number,
@@ -23,26 +12,25 @@ function weeklyCount(
   ).length;
 }
 
-function shiftStartEndIso(s: ProposalShiftRow): [string, string] {
-  return [
-    `${s.shift_date}T${s.start_time}:00`,
-    `${s.shift_date}T${s.end_time}:00`,
-  ];
-}
-
 export function suggestSwap(
   target: ProposalShiftRow,
   allShifts: ProposalShiftRow[],
   teachers: Teacher[],
   qualifiedPairs: Set<string>,
   blocks: AvailabilityBlock[],
+  /** Computed availability (null/omitted = not loaded; blocks decide). */
+  availability?: AvailabilityLookup | null,
 ): Teacher | null {
   const week = isoWeekKey(target.shift_date);
-  const [tStart, tEnd] = shiftStartEndIso(target);
   const candidates = teachers
     .filter((t) => t.active)
     .filter((t) => qualifiedPairs.has(`${t.sling_user_id}:${target.sling_position_id}`))
-    .filter((t) => !overlaps(blocks, t.sling_user_id, tStart, tEnd))
+    // Only teachers whose windows contain the slot (unavailable, pending and
+    // on-leave teachers are all out).
+    .filter(
+      (t) =>
+        slotAvailability(blocks, availability, t.sling_user_id, target.shift_date, target.start_time, target.end_time).free,
+    )
     .filter((t) => weeklyCount(t.sling_user_id, week, allShifts) < t.weekly_max);
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => {

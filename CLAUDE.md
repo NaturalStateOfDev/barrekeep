@@ -101,7 +101,16 @@ When you (Claude) edit code in this repo:
 ## Known gotchas (the kind that bite at 11pm)
 
 - **The `availability` event type in Sling means BLOCKED time, not available
-  time.** The naming is backward.
+  time.** The naming is backward. The same goes for recurring *availability
+  sets* (`GET /availability?userId=…`): they hold a teacher's standing
+  UNavailability and are NOT reliably in the calendar feed — the pull fetches
+  them per teacher and expands them into `availability_blocks`
+  (`availability.rs`). UI wording: "Unavailable" for these, "On leave" only
+  for `leave`.
+- **Sling publishes a Swagger spec** (https://api.getsling.com/), but it
+  omits wire formats and defaults. Where it is silent (e.g. a set's
+  `interval`), parse defensively and surface what couldn't be interpreted;
+  each pull's raw JSON is in `raw_pulls/` next to the database.
 - **Sling's POST `/shifts` uses `users: [{id}]` (array) but PUT uses
   `user: {id}` (singular).** Not symmetric. The response shape uses singular.
 - **Sling's API responses are always arrays**, even for single-shift creates.

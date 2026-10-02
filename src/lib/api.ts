@@ -32,6 +32,10 @@ import type {
   BackupsInfo,
   BackupEntry,
   ProposalDiff,
+  MonthAvailability,
+  StudioHours,
+  DayHours,
+  RawPullsInfo,
 } from "../types";
 
 export const api = {
@@ -118,7 +122,18 @@ export const api = {
     invoke<AvailabilityBlock[]>("list_availability_blocks", { targetMonth }),
   listExternalShiftsForMonth: (targetMonth: string) =>
     invoke<ExternalShiftRow[]>("list_external_shifts_for_month", { targetMonth }),
-  /** Re-pull availability/leave + roster for the current and future months
+  /** The month's computed availability: per-teacher available windows, each
+   *  date's schedulable span, and any uninterpreted Sling availability sets.
+   *  Recomputed (and stored) on every call. */
+  getMonthAvailability: (targetMonth: string) =>
+    invoke<MonthAvailability>("get_month_availability", { targetMonth }),
+  getStudioHours: () => invoke<StudioHours>("get_studio_hours"),
+  /** Save studio hours (an empty list clears them) and recompute windows. */
+  setStudioHours: (days: DayHours[]) => invoke<void>("set_studio_hours", { days }),
+  suggestStudioHours: () => invoke<DayHours[]>("suggest_studio_hours_from_schedule"),
+  rawPullsInfo: () => invoke<RawPullsInfo>("raw_pulls_info"),
+  openRawPullsFolder: () => invoke<void>("open_raw_pulls_folder"),
+  /** Re-pull unavailability/leave + roster for the current and future months
    *  without regenerating any draft. */
   refreshAvailabilityFromSling: () =>
     invoke<AvailabilityRefreshResult>("refresh_availability_from_sling"),

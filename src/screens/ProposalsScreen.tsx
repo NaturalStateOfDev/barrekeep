@@ -30,6 +30,7 @@ import { LoadingBlock } from "../components/ui/LoadingBlock";
 import { Avatar } from "../components/ui/Avatar";
 import { ClassChip } from "../components/ui/ClassChip";
 import { computeIssues, type Issue } from "../lib/issues";
+import { availabilitySummary } from "../lib/availability";
 import { computeKpis } from "../lib/kpis";
 import { codifyInstruction } from "../lib/rules";
 import { draftsForMonth, pushDraftFor, representativeDraft } from "../lib/drafts";
@@ -52,6 +53,7 @@ import type {
   ReviewSuggestion,
   ReviewRunSummary,
   AvailabilityBlock,
+  MonthAvailability,
   ExternalShiftRow,
   DraftConflict,
 } from "../types";
@@ -102,6 +104,9 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   const [algoRefresh, setAlgoRefresh] = useState(0);
   const [qualifiedPairs, setQualifiedPairs] = useState<Set<string>>(new Set());
   const [blocks, setBlocks] = useState<AvailabilityBlock[]>([]);
+  // Computed available windows for the selected month (null until loaded).
+  const [availability, setAvailability] = useState<MonthAvailability | null>(null);
+  const [pullWarnings, setPullWarnings] = useState<string[]>([]);
   const [externalShifts, setExternalShifts] = useState<ExternalShiftRow[]>([]);
 
   const refreshProposals = async () => {
@@ -135,7 +140,12 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
 
   useEffect(() => {
     setPullResult(null);
+    setPullWarnings([]);
   }, [newMonth]);
+
+  const loadAvailability = (month: string) => {
+    api.getMonthAvailability(month).then(setAvailability).catch(() => setAvailability(null));
+  };
 
   const loadContext = (month: string) => {
     api.listTeachers().then(setTeachers).catch(() => {});
@@ -143,6 +153,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     api.hasAnthropicKey().then(setHasAnthropicKey).catch(() => {});
     api.listQualifiedPairs().then((list) => setQualifiedPairs(new Set(list))).catch(() => {});
     api.listAvailabilityBlocks(month).then(setBlocks).catch(() => {});
+    loadAvailability(month);
     api.listExternalShiftsForMonth(month).then(setExternalShifts).catch(() => {});
   };
 
@@ -217,14 +228,22 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
   const onPull = async () => {
     setError(null);
     setPullResult(null);
+    setPullWarnings([]);
     setPulling(true);
     try {
       const r = await api.pullMonthFromSling(activeMonth);
       setPullResult(
         `Pulled ${activeMonth}: ${r.user_count} users, ${r.qual_count} qualifications, ` +
-          `${r.availability_count} availability blocks, ${r.external_shift_count} external shifts, ` +
+          `${availabilitySummary(r.unavailability_count, r.leave_day_count)}` +
+          (r.set_block_count > 0
+            ? ` (${r.set_block_count} from recurring availability` +
+              (r.pending_block_count > 0 ? `, ${r.pending_block_count} pending approval` : "") +
+              ")"
+            : "") +
+          `, ${r.external_shift_count} external shifts, ` +
           `${r.history_shift_count} trailing-history shifts.`,
       );
+      setPullWarnings(r.warnings);
       await refreshProposals();
       if (mode === "detail" && selectedId != null) await refreshDetail(selectedId);
       // A pull rewrites roster, availability and external shifts — reload the
@@ -245,6 +264,7 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     if (selectedId == null) return;
     setError(null);
     setPullResult(null);
+    setPullWarnings([]);
     setRefreshingAvail(true);
     try {
       const r = await api.refreshAvailabilityFromSling();
@@ -252,11 +272,15 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
       setConflicts({ proposalId: selectedId, list });
       setPullResult(
         `Refreshed availability for ${r.months.map((m) => monthLabel(m.target_month)).join(", ")} ` +
-          `(${r.months.reduce((n, m) => n + m.availability_count, 0)} availability/leave blocks). ` +
+          `(${availabilitySummary(
+            r.months.reduce((n, m) => n + m.unavailability_count, 0),
+            r.months.reduce((n, m) => n + m.leave_day_count, 0),
+          )}). ` +
           (list.length === 0
             ? "This draft has no conflicts."
             : `${list.length} conflict${list.length === 1 ? "" : "s"} in this draft — see the list above the calendar.`),
       );
+      setPullWarnings(r.warnings);
       await refreshProposals();
       await refreshDetail(selectedId);
       if (detail) loadContext(detail.summary.target_month);
@@ -360,6 +384,9 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
     try {
       if (selectedId != null) await refreshDetail(selectedId);
       await refreshProposals();
+      // An edit can move a class slot (a format change alters its end time),
+      // which changes the day's schedulable span — recompute the windows.
+      if (detail) loadAvailability(detail.summary.target_month);
       // Keep a shown conflict list current as the user fixes slots (DB only).
       if (selectedId != null && conflicts?.proposalId === selectedId) {
         setConflicts({ proposalId: selectedId, list: await api.checkDraftConflicts(selectedId) });
@@ -487,6 +514,11 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
       />
 
       {pullResult && <div className="ok" style={{ margin: "0 0 14px" }}>{pullResult}</div>}
+      {pullWarnings.map((w) => (
+        <div key={w} className="bk-warn" style={{ margin: "0 0 14px" }}>
+          <AlertTriangle size={15} /> {w}
+        </div>
+      ))}
       {lastResult && <div className="ok" style={{ margin: "0 0 14px" }}>{lastResult}</div>}
       {error && (
         <div className="error" style={{ margin: "0 0 14px" }}>
@@ -573,6 +605,9 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
               positions={positions}
               qualifiedPairs={qualifiedPairs}
               blocks={blocks}
+              availability={
+                availability && availability.target_month === detail.summary.target_month ? availability : null
+              }
               issues={issues}
               onProposalChanged={onProposalChanged}
               onRegenerate={() => onGenerate()}

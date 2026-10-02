@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Issue } from "../../lib/issues";
 import type { Teacher, ProposalShiftRow, AvailabilityBlock } from "../../types";
+import type { AvailabilityLookup } from "../../lib/availability";
 import { suggestSwap } from "../../lib/suggestFix";
 import { IssueCard } from "./IssueCard";
 
@@ -10,6 +11,7 @@ interface Props {
   teachers: Teacher[];
   qualifiedPairs: Set<string>;
   blocks: AvailabilityBlock[];
+  availability: AvailabilityLookup | null;
   readonly: boolean;
   onApplySwap: (proposalShiftId: number, newUserId: number) => Promise<void>;
   onImportExternal: (slingShiftId: number) => Promise<void>;
@@ -17,7 +19,7 @@ interface Props {
 }
 
 export function IssueQueue({
-  issues, shifts, teachers, qualifiedPairs, blocks,
+  issues, shifts, teachers, qualifiedPairs, blocks, availability,
   readonly, onApplySwap, onImportExternal, onOpenDay,
 }: Props) {
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
@@ -41,7 +43,7 @@ export function IssueQueue({
             ? shifts.find((s) => s.id === issue.shift_id)
             : null;
           const suggested = slot
-            ? suggestSwap(slot, shifts, teachers, qualifiedPairs, blocks)
+            ? suggestSwap(slot, shifts, teachers, qualifiedPairs, blocks, availability)
             : null;
           const handleApply = async () => {
             if (issue.kind === "external_shift" && typeof issue.ref === "number") {

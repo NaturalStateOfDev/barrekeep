@@ -1,11 +1,13 @@
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
-import { formatTime, isoWeekKey, wallClock, type TimeFormat } from "./dates";
+import { formatTime, isoWeekKey, type TimeFormat } from "./dates";
+import { slotAvailability } from "./availability";
 
 export type IssueKind =
   | "unassigned"
   | "over_cap"
   | "qualification"
   | "leave_conflict"
+  | "unavailable_conflict"
   | "teacher_deactivated"
   | "external_shift"
   | "new_teacher";
@@ -103,26 +105,28 @@ export function computeIssues(
     }
   }
 
-  // Leave conflict
+  // Blocked time: leave vs. unavailability (Sling "availability" entries
+  // and recurring availability sets — both mean the teacher is NOT free).
+  // Blocks are the source of truth here, as in propose.py and conflicts.rs.
   for (const s of shifts) {
     if (s.is_dropped || s.sling_user_id == null) continue;
-    const tEnd = `${s.shift_date}T${s.end_time}:00`;
-    const tStart = `${s.shift_date}T${s.start_time}:00`;
-    const conflicts = blocks.some(
-      (b) =>
-        b.sling_user_id === s.sling_user_id &&
-        wallClock(b.starts_at) < tEnd &&
-        wallClock(b.ends_at) > tStart,
+    const { free, reason } = slotAvailability(
+      blocks, null, s.sling_user_id, s.shift_date, s.start_time, s.end_time,
     );
-    if (conflicts) {
-      const t = teacherById.get(s.sling_user_id);
-      out.push({
-        kind: "leave_conflict",
-        shift_id: s.id,
-        shift_date: s.shift_date,
-        message: `${t?.display_name ?? "?"} has leave overlapping ${formatTime(s.start_time, fmt)} ${s.class_name}`,
-      });
-    }
+    if (free) continue;
+    const name = teacherById.get(s.sling_user_id)?.display_name ?? "?";
+    const slot = `${formatTime(s.start_time, fmt)} ${s.class_name}`;
+    out.push({
+      kind: reason === "leave" ? "leave_conflict" : "unavailable_conflict",
+      shift_id: s.id,
+      shift_date: s.shift_date,
+      message:
+        reason === "leave"
+          ? `${name} is on leave during ${slot}`
+          : reason === "pending"
+            ? `${name} is unavailable (pending approval in Sling) during ${slot}`
+            : `${name} is unavailable during ${slot}`,
+    });
   }
 
   // Teacher deactivated

@@ -78,6 +78,11 @@ pub const MIGRATIONS: &[Migration] = &[
         label: "sling sync: push_result_snapshots + draft_checks",
         sql: include_str!("../migrations/0013_sling_sync.sql"),
     },
+    Migration {
+        version: 14,
+        label: "availability sets + studio_hours + teacher_availability_windows",
+        sql: include_str!("../migrations/0014_availability_sets.sql"),
+    },
 ];
 
 /// Run any migrations that haven't been applied yet. Idempotent.
@@ -403,7 +408,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!((snaps, checks), (1, 1));
-        assert_eq!(current_version(&conn).unwrap(), 13);
+        assert_eq!(current_version(&conn).unwrap(), MIGRATIONS.last().unwrap().version);
     }
 
     /// backup_if_pending: no-op when absent, fresh, or up to date; copies the
@@ -456,5 +461,62 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
+    /// Migration 0014: the three new tables exist with the shapes the pull
+    /// relies on, and re-running the SQL (a crash between the batch and the
+    /// _migrations insert) changes nothing and loses nothing.
+    #[test]
+    fn migration_0014_is_idempotent() {
+        let conn = fresh_db();
+        conn.execute_batch(
+            "INSERT INTO sling_availability_sets (sling_set_id, sling_user_id, name, interval_raw, interval_days, raw_json)
+               VALUES ('9001', 1930001, 'Mornings', '\"P1W\"', 7, '{}'),
+                      (NULL, 1930001, NULL, NULL, NULL, '{}');
+             INSERT INTO studio_hours (weekday, closed, open_time, close_time)
+               VALUES (0, FALSE, '05:30', '19:30'), (6, TRUE, NULL, NULL);
+             INSERT INTO teacher_availability_windows (target_month, sling_user_id, window_date, start_time, end_time)
+               VALUES ('2026-11', 1930001, '2026-11-02', '05:30', '19:30');
+             INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at) VALUES
+               (1930001, 'availability_set', TIMESTAMPTZ '2026-11-03 09:45:00-06', TIMESTAMPTZ '2026-11-03 10:45:00-06'),
+               (1930001, 'availability_set_pending', TIMESTAMPTZ '2026-11-04 09:45:00-06', TIMESTAMPTZ '2026-11-04 10:45:00-06');",
+        )
+        .expect("insert into 0014 tables");
+
+        let counts = |c: &Connection| -> (i64, i64, i64, i64) {
+            let n = |t: &str| c.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0)).unwrap();
+            (n("sling_availability_sets"), n("studio_hours"), n("teacher_availability_windows"), n("availability_blocks"))
+        };
+        let before = counts(&conn);
+        assert_eq!(before, (2, 2, 1, 2));
+        let (pending, n): (bool, i32) = conn
+            .query_row(
+                "SELECT pending, availability_count FROM sling_availability_sets WHERE sling_set_id = '9001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((pending, n), (false, 0), "defaults");
+
+        let sql = MIGRATIONS.iter().find(|m| m.version == 14).expect("0014 registered").sql;
+        conn.execute_batch(sql).expect("0014 re-run");
+        conn.execute_batch(sql).expect("0014 re-run twice");
+        assert_eq!(counts(&conn), before);
+        run(&conn).expect("run is a no-op once applied");
+        assert_eq!(current_version(&conn).unwrap(), MIGRATIONS.last().unwrap().version);
+
+        // Sets and windows are replaced by DELETE + INSERT while teachers
+        // reference nothing in them (no FKs in or out).
+        conn.execute_batch(
+            "DELETE FROM sling_availability_sets WHERE sling_user_id = 1930001;
+             DELETE FROM teacher_availability_windows WHERE target_month = '2026-11';
+             DELETE FROM studio_hours;
+             INSERT INTO studio_hours (weekday, closed) VALUES (0, TRUE);",
+        )
+        .expect("delete + insert");
+        // New set ids keep counting up after the delete.
+        conn.execute("INSERT INTO sling_availability_sets (sling_user_id, raw_json) VALUES (1930002, '{}')", [])
+            .unwrap();
+        let id: i64 = conn.query_row("SELECT id FROM sling_availability_sets", [], |r| r.get(0)).unwrap();
+        assert_eq!(id, 3);
+    }
+}

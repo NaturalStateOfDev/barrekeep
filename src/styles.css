@@ -1099,3 +1099,182 @@ code {
   border-radius: var(--radius);
   margin-bottom: var(--space-2);
 }
+
+/* ---- Warnings (pull summary, availability view) ---- */
+
+.bk-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--color-warning-stroke);
+  border-radius: 10px;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: 13px;
+}
+
+.bk-warn svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* ---- Availability view (teacher × day grid) ---- */
+
+.bk-avail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.bk-avail-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+}
+
+.bk-avail-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bk-avail-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid var(--border-card);
+}
+
+.bk-avail-card {
+  overflow-x: auto;
+  padding: 12px;
+}
+
+.bk-avail-grid {
+  display: grid;
+  gap: 2px;
+  align-items: center;
+  min-width: 860px;
+}
+
+.bk-avail-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-muted);
+  padding-bottom: 4px;
+}
+
+.bk-avail-head.bk-weekend {
+  color: var(--accent);
+}
+
+.bk-avail-daynum {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-body);
+}
+
+.bk-avail-teacher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 8px;
+  font-size: 13px;
+}
+
+.bk-avail-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bk-avail-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.bk-avail-cell {
+  height: 26px;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.bk-avail-cell:hover,
+.bk-avail-cell.bk-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.bk-avail-available {
+  background: var(--color-success-bg);
+}
+
+.bk-avail-partial {
+  background: linear-gradient(135deg, var(--color-success-bg) 50%, var(--color-warning-stroke) 50%);
+}
+
+.bk-avail-unavailable {
+  background: var(--color-warning-stroke);
+}
+
+.bk-avail-pending {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--color-warning-bg) 0 4px,
+    var(--color-warning-stroke) 4px 8px
+  );
+}
+
+.bk-avail-leave {
+  background: var(--color-danger-stroke);
+}
+
+.bk-avail-closed {
+  background: var(--surface-sunken);
+}
+
+.bk-avail-pill {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-body);
+}
+
+.bk-avail-detail {
+  margin-top: 12px;
+}
+
+.bk-avail-lines {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* ---- Studio hours (Settings) ---- */
+
+.bk-hours-grid {
+  display: grid;
+  grid-template-columns: 110px auto auto auto 1fr;
+  gap: 6px 10px;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.bk-hours-grid input[type="time"] {
+  font-family: var(--font-mono);
+}

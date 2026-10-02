@@ -5,6 +5,8 @@
 
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { consistencyStats } from "./drafts";
+import { blocksOnDate, monthDates } from "./availability";
+import { emptyWeek } from "./studioHours";
 import type {
   AlgorithmVersion,
   BackupEntry,
@@ -15,6 +17,10 @@ import type {
   ProposalShiftRow,
   EditRow,
   AvailabilityBlock,
+  AvailabilityWindow,
+  DayHours,
+  DayRange,
+  MonthAvailability,
   ExternalShiftRow,
   DraftConflict,
   ShiftView,
@@ -455,9 +461,89 @@ let nextEditId = 1;
 let nextProposalId = 9;
 let nextRunId = 42;
 
+// One sample per block source (all are time the teacher is NOT available).
 const BLOCKS: AvailabilityBlock[] = [
+  // leave — approved time off (calendar feed)
   { sling_user_id: 1930004, source: "leave", starts_at: "2026-08-20T08:00:00", ends_at: "2026-08-20T12:00:00" },
+  { sling_user_id: 1930006, source: "leave", starts_at: "2026-08-24T00:00:00", ends_at: "2026-08-26T23:59:59" },
+  // availability — one-off unavailability (calendar feed)
+  { sling_user_id: 1930002, source: "availability", starts_at: "2026-08-13T17:00:00", ends_at: "2026-08-13T19:30:00" },
+  // availability_set — a recurring set: Priya, every Tuesday 9–10:15
+  ...["04", "11", "18", "25"].map((d) => ({
+    sling_user_id: 1930005,
+    source: "availability_set",
+    starts_at: `2026-08-${d}T09:00:00`,
+    ends_at: `2026-08-${d}T10:15:00`,
+  })),
+  // availability_set_pending — a recurring set not yet approved in Sling:
+  // Casey, Saturdays all day
+  ...["01", "08", "15", "22", "29"].map((d) => ({
+    sling_user_id: 1930003,
+    source: "availability_set_pending",
+    starts_at: `2026-08-${d}T00:00:00`,
+    ends_at: `2026-08-${d}T23:59:59`,
+  })),
 ];
+
+// Studio hours as saved in Settings (empty = not set).
+let STUDIO_HOURS: DayHours[] = [];
+
+/** What the mock schedule implies: Mon–Fri 05:45–19:15, Sat 08:00–10:00. */
+function impliedHours(): DayHours[] {
+  return emptyWeek().map((d) =>
+    d.weekday <= 4
+      ? { ...d, closed: false, open: "05:45", close: "19:15" }
+      : d.weekday === 5
+        ? { ...d, closed: false, open: "08:00", close: "10:00" }
+        : d,
+  );
+}
+
+/** Browser-preview twin of availability.rs: day spans minus blocks. */
+function mockMonthAvailability(month: string): MonthAvailability {
+  const hours = STUDIO_HOURS.length > 0 ? STUDIO_HOURS : impliedHours();
+  const day_ranges: DayRange[] = [];
+  const windows: AvailabilityWindow[] = [];
+  for (const date of monthDates(month)) {
+    const weekday = (new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7;
+    const h = hours.find((x) => x.weekday === weekday);
+    if (!h || h.closed || !h.open || !h.close) continue;
+    day_ranges.push({ date, open: h.open, close: h.close, widened: false });
+    for (const t of TEACHERS.filter((x) => x.active)) {
+      let cursor = h.open;
+      for (const b of blocksOnDate(BLOCKS, t.sling_user_id, date)) {
+        const from = b.start < h.open ? h.open : b.start;
+        const to = b.end > h.close ? h.close : b.end;
+        if (to <= from) continue;
+        if (from > cursor) windows.push({ sling_user_id: t.sling_user_id, date, start: cursor, end: from });
+        if (to > cursor) cursor = to;
+      }
+      if (cursor < h.close) windows.push({ sling_user_id: t.sling_user_id, date, start: cursor, end: h.close });
+    }
+  }
+  const set_issues =
+    month === "2026-08"
+      ? [{
+          sling_user_id: 1930006,
+          teacher_name: "Morgan Ellis",
+          name: "First Monday",
+          interval_raw: '"monthly on the first Monday"',
+          problem: 'interval "monthly on the first Monday" not understood',
+        }]
+      : [];
+  return {
+    target_month: month,
+    windows,
+    day_ranges,
+    hours_set: STUDIO_HOURS.length > 0,
+    set_count: 3,
+    pending_set_count: 1,
+    set_issues,
+    warnings: set_issues.length
+      ? ["1 availability set from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file"]
+      : [],
+  };
+}
 
 let EXTERNAL: ExternalShiftRow[] = [
   { sling_shift_id: 990001, shift_date: "2026-08-22", start_time: "05:45", end_time: "06:35", sling_user_id: 1930002, sling_position_id: 101, status: "published" },
@@ -822,9 +908,37 @@ export function installDevMock() {
       case "pull_month_from_sling":
         await sleep(900);
         if (!hasSlingToken) throw new Error("sling-401: token expired");
-        return { target_month: args.targetMonth, pulled_at: "2026-07-05T12:00:00", user_count: 6, qual_count: 27, availability_count: 3, external_shift_count: 1, history_shift_count: 42 };
+        return {
+          target_month: args.targetMonth,
+          pulled_at: "2026-07-05T12:00:00",
+          user_count: 6,
+          qual_count: 27,
+          availability_count: 12,
+          unavailability_count: 10,
+          leave_count: 2,
+          leave_day_count: 4,
+          set_block_count: 9,
+          pending_block_count: 5,
+          external_shift_count: 1,
+          history_shift_count: 42,
+          warnings: ["1 availability set from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file"],
+          raw_pull_file: "raw_pulls/20260705T120000Z-2026-08.json",
+        };
       case "list_availability_blocks":
         return BLOCKS;
+      case "get_month_availability":
+        return mockMonthAvailability(args.targetMonth);
+      case "get_studio_hours":
+        return STUDIO_HOURS.length > 0 ? { set: true, days: STUDIO_HOURS } : { set: false, days: impliedHours() };
+      case "set_studio_hours":
+        STUDIO_HOURS = args.days;
+        return null;
+      case "suggest_studio_hours_from_schedule":
+        return impliedHours();
+      case "raw_pulls_info":
+        return { dir: "raw_pulls", count: 3, keep: 20, latest: "20260705T120000Z-2026-08.json" };
+      case "open_raw_pulls_folder":
+        return null;
       case "list_external_shifts_for_month":
         return args.targetMonth === "2026-08" ? EXTERNAL : [];
       case "import_external_shift": {
@@ -858,11 +972,16 @@ export function installDevMock() {
         return {
           months: [...new Set(PROPOSALS.map((x) => x.summary.target_month))].sort().map((m) => ({
             target_month: m,
-            availability_count: 4,
+            availability_count: 12,
+            unavailability_count: 10,
+            leave_count: 2,
+            leave_day_count: 4,
             external_shift_count: 1,
           })),
           roster: { teachers_active: 6, teachers_deactivated: 0, positions_active: 6, positions_deactivated: 1, qualifications: 27 },
           refreshed_at: "2026-07-05T12:00:00Z",
+          warnings: [],
+          raw_pull_file: "raw_pulls/20260705T120000Z-refresh-2026-08_2026-09.json",
         };
       case "check_draft_conflicts":
         return mockCheckConflicts(args.proposalId);

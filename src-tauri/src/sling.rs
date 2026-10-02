@@ -184,7 +184,10 @@ where
     match Option::<Flex>::deserialize(d)? {
         None => Ok(None),
         Some(Flex::Int(n)) => Ok(Some(n)),
-        Some(Flex::Str(s)) => s.parse::<i64>().map(Some).map_err(serde::de::Error::custom),
+        // A non-numeric id (Sling documents availability-event ids as
+        // strings) must not fail the whole event: an availability/leave
+        // event needs no id, and dropping it would hide blocked time.
+        Some(Flex::Str(s)) => Ok(s.parse::<i64>().ok()),
     }
 }
 
@@ -195,6 +198,10 @@ pub struct PullPayload {
     pub groups: Vec<SlingGroup>,           // for position-group identification
     pub month_events: Vec<CalendarEvent>,  // target month: availability + leave + shifts
     pub history_shifts: Vec<CalendarEvent>, // trailing 3 months, shifts only, home location only
+    /// Recurring availability sets per teacher (GET /availability?userId=…).
+    pub availability: AvailabilityFetch,
+    /// Target-month calendar events that could not be parsed at all.
+    pub month_events_unparsed: usize,
 }
 
 /// Returns a (location_id → name) map for location-type groups only.
@@ -459,18 +466,427 @@ pub fn fetch_groups(token: &str) -> Result<Vec<SlingGroup>> {
         .iter().filter_map(|g| serde_json::from_value(g.clone()).ok()).collect())
 }
 
-/// Fetch the target month's calendar events (for push dedupe). Mirrors the
-/// pull's calendar GET: studio-offset dates, percent-encoded, nonce.
+/// Fetch the target month's calendar events (push dedupe). Mirrors the
+/// pull's calendar GET: studio-offset dates, percent-encoded, nonce — paged
+/// (see `fetch_calendar_paged`).
 pub fn fetch_calendar(token: &str, cfg: &StudioConfig, month: &str) -> Result<Vec<CalendarEvent>> {
+    let mut session = PullSession::live(token);
+    fetch_calendar_in(&mut session, cfg, month).map(|(events, _)| events)
+}
+
+/// `fetch_calendar` on a caller-owned session (shared pacing + audit).
+/// Returns the parsed events and how many raw events failed to parse.
+pub fn fetch_calendar_in(
+    session: &mut PullSession<'_>,
+    cfg: &StudioConfig,
+    month: &str,
+) -> Result<(Vec<CalendarEvent>, usize)> {
     let (start, end) = month_range(month)?;
+    let raw = fetch_calendar_paged(session, cfg, &format!("{start}/{end}"), &format!("calendar {month}"))?;
+    Ok(parse_events(&raw))
+}
+
+/// Parse raw calendar events, returning (parsed, number that failed).
+pub fn parse_events(raw: &[serde_json::Value]) -> (Vec<CalendarEvent>, usize) {
+    let parsed: Vec<CalendarEvent> =
+        raw.iter().filter_map(|e| serde_json::from_value(e.clone()).ok()).collect();
+    let dropped = raw.len() - parsed.len();
+    (parsed, dropped)
+}
+
+// ============================================================
+// Pull session: one paced, audited stream of GETs
+// ============================================================
+
+/// One GET as it went over the wire, for the raw-pull audit file. Never
+/// holds request headers — the bearer token cannot end up in the file.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditEntry {
+    pub label: String,
+    pub url: String,
+    pub query: Vec<(String, String)>,
+    /// "ok" or the error text ("sling-404: …").
+    pub outcome: String,
+    pub response: serde_json::Value,
+}
+
+type GetFn<'a> = dyn FnMut(&str, &[(&str, &str)]) -> Result<serde_json::Value> + 'a;
+
+/// Pause between consecutive GETs of one pull, and the longer pause after
+/// every `GET_BATCH`th — the same cadence push_sync uses for writes (Sling
+/// limits at ~20 requests/minute).
+const GET_INTRA_DELAY_SECS: u64 = 1;
+const GET_INTER_DELAY_SECS: u64 = 10;
+const GET_BATCH: u32 = 10;
+
+/// A sequence of Sling GETs sharing one pace (1s apart, 10s after every
+/// 10th), one 429 policy (30s/60s backoff, three tries) and one audit trail.
+/// Tests build it over a closure (`PullSession::with`) — no network, no
+/// sleeping.
+pub struct PullSession<'a> {
+    get: Box<GetFn<'a>>,
+    sleep: fn(std::time::Duration),
+    calls: u32,
+    pub audit: Vec<AuditEntry>,
+}
+
+impl<'a> PullSession<'a> {
+    pub fn live(token: &'a str) -> Self {
+        PullSession {
+            get: Box::new(move |url, query| http_get_with_query(token, url, query)),
+            sleep: std::thread::sleep,
+            calls: 0,
+            audit: Vec::new(),
+        }
+    }
+
+    /// A session over a fake transport that never sleeps (tests).
+    #[cfg(test)]
+    pub fn with(get: impl FnMut(&str, &[(&str, &str)]) -> Result<serde_json::Value> + 'a) -> Self {
+        PullSession { get: Box::new(get), sleep: |_| {}, calls: 0, audit: Vec::new() }
+    }
+
+    /// Requests made so far (429 retries included).
+    #[cfg(test)]
+    pub fn calls(&self) -> u32 {
+        self.calls
+    }
+
+    fn pace(&mut self) {
+        if self.calls > 0 {
+            let secs = if self.calls.is_multiple_of(GET_BATCH) { GET_INTER_DELAY_SECS } else { GET_INTRA_DELAY_SECS };
+            (self.sleep)(std::time::Duration::from_secs(secs));
+        }
+        self.calls += 1;
+    }
+
+    /// One paced GET. `record` adds the raw response to the audit trail
+    /// (calendar pages and availability responses; not the roster, which
+    /// carries teachers' contact details).
+    pub fn get(
+        &mut self,
+        label: &str,
+        url: &str,
+        query: &[(&str, &str)],
+        record: bool,
+    ) -> Result<serde_json::Value> {
+        let mut attempt = 0u32;
+        let result = loop {
+            self.pace();
+            attempt += 1;
+            match (self.get)(url, query) {
+                Err(e) if e.to_string() == "sling-429" && attempt < PUSH_MAX_RETRIES => {
+                    (self.sleep)(std::time::Duration::from_secs(
+                        PUSH_RATE_LIMIT_BACKOFF_SECS * attempt as u64,
+                    ));
+                }
+                other => break other,
+            }
+        };
+        if record {
+            self.audit.push(AuditEntry {
+                label: label.to_string(),
+                url: url.to_string(),
+                query: query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                outcome: match &result {
+                    Ok(_) => "ok".to_string(),
+                    Err(e) => e.to_string(),
+                },
+                response: result.as_ref().cloned().unwrap_or(serde_json::Value::Null),
+            });
+        }
+        result
+    }
+}
+
+// ============================================================
+// Calendar paging
+// ============================================================
+
+/// Events asked for per calendar page.
+pub const CALENDAR_PAGE_SIZE: usize = 500;
+/// Hard stop: 20 pages = 10,000 events, far beyond one studio's quarter.
+const CALENDAR_MAX_PAGES: usize = 20;
+
+/// Identity of a raw event for cross-page de-duplication.
+fn event_key(e: &serde_json::Value) -> String {
+    match e.get("id") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => format!("id:{s}"),
+        Some(serde_json::Value::Number(n)) => format!("id:{n}"),
+        _ => e.to_string(),
+    }
+}
+
+/// GET /calendar for a date range, following `pageSize`/`page`.
+///
+/// Sling's spec lists both params on the calendar endpoint but documents
+/// neither a default page size nor whether `page` counts from 0 or 1, so the
+/// loop assumes nothing:
+///   - page 0 is requested first; if Sling rejects the paging params, the
+///     request is repeated without them (the pre-paging behaviour);
+///   - a response LARGER than the page size means Sling ignores paging and
+///     already sent everything — stop;
+///   - otherwise keep requesting pages, de-duplicating by event id, until a
+///     page is empty or two pages in a row add nothing new. One repeat is
+///     tolerated because with 1-based paging page 0 and page 1 are the same
+///     page. "Short page = last page" is deliberately NOT trusted: a server
+///     cap below our page size would look identical and silently truncate.
+pub fn fetch_calendar_paged(
+    session: &mut PullSession<'_>,
+    cfg: &StudioConfig,
+    dates: &str,
+    label: &str,
+) -> Result<Vec<serde_json::Value>> {
     let url = format!("{BASE_URL}/{}/calendar/{}/users/{}", cfg.org_id, cfg.org_id, cfg.acting_user_id);
-    let dates = format!("{start}/{end}");
-    let nonce = chrono::Utc::now().timestamp_millis().to_string();
-    let doc = http_get_with_query(token, &url, &[
-        ("dates", &dates), ("user-fields", "id"), ("nonce", &nonce),
-    ])?;
-    let arr = doc.as_array().ok_or_else(|| anyhow!("calendar not array"))?;
-    Ok(arr.iter().filter_map(|e| serde_json::from_value(e.clone()).ok()).collect())
+    let page_size = CALENDAR_PAGE_SIZE.to_string();
+    let as_array = |doc: serde_json::Value| -> Result<Vec<serde_json::Value>> {
+        match doc {
+            serde_json::Value::Array(a) => Ok(a),
+            _ => Err(anyhow!("calendar not array")),
+        }
+    };
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stale_pages = 0u32;
+    let mut requests = 0u32;
+    for page in 0..CALENDAR_MAX_PAGES {
+        let nonce = chrono::Utc::now().timestamp_millis().to_string();
+        let page_str = page.to_string();
+        requests += 1;
+        let got = session.get(
+            &format!("{label} page {page}"),
+            &url,
+            &[
+                ("dates", dates),
+                ("user-fields", "id"),
+                ("nonce", &nonce),
+                ("pageSize", &page_size),
+                ("page", &page_str),
+            ],
+            true,
+        );
+        let events = match got {
+            Ok(doc) => as_array(doc)?,
+            Err(e) => {
+                let msg = e.to_string();
+                let fatal = msg == "sling-401" || msg == "sling-429" || msg == "sling-1010"
+                    || msg.starts_with("sling-network");
+                if page > 0 || fatal {
+                    return Err(e);
+                }
+                // Paging params rejected: fall back to the plain request.
+                crate::logging::write_line(
+                    "sling",
+                    &format!("{label}: paged request failed ({msg}); retrying without pageSize/page"),
+                );
+                let nonce = chrono::Utc::now().timestamp_millis().to_string();
+                let doc = session.get(
+                    &format!("{label} unpaged"),
+                    &url,
+                    &[("dates", dates), ("user-fields", "id"), ("nonce", &nonce)],
+                    true,
+                )?;
+                return as_array(doc);
+            }
+        };
+        let page_len = events.len();
+        let mut fresh = 0usize;
+        for e in events {
+            if seen.insert(event_key(&e)) {
+                out.push(e);
+                fresh += 1;
+            }
+        }
+        if page_len == 0 || page_len > CALENDAR_PAGE_SIZE {
+            break;
+        }
+        if fresh == 0 {
+            stale_pages += 1;
+            if stale_pages >= 2 {
+                break;
+            }
+        } else {
+            stale_pages = 0;
+        }
+    }
+    crate::logging::write_line("sling", &format!("{label}: {} events over {requests} request(s)", out.len()));
+    Ok(out)
+}
+
+// ============================================================
+// Recurring availability sets (GET /availability?userId=…)
+// ============================================================
+
+/// What the per-teacher availability-set fetch produced.
+#[derive(Debug, Default, Serialize)]
+pub struct AvailabilityFetch {
+    /// (teacher id, raw sets Sling returned for them). A teacher with no
+    /// sets is listed with an empty vec — that still replaces stored sets.
+    pub by_user: Vec<(i64, Vec<serde_json::Value>)>,
+    /// Teachers whose sets could not be fetched: (id, reason). Their
+    /// previously stored sets are kept.
+    pub failed: Vec<(i64, String)>,
+    /// Which URL form answered: "org-prefixed" | "bare".
+    pub path_form: Option<String>,
+}
+
+/// The two URL forms the availability endpoint may live under. Sling's spec
+/// documents the bare `/availability`; the calendar and shift endpoints this
+/// app already uses take an org prefix (`/{org}/…`), as the legacy extractor
+/// did for availability. Both are tried; whichever answers is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvailPath {
+    OrgPrefixed,
+    Bare,
+}
+
+impl AvailPath {
+    fn url(self, cfg: &StudioConfig) -> String {
+        match self {
+            AvailPath::OrgPrefixed => format!("{BASE_URL}/{}/availability", cfg.org_id),
+            AvailPath::Bare => format!("{BASE_URL}/availability"),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            AvailPath::OrgPrefixed => "org-prefixed",
+            AvailPath::Bare => "bare",
+        }
+    }
+    fn other(self) -> Self {
+        match self {
+            AvailPath::OrgPrefixed => AvailPath::Bare,
+            AvailPath::Bare => AvailPath::OrgPrefixed,
+        }
+    }
+}
+
+/// "This URL form doesn't exist" — try the other one.
+fn is_wrong_path(e: &anyhow::Error) -> bool {
+    let m = e.to_string();
+    m.starts_with("sling-404") || m.starts_with("sling-405")
+}
+
+/// Errors that end the whole pull rather than one teacher's fetch.
+fn is_fatal(e: &anyhow::Error) -> bool {
+    let m = e.to_string();
+    m == "sling-401" || m == "sling-1010" || m.starts_with("sling-network")
+}
+
+/// Fetch every listed teacher's recurring availability sets. A failure for
+/// one teacher is recorded and the rest continue; an expired token (401), a
+/// Cloudflare block or a network failure aborts. If the first two teachers
+/// fail on both URL forms the endpoint is treated as unreachable and the rest
+/// are not attempted (each attempt costs rate limit).
+pub fn fetch_availability_sets(
+    session: &mut PullSession<'_>,
+    cfg: &StudioConfig,
+    user_ids: &[i64],
+) -> Result<AvailabilityFetch> {
+    let mut out = AvailabilityFetch::default();
+    let mut chosen: Option<AvailPath> = None;
+    for (idx, &uid) in user_ids.iter().enumerate() {
+        if chosen.is_none() && idx >= 2 && out.by_user.is_empty() {
+            out.failed.push((uid, "availability endpoint unreachable — skipped".to_string()));
+            continue;
+        }
+        let uid_str = uid.to_string();
+        let first = chosen.unwrap_or(AvailPath::OrgPrefixed);
+        let attempt = |session: &mut PullSession<'_>, form: AvailPath| {
+            session.get(
+                &format!("availability user {uid} ({})", form.name()),
+                &form.url(cfg),
+                &[("userId", &uid_str)],
+                true,
+            )
+        };
+        let mut result = attempt(session, first).map(|doc| (first, doc));
+        if let Err(e) = &result {
+            if is_fatal(e) {
+                return Err(anyhow!("{e}"));
+            }
+            if is_wrong_path(e) {
+                let second = first.other();
+                result = attempt(session, second).map(|doc| (second, doc));
+                if let Err(e2) = &result {
+                    if is_fatal(e2) {
+                        return Err(anyhow!("{e2}"));
+                    }
+                }
+            }
+        }
+        match result {
+            Ok((form, doc)) => match crate::availability::unwrap_sets(&doc) {
+                Some(sets) => {
+                    if chosen != Some(form) {
+                        crate::logging::write_line(
+                            "sling",
+                            &format!("availability sets: the {} URL form answered ({})", form.name(), form.url(cfg)),
+                        );
+                        chosen = Some(form);
+                    }
+                    out.by_user.push((uid, sets));
+                }
+                None => out.failed.push((uid, "unexpected response shape".to_string())),
+            },
+            Err(e) => out.failed.push((uid, e.to_string())),
+        }
+    }
+    out.path_form = chosen.map(|f| f.name().to_string());
+    crate::logging::write_line(
+        "sling",
+        &format!(
+            "availability sets: {} teacher(s) fetched, {} failed, {} set(s)",
+            out.by_user.len(),
+            out.failed.len(),
+            out.by_user.iter().map(|(_, s)| s.len()).sum::<usize>(),
+        ),
+    );
+    Ok(out)
+}
+
+/// The Sling users whose availability sets are worth fetching: active, at the
+/// home location, and in at least one position group that isn't switched off
+/// in the app — the same people `is_schedulable_teacher` puts on the roster.
+pub fn availability_user_ids(
+    users: &[SlingUser],
+    groups: &[SlingGroup],
+    cfg: &StudioConfig,
+    inactive_position_ids: &std::collections::HashSet<i64>,
+) -> Vec<i64> {
+    let schedulable: std::collections::HashSet<i64> = groups
+        .iter()
+        .filter(|g| g.kind == "position" && !inactive_position_ids.contains(&g.id))
+        .map(|g| g.id)
+        .collect();
+    let mut ids: Vec<i64> = users
+        .iter()
+        .filter(|u| is_schedulable_teacher(u, cfg.home_location_id, &schedulable))
+        .map(|u| u.id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// GET /users/concise + /groups on a session (roster for a pull/refresh).
+pub fn fetch_roster_in(session: &mut PullSession<'_>) -> Result<(Vec<SlingUser>, Vec<SlingGroup>)> {
+    let users_doc = session.get("users", &format!("{BASE_URL}/users/concise"), &[], false)?;
+    // Hard-error on a missing/malformed users array rather than returning an
+    // empty roster — an empty list would make sync_roster deactivate every
+    // teacher.
+    let users: Vec<SlingUser> = users_doc.get("users")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("users array missing"))?
+        .iter()
+        .filter_map(|u| serde_json::from_value(u.clone()).ok())
+        .collect();
+    let groups_doc = session.get("groups", &format!("{BASE_URL}/groups"), &[], false)?;
+    let groups: Vec<SlingGroup> = groups_doc.as_array()
+        .ok_or_else(|| anyhow!("groups not array"))?
+        .iter()
+        .filter_map(|g| serde_json::from_value(g.clone()).ok())
+        .collect();
+    Ok((users, groups))
 }
 
 /// The studio's timezone. Every offset this app sends to Sling is derived
@@ -672,68 +1088,35 @@ pub fn build_push_specs(
     Ok(specs)
 }
 
-pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result<PullPayload> {
-    let _ = month_range(target_month)?;
-    let org_id = cfg.org_id;
-    let acting_user_id = cfg.acting_user_id;
-
-    let users_url = format!("{BASE_URL}/users/concise");
-    let users_doc = http_get(token, &users_url)?;
-    let users: Vec<SlingUser> = users_doc.get("users")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow!("users array missing"))?
-        .iter()
-        .filter_map(|u| serde_json::from_value(u.clone()).ok())
-        .collect();
-
-    let groups_url = format!("{BASE_URL}/groups");
-    let groups_doc = http_get(token, &groups_url)?;
-    let groups: Vec<SlingGroup> = groups_doc.as_array()
-        .ok_or_else(|| anyhow!("groups not array"))?
-        .iter()
-        .filter_map(|g| serde_json::from_value(g.clone()).ok())
-        .collect();
-
+/// One month's full pull: roster, groups, the month's calendar (paged), the
+/// trailing three months of shifts (paged) and every roster teacher's
+/// recurring availability sets. All GETs go through `session` (paced,
+/// audited). `inactive_position_ids` are class types switched off in the app.
+pub fn pull_month(
+    session: &mut PullSession<'_>,
+    target_month: &str,
+    cfg: &StudioConfig,
+    inactive_position_ids: &std::collections::HashSet<i64>,
+) -> Result<PullPayload> {
     let (start, end) = month_range(target_month)?;
-    let nonce = chrono::Utc::now().timestamp_millis();
-    let cal_url = format!("{BASE_URL}/{org_id}/calendar/{org_id}/users/{acting_user_id}");
+    let (users, groups) = fetch_roster_in(session)?;
+
     let dates_param = format!("{start}/{end}");
-    let nonce_str = nonce.to_string();
-    let cal_doc = http_get_with_query(token, &cal_url, &[
-        ("dates", &dates_param),
-        ("user-fields", "id"),
-        ("nonce", &nonce_str),
-    ])?;
-    let cal_arr = cal_doc.as_array().ok_or_else(|| anyhow!("calendar not array"))?;
-    let raw_month_total = cal_arr.len();
-    let month_events: Vec<CalendarEvent> = cal_arr
-        .iter()
-        .filter_map(|e| serde_json::from_value(e.clone()).ok())
-        .collect();
-    eprintln!(
-        "[sling] month /calendar {dates_param}: {raw_month_total} raw events"
+    let cal_raw = fetch_calendar_paged(session, cfg, &dates_param, &format!("calendar {target_month}"))?;
+    let (month_events, month_events_unparsed) = parse_events(&cal_raw);
+    crate::logging::write_line(
+        "sling",
+        &format!(
+            "month /calendar {dates_param}: {} raw events, {month_events_unparsed} unparseable",
+            cal_raw.len()
+        ),
     );
 
     // Offset matters: without it Sling returns empty for historical
     // /calendar queries (scripts/legacy/sling_extract.py).
-    let hist_start_iso = history_start_iso(target_month)?;
-    let hist_end_iso = start.clone();
-    let nonce2 = chrono::Utc::now().timestamp_millis();
-    let hist_url = format!("{BASE_URL}/{org_id}/calendar/{org_id}/users/{acting_user_id}");
-    let hist_dates_param = format!("{hist_start_iso}/{hist_end_iso}");
-    let hist_nonce_str = nonce2.to_string();
-    let hist_doc = http_get_with_query(token, &hist_url, &[
-        ("dates", &hist_dates_param),
-        ("user-fields", "id"),
-        ("nonce", &hist_nonce_str),
-    ])?;
-    let hist_arr = hist_doc.as_array()
-        .ok_or_else(|| anyhow!("history calendar not array"))?;
-    let raw_total = hist_arr.len();
-    let parsed: Vec<CalendarEvent> = hist_arr
-        .iter()
-        .filter_map(|e| serde_json::from_value(e.clone()).ok())
-        .collect();
+    let hist_dates_param = format!("{}/{start}", history_start_iso(target_month)?);
+    let hist_raw = fetch_calendar_paged(session, cfg, &hist_dates_param, &format!("history before {target_month}"))?;
+    let (parsed, _) = parse_events(&hist_raw);
     let parsed_count = parsed.len();
     let history_shifts: Vec<CalendarEvent> = parsed
         .into_iter()
@@ -742,30 +1125,23 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
             && e.location.as_ref().is_none_or(|l| l.id == cfg.home_location_id)
         )
         .collect();
-    eprintln!(
-        "[sling] history /calendar {hist_dates_param}: {raw_total} raw, \
-         {parsed_count} parsed, {} after shift+home location filter",
-        history_shifts.len()
+    // The kinds distribution spots field-name drift.
+    let mut kind_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for e in &hist_raw {
+        let k = e.get("type").and_then(|v| v.as_str()).unwrap_or("<missing type>").to_string();
+        *kind_counts.entry(k).or_insert(0) += 1;
+    }
+    crate::logging::write_line(
+        "sling",
+        &format!(
+            "history /calendar {hist_dates_param}: {} raw, {parsed_count} parsed, {} after shift+home location filter; types {kind_counts:?}",
+            hist_raw.len(),
+            history_shifts.len()
+        ),
     );
-    // One-shot diag: dump the first raw event so we can see its actual shape.
-    if let Some(first) = hist_arr.first() {
-        let s = serde_json::to_string(first).unwrap_or_default();
-        let short: String = s.chars().take(800).collect();
-        eprintln!("[sling] first raw history event: {short}");
-    }
-    // And the kinds distribution to spot field-name drift.
-    {
-        let mut kind_counts: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        for e in hist_arr {
-            let k = e.get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<missing type>")
-                .to_string();
-            *kind_counts.entry(k).or_insert(0) += 1;
-        }
-        eprintln!("[sling] history event type breakdown: {kind_counts:?}");
-    }
+
+    let avail_users = availability_user_ids(&users, &groups, cfg, inactive_position_ids);
+    let availability = fetch_availability_sets(session, cfg, &avail_users)?;
 
     Ok(PullPayload {
         target_month: target_month.to_string(),
@@ -773,6 +1149,8 @@ pub fn pull_month(token: &str, target_month: &str, cfg: &StudioConfig) -> Result
         groups,
         month_events,
         history_shifts,
+        availability,
+        month_events_unparsed,
     })
 }
 
@@ -1201,5 +1579,290 @@ mod tests {
         // users is an ARRAY on POST (not singular `user`)
         assert_eq!(body["users"][0]["id"], 1001);
         assert!(body.get("user").is_none());
+    }
+
+    // --- pull session, calendar paging, availability sets (no network) ---
+
+    fn test_cfg() -> StudioConfig {
+        StudioConfig { org_id: 41822, acting_user_id: 1930001, home_location_id: 901 }
+    }
+
+    fn q<'a>(query: &'a [(&str, &str)], key: &str) -> Option<&'a str> {
+        query.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+    }
+
+    fn events(range: std::ops::Range<usize>) -> serde_json::Value {
+        serde_json::Value::Array(
+            range
+                .map(|i| serde_json::json!({"id": i.to_string(), "type": "shift",
+                    "dtstart": "2026-11-02T05:45:00-06:00", "dtend": "2026-11-02T06:45:00-06:00"}))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn availability_event_with_non_numeric_id_is_kept() {
+        // Sling documents availability-event ids as strings; a non-numeric
+        // one used to fail the whole event and silently drop the block.
+        let raw = vec![
+            serde_json::json!({"id": "avail-77:2026-11-03", "type": "availability",
+                "dtstart": "2026-11-03T09:45:00-06:00", "dtend": "2026-11-03T10:45:00-06:00",
+                "user": {"id": "1930004"}}),
+            serde_json::json!({"id": 5, "type": "leave", "dtstart": "a", "dtend": "b", "user": {"id": 7}}),
+            serde_json::json!({"type": "shift", "user": {"id": "not a number"}}),
+        ];
+        let (parsed, dropped) = parse_events(&raw);
+        assert_eq!((parsed.len(), dropped), (2, 1));
+        assert_eq!(parsed[0].id, None);
+        assert_eq!(parsed[0].kind, "availability");
+        assert_eq!(event_user_id(&parsed[0]), Some(1930004));
+        assert_eq!(parsed[1].id, Some(5));
+    }
+
+    #[test]
+    fn calendar_paging_follows_zero_based_pages_to_an_empty_page() {
+        let mut pages_asked = Vec::new();
+        let mut session = PullSession::with(|url, query| {
+            assert!(url.ends_with("/41822/calendar/41822/users/1930001"), "{url}");
+            assert_eq!(q(query, "pageSize"), Some("500"));
+            assert_eq!(q(query, "user-fields"), Some("id"));
+            assert!(q(query, "dates").is_some() && q(query, "nonce").is_some());
+            let page: usize = q(query, "page").unwrap().parse().unwrap();
+            pages_asked.push(page);
+            Ok(match page {
+                0 => events(0..500),
+                1 => events(500..1000),
+                2 => events(1000..1120),
+                _ => events(0..0),
+            })
+        });
+        let got = fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "calendar test").unwrap();
+        assert_eq!(got.len(), 1120);
+        assert_eq!(session.audit.len(), 4, "every page is in the audit trail");
+        assert_eq!(session.audit[2].response.as_array().unwrap().len(), 120);
+        drop(session);
+        // A short page is not trusted as the last one (a server-side cap
+        // below our page size would look the same): stop on the empty page.
+        assert_eq!(pages_asked, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn calendar_paging_handles_one_based_pages() {
+        // page=0 and page=1 both return the first page.
+        let mut session = PullSession::with(|_, query| {
+            let page: usize = q(query, "page").unwrap().parse().unwrap();
+            Ok(match page {
+                0 | 1 => events(0..500),
+                2 => events(500..700),
+                _ => events(0..0),
+            })
+        });
+        let got = fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").unwrap();
+        assert_eq!(got.len(), 700, "no duplicates, nothing truncated");
+        assert_eq!(session.calls(), 4);
+    }
+
+    #[test]
+    fn calendar_paging_stops_when_sling_ignores_the_params() {
+        // Everything comes back every time, smaller than a page: two pages
+        // that add nothing end the loop.
+        let mut session = PullSession::with(|_, _| Ok(events(0..180)));
+        assert_eq!(fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").unwrap().len(), 180);
+        assert_eq!(session.calls(), 3);
+        // Larger than a page: paging is evidently ignored — one request.
+        let mut session = PullSession::with(|_, _| Ok(events(0..640)));
+        assert_eq!(fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").unwrap().len(), 640);
+        assert_eq!(session.calls(), 1);
+        // Events without ids are de-duplicated by content.
+        let mut session = PullSession::with(|_, _| Ok(serde_json::json!([{"type": "leave", "dtstart": "x"}])));
+        assert_eq!(fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn calendar_paging_falls_back_when_params_are_rejected() {
+        let mut session = PullSession::with(|_, query| {
+            if q(query, "page").is_some() {
+                Err(anyhow!("sling-400: unknown parameter"))
+            } else {
+                Ok(events(0..42))
+            }
+        });
+        assert_eq!(fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").unwrap().len(), 42);
+        assert_eq!(session.calls(), 2);
+        // An expired token is never retried as "unpaged".
+        let mut session = PullSession::with(|_, _| Err(anyhow!("sling-401")));
+        let e = fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").unwrap_err();
+        assert_eq!(e.to_string(), "sling-401");
+        assert_eq!(session.calls(), 1);
+        // A non-array body is an error, not an empty calendar.
+        let mut session = PullSession::with(|_, _| Ok(serde_json::json!({"message": "hm"})));
+        assert!(fetch_calendar_paged(&mut session, &test_cfg(), "a/b", "t").is_err());
+    }
+
+    #[test]
+    fn session_retries_rate_limits_and_gives_up_after_three() {
+        let mut n = 0;
+        let mut session = PullSession::with(|_, _| {
+            n += 1;
+            if n < 3 { Err(anyhow!("sling-429")) } else { Ok(serde_json::json!([])) }
+        });
+        assert!(session.get("x", "u", &[], true).is_ok());
+        assert_eq!(session.calls(), 3);
+        assert_eq!(session.audit.len(), 1, "one audit entry per logical request");
+        let mut session = PullSession::with(|_, _| Err(anyhow!("sling-429")));
+        assert_eq!(session.get("x", "u", &[], true).unwrap_err().to_string(), "sling-429");
+        assert_eq!(session.calls(), 3);
+        assert_eq!(session.audit[0].outcome, "sling-429");
+        // Unrecorded requests (the roster) leave no audit entry.
+        let mut session = PullSession::with(|_, _| Ok(serde_json::json!({"users": []})));
+        session.get("users", "u", &[], false).unwrap();
+        assert!(session.audit.is_empty());
+    }
+
+    fn sets_fixture() -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string("test_fixtures/sling_availability_sets.json").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn availability_sets_fall_back_to_the_bare_path_and_remember_it() {
+        let fx = sets_fixture();
+        let mut urls: Vec<String> = Vec::new();
+        let mut session = PullSession::with(|url, query| {
+            urls.push(format!("{url}?userId={}", q(query, "userId").unwrap()));
+            if url.contains("/41822/availability") {
+                return Err(anyhow!("sling-404: not found"));
+            }
+            Ok(match q(query, "userId").unwrap() {
+                "1930004" => fx["user_julia"].clone(),
+                "1930001" => fx["user_alex_wrapped"].clone(),
+                _ => fx["user_kayla_none"].clone(),
+            })
+        });
+        let got = fetch_availability_sets(&mut session, &test_cfg(), &[1930001, 1930002, 1930004]).unwrap();
+        assert_eq!(got.path_form.as_deref(), Some("bare"));
+        assert!(got.failed.is_empty());
+        let counts: Vec<(i64, usize)> = got.by_user.iter().map(|(u, s)| (*u, s.len())).collect();
+        assert_eq!(counts, [(1930001, 1), (1930002, 0), (1930004, 4)]);
+        assert_eq!(session.audit.len(), 4);
+        assert_eq!(session.audit[0].outcome, "sling-404: not found");
+        drop(session);
+        // The org-prefixed form is tried once; after that only the form
+        // that answered.
+        let base = "https://api.getsling.com/v1";
+        assert_eq!(
+            urls,
+            [
+                format!("{base}/41822/availability?userId=1930001"),
+                format!("{base}/availability?userId=1930001"),
+                format!("{base}/availability?userId=1930002"),
+                format!("{base}/availability?userId=1930004"),
+            ]
+        );
+    }
+
+    #[test]
+    fn availability_sets_prefer_the_org_prefixed_path_when_it_answers() {
+        let mut session = PullSession::with(|url, _| {
+            assert!(url.ends_with("/41822/availability"), "{url}");
+            Ok(serde_json::json!([]))
+        });
+        let got = fetch_availability_sets(&mut session, &test_cfg(), &[1, 2]).unwrap();
+        assert_eq!(got.path_form.as_deref(), Some("org-prefixed"));
+        assert_eq!(session.calls(), 2);
+    }
+
+    #[test]
+    fn availability_set_failures_are_per_teacher_but_auth_aborts() {
+        // One teacher errors; the rest still arrive.
+        let mut session = PullSession::with(|_, query| match q(query, "userId").unwrap() {
+            "2" => Err(anyhow!("sling-500: boom")),
+            "3" => Ok(serde_json::json!({"unexpected": true})),
+            _ => Ok(serde_json::json!([{"interval": 1}])),
+        });
+        let got = fetch_availability_sets(&mut session, &test_cfg(), &[1, 2, 3, 4]).unwrap();
+        assert_eq!(got.by_user.iter().map(|(u, _)| *u).collect::<Vec<_>>(), [1, 4]);
+        assert_eq!(got.failed, [(2, "sling-500: boom".to_string()), (3, "unexpected response shape".to_string())]);
+
+        // Neither form exists: stop after two teachers instead of burning
+        // the rate limit on all of them.
+        let mut session = PullSession::with(|_, _| Err(anyhow!("sling-404: nope")));
+        let got = fetch_availability_sets(&mut session, &test_cfg(), &[1, 2, 3, 4, 5]).unwrap();
+        assert!(got.by_user.is_empty() && got.path_form.is_none());
+        assert_eq!(got.failed.len(), 5);
+        assert_eq!(session.calls(), 4);
+
+        // An expired token aborts the pull.
+        let mut session = PullSession::with(|_, _| Err(anyhow!("sling-401")));
+        let e = fetch_availability_sets(&mut session, &test_cfg(), &[1, 2]).unwrap_err();
+        assert_eq!(e.to_string(), "sling-401");
+    }
+
+    #[test]
+    fn availability_is_fetched_for_roster_teachers_only() {
+        let user = |id: i64, active: bool, groups: &[i64]| SlingUser {
+            id, name: format!("u{id}"), lastname: String::new(), active, group_ids: groups.to_vec(),
+        };
+        let groups = vec![
+            SlingGroup { id: 101, name: "Classic".into(), kind: "position".into() },
+            SlingGroup { id: 102, name: "Sales Rep".into(), kind: "position".into() },
+            SlingGroup { id: 901, name: "Home".into(), kind: "location".into() },
+            SlingGroup { id: 902, name: "Other".into(), kind: "location".into() },
+        ];
+        let users = vec![
+            user(5, true, &[101, 901]),
+            user(1, true, &[101, 102, 901]),
+            user(2, false, &[101, 901]), // inactive
+            user(3, true, &[101, 902]),  // other location
+            user(4, true, &[102, 901]),  // only a switched-off position
+            user(6, true, &[901]),       // no position
+        ];
+        let inactive: std::collections::HashSet<i64> = [102].into_iter().collect();
+        assert_eq!(availability_user_ids(&users, &groups, &test_cfg(), &inactive), [1, 5]);
+    }
+
+    #[test]
+    fn pull_month_collects_calendar_history_and_sets() {
+        let fx = sets_fixture();
+        let mut session = PullSession::with(|url, query| {
+            if url.ends_with("/users/concise") {
+                return Ok(serde_json::json!({"users": [
+                    {"id": 1930004, "name": "Julia", "lastname": "Stone", "active": true, "groupIds": [101, 901]}]}));
+            }
+            if url.ends_with("/groups") {
+                return Ok(serde_json::json!([
+                    {"id": 101, "name": "Classic", "type": "position"},
+                    {"id": 901, "name": "Home", "type": "location"}]));
+            }
+            if url.contains("/calendar/") {
+                if q(query, "page") != Some("0") {
+                    return Ok(serde_json::json!([]));
+                }
+                let history = q(query, "dates").unwrap().starts_with("2026-08-01");
+                return Ok(if history {
+                    serde_json::json!([{"id": "1", "type": "shift", "dtstart": "2026-10-06T09:45:00-05:00",
+                        "dtend": "2026-10-06T10:45:00-05:00", "user": {"id": 1930004},
+                        "position": {"id": 101}, "location": {"id": 901}, "status": "published"}])
+                } else {
+                    serde_json::json!([
+                        {"id": "x-1", "type": "availability", "dtstart": "2026-11-05T08:00:00-06:00",
+                         "dtend": "2026-11-05T09:00:00-06:00", "user": {"id": 1930004}},
+                        {"id": {"nested": true}, "type": "leave"}])
+                });
+            }
+            assert!(url.contains("/availability"), "{url}");
+            Ok(fx["user_julia"].clone())
+        });
+        let none = std::collections::HashSet::new();
+        let p = pull_month(&mut session, "2026-11", &test_cfg(), &none).unwrap();
+        assert_eq!(p.users.len(), 1);
+        assert_eq!(p.month_events.len(), 1);
+        assert_eq!(p.month_events_unparsed, 1);
+        assert_eq!(p.history_shifts.len(), 1);
+        assert_eq!(p.availability.by_user.len(), 1);
+        assert_eq!(p.availability.by_user[0].1.len(), 4);
+        // Audit: calendar pages + availability responses, never the roster.
+        assert!(session.audit.iter().all(|a| !a.url.contains("users/concise") && !a.url.ends_with("/groups")));
+        assert!(session.audit.iter().any(|a| a.label.starts_with("calendar 2026-11 page 0")));
+        assert!(session.audit.iter().any(|a| a.label.starts_with("availability user 1930004")));
     }
 }

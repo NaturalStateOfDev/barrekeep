@@ -12,7 +12,8 @@ import {
   type Update,
   type DownloadProgress,
 } from "../lib/updater";
-import type { BackupsInfo, DbInfo, PythonStatus } from "../types";
+import type { BackupsInfo, DayHours, DbInfo, PythonStatus, RawPullsInfo } from "../types";
+import { emptyWeek, hoursError, normalizeWeek, WEEKDAY_LABELS } from "../lib/studioHours";
 import { onStudioConfigChanged, openStudioSetup } from "../lib/studioSetup";
 import { useTimeFormat } from "../lib/timeFormat";
 
@@ -35,6 +36,7 @@ export function SettingsScreen() {
       <div style={{ display: "flex", flexDirection: "column", maxWidth: 620 }}>
         <SlingTokenCard />
         <StudioConfigCard />
+        <StudioHoursCard />
         <DisplayCard />
         <AnthropicKeyCard />
         <SlingCredentialsCard />
@@ -196,6 +198,120 @@ function StudioConfigCard() {
         <button className="btn-ghost" onClick={openStudioSetup}>
           <Radar size={15} /> Detect from Sling
         </button>
+      </div>
+      {status && <div className="ok">{status}</div>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+function StudioHoursCard() {
+  const tf = useTimeFormat();
+  const [days, setDays] = useState<DayHours[]>(emptyWeek());
+  const [saved, setSaved] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = () =>
+    api.getStudioHours().then((h) => {
+      setDays(normalizeWeek(h.days));
+      setSaved(h.set);
+    }).catch((e) => setError(String(e)));
+
+  useEffect(() => { refresh(); }, []);
+
+  const update = (weekday: number, change: Partial<DayHours>) =>
+    setDays((prev) => prev.map((d) => (d.weekday === weekday ? { ...d, ...change } : d)));
+
+  const run = async (work: () => Promise<string>) => {
+    setBusy(true);
+    setError(null);
+    setStatus(null);
+    try {
+      setStatus(await work());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSave = () =>
+    run(async () => {
+      const problem = hoursError(days);
+      if (problem) throw problem;
+      await api.setStudioHours(days);
+      await refresh();
+      return "Saved. Teacher availability was recomputed.";
+    });
+
+  const onSuggest = () =>
+    run(async () => {
+      const suggested = await api.suggestStudioHours();
+      setDays(normalizeWeek(suggested));
+      return suggested.every((d) => d.closed)
+        ? "No schedule to suggest from yet — pull a month from Sling first."
+        : "Suggested from the earliest and latest class on each weekday — review, then Save.";
+    });
+
+  const onClear = () =>
+    run(async () => {
+      await api.setStudioHours([]);
+      await refresh();
+      return "Cleared. Each day now spans its earliest to latest class.";
+    });
+
+  return (
+    <div className="card">
+      <strong>Studio hours</strong>
+      <p className="muted" style={{ marginTop: 4 }}>
+        When the studio can hold classes. A teacher's availability is these hours minus their
+        unavailability and leave from Sling. A class scheduled outside them still counts — that
+        day is widened to fit it.
+      </p>
+      <div style={{ marginTop: 12 }}>
+        Status:{" "}
+        {saved === null ? <span className="muted">checking…</span>
+          : saved ? <span style={{ color: "var(--color-success)", fontWeight: 600 }}>set</span>
+          : <span className="muted">not set — using each day's earliest to latest class (shown below)</span>}
+      </div>
+      <div className="bk-hours-grid">
+        {days.map((d) => (
+          <div key={d.weekday} style={{ display: "contents" }}>
+            <span>{WEEKDAY_LABELS[d.weekday]}</span>
+            <label className="row" style={{ gap: 6, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={d.closed}
+                onChange={(e) => update(d.weekday, { closed: e.target.checked })}
+              />
+              Closed
+            </label>
+            <input
+              type="time"
+              aria-label={`${WEEKDAY_LABELS[d.weekday]} opens`}
+              value={d.open ?? ""}
+              disabled={d.closed}
+              onChange={(e) => update(d.weekday, { open: e.target.value || null })}
+            />
+            <input
+              type="time"
+              aria-label={`${WEEKDAY_LABELS[d.weekday]} closes`}
+              value={d.close ?? ""}
+              disabled={d.closed}
+              onChange={(e) => update(d.weekday, { close: e.target.value || null })}
+            />
+            <span className="muted">
+              {d.closed || !d.open || !d.close ? "" : tf.range(d.open, d.close)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn-primary" onClick={onSave} disabled={busy}>Save</button>
+        <button className="btn-ghost" onClick={onSuggest} disabled={busy}>Suggest from schedule</button>
+        {saved && <button className="btn-ghost" onClick={onClear} disabled={busy}>Clear</button>}
       </div>
       {status && <div className="ok">{status}</div>}
       {error && <div className="error">{error}</div>}
@@ -660,13 +776,26 @@ const BACKUP_REASON_LABELS: Record<string, string> = {
 function BackupsCard() {
   const tf = useTimeFormat();
   const [info, setInfo] = useState<BackupsInfo | null>(null);
+  const [rawPulls, setRawPulls] = useState<RawPullsInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => api.listBackups().then(setInfo).catch((e) => setError(String(e)));
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    api.rawPullsInfo().then(setRawPulls).catch(() => {});
+  }, []);
+
+  const onOpenRawPulls = async () => {
+    setError(null);
+    try {
+      await api.openRawPullsFolder();
+    } catch (e) {
+      setError(`${e}${rawPulls ? ` — the folder is ${rawPulls.dir}` : ""}`);
+    }
+  };
 
   const onBackupNow = async () => {
     setBusy(true);
@@ -728,7 +857,19 @@ function BackupsCard() {
         </button>
         <button className="btn-ghost" onClick={onOpenFolder}>Open backups folder</button>
         <button className="btn-ghost" onClick={onCopyPath} disabled={!info}>Copy path</button>
+        <button
+          className="btn-ghost"
+          onClick={onOpenRawPulls}
+          title="The raw JSON Sling returned for each pull — calendar and recurring availability"
+        >
+          Open raw pulls folder
+        </button>
       </div>
+      <p className="muted" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
+        Raw pulls: every pull and availability refresh saves what Sling sent (no login token) for
+        troubleshooting; the newest {rawPulls?.keep ?? 20} are kept
+        {rawPulls ? ` — ${rawPulls.count} so far${rawPulls.latest ? `, latest ${rawPulls.latest}` : ""}` : ""}.
+      </p>
       {status && <div className="ok">{status}</div>}
       {error && <div className="error">{error}</div>}
       {info && info.backups.length === 0 && (

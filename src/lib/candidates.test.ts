@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { candidatesFor } from "./candidates";
+import { availabilityTag, candidatesFor } from "./candidates";
 import type { ProposalShiftRow, Teacher, AvailabilityBlock } from "../types";
 
 function teacher(over: Partial<Teacher>): Teacher {
@@ -68,6 +68,50 @@ describe("candidatesFor", () => {
     expect(alex).toMatchObject({ qualified: true, on_leave: false, at_cap: false, available: true });
     expect(kayla).toMatchObject({ qualified: true, on_leave: true, available: false });
     expect(casey).toMatchObject({ qualified: false, available: true });
+    expect(availabilityTag(alex)).toEqual({ text: "available", tone: "ok" });
+    expect(availabilityTag(kayla)).toEqual({ text: "on leave", tone: "danger" });
+  });
+
+  it("tags unavailability as unavailable, never as leave", () => {
+    const target = shift({});
+    const at = (uid: number, source: string): AvailabilityBlock => ({
+      sling_user_id: uid,
+      source,
+      starts_at: "2026-08-03T08:00:00",
+      ends_at: "2026-08-03T12:00:00",
+    });
+    const out = candidatesFor(target, [target], TEACHERS, PAIRS, [
+      at(1, "availability"),
+      at(2, "availability_set"),
+      at(3, "availability_set_pending"),
+    ]);
+    const by = (id: number) => out.find((c) => c.teacher.sling_user_id === id)!;
+    for (const id of [1, 2]) {
+      expect(by(id)).toMatchObject({ on_leave: false, unavailable: true, blocked_by: "unavailable", available: false });
+      expect(availabilityTag(by(id))).toEqual({ text: "unavailable", tone: "danger" });
+    }
+    expect(by(3)).toMatchObject({ on_leave: false, unavailable: true, blocked_by: "pending", available: false });
+    expect(availabilityTag(by(3)).text).toBe("unavailable (pending)");
+  });
+
+  it("uses the computed windows: a candidate must have the slot inside one", () => {
+    const target = shift({});
+    const day = target.shift_date;
+    const availability = {
+      day_ranges: [{ date: day, open: "05:30", close: "19:30", widened: false }],
+      windows: [
+        { sling_user_id: 1, date: day, start: "05:30", end: "19:30" },
+        // Kayla is free only after the slot.
+        { sling_user_id: 2, date: day, start: "12:00", end: "19:30" },
+      ],
+    };
+    const out = candidatesFor(target, [target], TEACHERS, PAIRS, [], availability);
+    const by = (id: number) => out.find((c) => c.teacher.sling_user_id === id)!;
+    expect(by(1).available).toBe(true);
+    expect(by(2)).toMatchObject({ available: false, unavailable: true, on_leave: false });
+    // Without availability loaded, blocks alone decide.
+    const fallback = candidatesFor(target, [target], TEACHERS, PAIRS, []);
+    expect(fallback.find((c) => c.teacher.sling_user_id === 2)!.available).toBe(true);
   });
 
   it("detects same-day leave in the backend's TIMESTAMPTZ cast format", () => {
@@ -91,6 +135,7 @@ describe("candidatesFor", () => {
     const kayla = out.find((c) => c.teacher.sling_user_id === 2)!;
     expect(kayla.at_cap).toBe(true);
     expect(kayla.available).toBe(false);
+    expect(availabilityTag(kayla)).toEqual({ text: "at cap", tone: "warn" });
   });
 
   it("does not count the target slot against the current teacher's cap", () => {

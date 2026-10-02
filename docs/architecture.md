@@ -44,6 +44,8 @@ Rust modules at a glance (`src-tauri/src/`):
 | `push_sync.rs` | Incremental push ("sync") of the push draft, cleanup, "remove from Sling" |
 | `drafts.rs` | Multiple drafts per month; the push draft (`month_push_candidate`) |
 | `conflicts.rs` | Re-check a draft against freshly pulled availability |
+| `availability.rs` | Recurring Sling availability sets → blocks; studio hours; computed per-teacher available windows |
+| `raw_pulls.rs` | Raw JSON audit file per pull (`raw_pulls/`, newest 20) |
 | `studio_setup.rs` | Auto-detect org / acting user / home location after a Sling login |
 | `algorithm.rs` | Versioned algorithm rules and scripts (`algorithm_versions`) |
 | `review.rs`, `editor.rs` | Claude review; Claude-driven draft edits |
@@ -64,7 +66,7 @@ Rust modules at a glance (`src-tauri/src/`):
 
 ## Data flow: a typical month
 
-1. **Pull availability.** User clicks "Pull from Sling." The app (`commands.rs::pull_month_from_sling` over `sling.rs`) fetches the roster, position groups, the target month's calendar events and 3 months of shift history, keeps only the home location, and writes `teachers` / `positions` / `teacher_qualifications` (roster sync), `availability_blocks` (Sling `availability` = BLOCKED time), `external_sling_shifts` and `month_pulls`. After a Sling login the app also auto-detects the studio configuration (`studio_setup.rs`); it never overwrites a configuration that is already set.
+1. **Pull availability.** User clicks "Pull from Sling." The app (`commands.rs::pull_month_from_sling` over `sling.rs`) fetches the roster, position groups, the target month's calendar events, 3 months of shift history and every roster teacher's recurring availability sets, keeps only the home location, and writes `teachers` / `positions` / `teacher_qualifications` (roster sync), `sling_availability_sets`, `availability_blocks` (Sling `availability` = BLOCKED time: one-off calendar blocks, leave, and the recurring sets expanded into the month), `teacher_availability_windows` (studio hours minus blocks), `external_sling_shifts` and `month_pulls`. The raw responses are saved to `raw_pulls/` next to the database. After a Sling login the app also auto-detects the studio configuration (`studio_setup.rs`); it never overwrites a configuration that is already set.
 2. **Generate proposal.** User clicks "Generate." The app builds a JSON payload from DuckDB, runs `propose.py` (found via `python.rs`) with it on stdin, and stores the result as a new draft: a `proposals` row plus its `proposal_shifts`.
 3. **Optional Claude pass.** "Have Claude review" sends the draft + `prompts/verifier.md` to the Anthropic API; the Claude tab can also edit the draft from an instruction, or propose rule / code changes to the algorithm. Every call is logged in `claude_runs` (cost audit).
 4. **Edit in calendar view.** User clicks cells, swaps teachers. Each edit becomes a row in the `edits` table (so we have full undo/redo and audit history).
@@ -81,7 +83,8 @@ See `docs/data-model.md` for full DDL. Tables:
 - `teacher_qualifications` — who can teach which position (from Sling position groups)
 - `positions` — Sling position IDs + class type names + duration
 - `studio_config` — Sling org / acting-user / home-location ids (runtime config)
-- `availability_blocks` — pulled from Sling per month
+- `availability_blocks` — blocked time per month: unavailability (one-off + recurring sets) and leave
+- `sling_availability_sets` / `studio_hours` / `teacher_availability_windows` — raw recurring sets from Sling, the studio's weekly hours, and the computed windows each teacher is available (migration 0014)
 - `external_sling_shifts` / `month_pulls` — shifts already in Sling; when each month was last pulled
 - `proposals` — one row per draft (generation run or duplicate), with metadata
 - `proposal_drafts` / `month_push_candidate` / `claude_run_targets` — draft names + archive flag, the month's push draft, and which drafts a Claude prompt targeted (migration 0012)

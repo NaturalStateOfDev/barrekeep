@@ -178,16 +178,102 @@ export interface PullResult {
   pulled_at: string;
   user_count: number;
   qual_count: number;
+  /** Every blocked-time row written for the month (all sources). */
   availability_count: number;
+  /** Unavailability blocks (calendar one-offs + recurring-set occurrences). */
+  unavailability_count: number;
+  leave_count: number;
+  /** Calendar days of the month the leave blocks cover. */
+  leave_day_count: number;
+  /** Of the unavailability blocks, how many came from recurring sets… */
+  set_block_count: number;
+  /** …and how many of those are still pending approval in Sling. */
+  pending_block_count: number;
   external_shift_count: number;
   history_shift_count: number;
+  /** e.g. availability sets the app couldn't interpret. Show them. */
+  warnings: string[];
+  raw_pull_file: string | null;
 }
+
+/** Where a block of blocked time came from. Every source is time the
+ *  teacher is NOT available (Sling's "availability" naming is backward):
+ *  - 'availability'             one-off unavailability (calendar feed)
+ *  - 'availability_set'         an occurrence of a recurring availability set
+ *  - 'availability_set_pending' same, but the set isn't approved in Sling yet
+ *  - 'leave'                    approved time off
+ *  Use blockKind()/blockLabel() from lib/availability rather than comparing
+ *  strings — unknown sources must still read as "unavailable". */
+export type AvailabilityBlockSource =
+  | "availability"
+  | "availability_set"
+  | "availability_set_pending"
+  | "leave";
 
 export interface AvailabilityBlock {
   sling_user_id: number;
-  source: string; // 'leave' | 'availability'
+  source: AvailabilityBlockSource | (string & {});
   starts_at: string; // instant, ISO-8601 UTC ("…Z"); compare via wallClock()
   ends_at: string;
+}
+
+/** A stretch of one date a teacher IS available for (studio local). */
+export interface AvailabilityWindow {
+  sling_user_id: number;
+  date: string; // 'YYYY-MM-DD'
+  start: string; // 'HH:MM'
+  end: string;
+}
+
+/** The schedulable span of one date: studio hours, widened to any class
+ *  slot outside them. Dates the studio is closed (and class-free) are absent. */
+export interface DayRange {
+  date: string;
+  open: string;
+  close: string;
+  widened: boolean;
+}
+
+/** A recurring availability set the app could not (fully) interpret. */
+export interface AvailabilitySetIssue {
+  sling_user_id: number;
+  teacher_name: string | null;
+  name: string | null;
+  interval_raw: string | null;
+  problem: string;
+}
+
+export interface MonthAvailability {
+  target_month: string;
+  windows: AvailabilityWindow[];
+  day_ranges: DayRange[];
+  /** false = studio hours never set; spans come from the class slots. */
+  hours_set: boolean;
+  set_count: number;
+  pending_set_count: number;
+  set_issues: AvailabilitySetIssue[];
+  warnings: string[];
+}
+
+/** One weekday's studio hours. weekday: 0 = Monday … 6 = Sunday. */
+export interface DayHours {
+  weekday: number;
+  closed: boolean;
+  open: string | null; // 'HH:MM'
+  close: string | null;
+}
+
+export interface StudioHours {
+  /** false = never saved; `days` is then what the schedule implies. */
+  set: boolean;
+  days: DayHours[];
+}
+
+export interface RawPullsInfo {
+  dir: string;
+  count: number;
+  keep: number;
+  latest: string | null;
 }
 
 export type DraftDiffKind = "teacher" | "format" | "format_teacher" | "only_a" | "only_b";
@@ -331,7 +417,11 @@ export interface DraftConflict {
 
 export interface MonthRefresh {
   target_month: string;
+  /** Every blocked-time row written (unavailability + leave). */
   availability_count: number;
+  unavailability_count: number;
+  leave_count: number;
+  leave_day_count: number;
   external_shift_count: number;
 }
 
@@ -339,6 +429,8 @@ export interface AvailabilityRefreshResult {
   months: MonthRefresh[];
   roster: RosterSyncSummary;
   refreshed_at: string;
+  warnings: string[];
+  raw_pull_file: string | null;
 }
 
 export interface RosterSyncSummary {
