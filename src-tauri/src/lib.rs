@@ -9,6 +9,7 @@
 //   - IPC commands (exposed to the React frontend)
 
 mod algorithm;
+mod availability;
 mod backup;
 mod commands;
 mod conflicts;
@@ -19,6 +20,7 @@ mod logging;
 mod migrations;
 mod python;
 mod push_sync;
+mod raw_pulls;
 mod review;
 mod secrets;
 mod seed;
@@ -113,6 +115,12 @@ pub fn run() {
             commands::list_external_shifts_for_month,
             commands::refresh_availability_from_sling,
             conflicts::check_draft_conflicts,
+            availability::get_month_availability,
+            availability::get_studio_hours,
+            availability::set_studio_hours,
+            availability::suggest_studio_hours_from_schedule,
+            raw_pulls::raw_pulls_info,
+            raw_pulls::open_raw_pulls_folder,
             push_sync::push_sync_preview,
             push_sync::push_sync_execute,
             push_sync::remove_draft_from_sling_preview,

@@ -1,8 +1,10 @@
 // Re-validate an existing draft against the latest pulled Sling data
 // (availability refresh, migration 0013) instead of regenerating it.
 //
-// Checks per shift: teacher blocked (Sling `availability` events are
-// BLOCKED time — the naming is backward), on leave, deactivated, not
+// Checks per shift: teacher blocked (Sling `availability` events and
+// recurring availability sets are BLOCKED time — the naming is backward;
+// every availability_blocks source except 'leave' reads as "unavailable"),
+// on leave, deactivated, not
 // qualified, over their weekly cap, and unassigned slots. These mirror the
 // frontend issue queue (src/lib/issues.ts) but run against the database so
 // a refresh can report exactly what it broke; the proposer's scoring rules
@@ -83,7 +85,9 @@ pub struct ConflictShift {
 #[derive(Debug, Clone)]
 pub struct Block {
     pub user_id: i64,
-    pub source: String, // "availability" (= blocked) | "leave"
+    /// "leave", or any unavailability source (see availability.rs):
+    /// "availability" | "availability_set" | "availability_set_pending".
+    pub source: String,
     pub start: i64,     // Unix seconds
     pub end: i64,
 }
@@ -154,8 +158,10 @@ pub fn detect_conflicts(
         };
         for &uid in &s.user_ids {
             for b in blocks.iter().filter(|b| b.user_id == uid && b.start < end && b.end > start) {
-                let (kind, what) = if b.source == "leave" {
+                let (kind, what) = if b.source == crate::availability::SOURCE_LEAVE {
                     ("leave", "is on leave")
+                } else if b.source == crate::availability::SOURCE_SET_PENDING {
+                    ("blocked", "is marked unavailable (pending approval in Sling)")
                 } else {
                     ("blocked", "is marked unavailable")
                 };

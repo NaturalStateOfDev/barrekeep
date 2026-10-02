@@ -1,0 +1,98 @@
+{
+  "_note": "Synthetic fixture built from the AvailabilitySet / Availability shapes in Sling's Swagger spec (https://api.getsling.com/v1/spec.json). NOT captured from a real account: the `interval` wire format is undocumented, so several spellings appear on purpose. Demo ids only.",
+  "user_julia": [
+    {
+      "id": 9001,
+      "name": "Fall mornings",
+      "start": "2026-09-01T00:00:00-05:00",
+      "until": null,
+      "interval": "P1W",
+      "approved": "2026-08-30T14:00:00-05:00",
+      "user": { "id": 1930004 },
+      "availabilities": [
+        {
+          "id": "a-9001-1",
+          "dtstart": "2026-09-01T09:45:00-05:00",
+          "dtend": "2026-09-01T10:45:00-05:00",
+          "summary": "School drop-off",
+          "fullDay": false
+        }
+      ]
+    },
+    {
+      "id": "9002",
+      "name": "Every other Thursday evening",
+      "start": "2026-09-03T00:00:00-05:00",
+      "until": null,
+      "interval": 2,
+      "approved": "2026-08-30T14:05:00-05:00",
+      "user": { "id": "1930004" },
+      "availabilities": [
+        {
+          "id": 77002,
+          "dtstart": "2026-09-03T17:30:00-05:00",
+          "dtend": "2026-09-03T18:30:00-05:00",
+          "summary": "",
+          "fullDay": false
+        }
+      ]
+    },
+    {
+      "id": 9003,
+      "name": "Sundays off (requested)",
+      "start": "2026-09-06T00:00:00-05:00",
+      "until": "2026-11-15T23:59:59-06:00",
+      "interval": "every week",
+      "approved": null,
+      "user": { "id": 1930004 },
+      "availabilities": [
+        {
+          "id": "a-9003-1",
+          "dtstart": "2026-09-06T00:00:00-05:00",
+          "dtend": "2026-09-06T23:59:59-05:00",
+          "summary": "",
+          "fullDay": true
+        }
+      ]
+    },
+    {
+      "id": 9004,
+      "name": "First Monday",
+      "start": "2026-09-07T00:00:00-05:00",
+      "until": null,
+      "interval": "monthly on the first Monday",
+      "approved": "2026-08-30T14:10:00-05:00",
+      "user": { "id": 1930004 },
+      "availabilities": [
+        {
+          "id": "a-9004-1",
+          "dtstart": "2026-09-07T05:30:00-05:00",
+          "dtend": "2026-09-07T08:00:00-05:00",
+          "summary": "",
+          "fullDay": false
+        }
+      ]
+    }
+  ],
+  "user_alex_wrapped": {
+    "data": [
+      {
+        "id": 9101,
+        "name": "Saturday mornings",
+        "start": "2026-08-01T00:00:00-05:00",
+        "interval": "FREQ=WEEKLY;INTERVAL=1",
+        "approved": "2026-07-20T09:00:00-05:00",
+        "user": { "id": 1930001 },
+        "availabilities": [
+          {
+            "id": "a-9101-1",
+            "dtstart": "2026-08-01T07:00:00-05:00",
+            "dtend": "2026-08-01T09:00:00-05:00",
+            "fullDay": false
+          }
+        ]
+      }
+    ]
+  },
+  "user_kayla_none": []
+}
