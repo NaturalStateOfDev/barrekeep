@@ -137,13 +137,24 @@ CREATE TABLE teacher_qualifications (
 
 ### `availability_blocks`
 
-Pulled from Sling per month. Despite the name, these are BLOCKED times (Sling's `availability` event type is backward).
+Pulled from Sling per month. Despite the name, these are BLOCKED times (Sling's `availability` event type is backward) — every row is time the teacher can NOT teach. A month's rows (those that START in it) are deleted and rewritten on every pull / availability refresh.
+
+`source` values:
+
+| source | meaning | UI label |
+|---|---|---|
+| `availability` | one-off unavailability from the calendar feed | Unavailable |
+| `availability_set` | an occurrence of an approved recurring availability set (migration 0014) | Unavailable |
+| `availability_set_pending` | same, but the set has no `approved` timestamp in Sling yet — still blocked | Unavailable (pending approval) |
+| `leave` | time off from the calendar feed | On leave |
+
+`propose.py` receives the two set-derived sources as event type `availability` (it blocks on `leave` / `availability` only), so every script version treats them as blocked.
 
 ```sql
 CREATE TABLE availability_blocks (
   id                 BIGINT PRIMARY KEY DEFAULT nextval('seq_availability'),
   sling_user_id      INTEGER NOT NULL REFERENCES teachers(sling_user_id),
-  source             VARCHAR NOT NULL,  -- 'leave' | 'recurring' | 'manual'
+  source             VARCHAR NOT NULL,  -- 'availability' | 'availability_set' | 'availability_set_pending' | 'leave'
   starts_at          TIMESTAMPTZ NOT NULL,
   ends_at            TIMESTAMPTZ NOT NULL,
   pulled_at          TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -151,6 +162,63 @@ CREATE TABLE availability_blocks (
 CREATE SEQUENCE seq_availability;
 CREATE INDEX idx_avail_user_time ON availability_blocks(sling_user_id, starts_at, ends_at);
 ```
+
+### `sling_availability_sets` (migration 0014)
+
+Recurring availability sets exactly as Sling returned them (`GET /availability?userId=…`, see `docs/sling-api.md`), one row per set. Replaced per teacher on every successful fetch (DELETE + INSERT; never UPDATEd). `availability.rs` re-parses `raw_json` and expands the sets into `availability_blocks` for each pulled month. Surrogate PK only; no FKs, no UNIQUE.
+
+```sql
+CREATE TABLE sling_availability_sets (
+  id                 BIGINT PRIMARY KEY DEFAULT nextval('seq_sling_availability_sets'),
+  sling_set_id       VARCHAR,            -- Sling's id as text; NULL if absent
+  sling_user_id      INTEGER NOT NULL,
+  name               VARCHAR,
+  starts_on          VARCHAR,            -- set `start` as sent
+  until              VARCHAR,            -- set `until`; NULL = recurs forever
+  interval_raw       VARCHAR,            -- `interval` exactly as sent (JSON text)
+  interval_days      INTEGER,            -- interpreted step (7 = weekly); NULL = uninterpreted
+  approved_at        VARCHAR,            -- `approved`; NULL = pending approval
+  pending            BOOLEAN NOT NULL DEFAULT FALSE,
+  availability_count INTEGER NOT NULL DEFAULT 0,
+  problem            VARCHAR,            -- why it couldn't be (fully) interpreted
+  raw_json           VARCHAR NOT NULL,
+  pulled_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE SEQUENCE seq_sling_availability_sets;
+CREATE INDEX idx_avail_sets_user ON sling_availability_sets(sling_user_id);
+```
+
+A row with `problem IS NOT NULL` is an **uninterpreted** set: it yields no (or only some) blocks and is listed in the Availability view and the pull warning.
+
+### `studio_hours` (migration 0014)
+
+Per-weekday studio hours (Settings → Studio hours). An EMPTY table means "not set": each date's span is then derived from the class slots (earliest start to latest end per weekday over the trailing three months plus the month itself). Saved by DELETE + INSERT.
+
+```sql
+CREATE TABLE studio_hours (
+  weekday    INTEGER PRIMARY KEY,   -- 0 = Monday … 6 = Sunday
+  closed     BOOLEAN NOT NULL DEFAULT FALSE,
+  open_time  VARCHAR,               -- 'HH:MM' studio local; NULL when closed
+  close_time VARCHAR
+);
+```
+
+### `teacher_availability_windows` (migration 0014)
+
+Computed, derived data: when each active teacher IS available. For each date of a month: that weekday's studio hours, widened to cover any class slot on the date that falls outside them (Sling shifts + non-dropped shifts of non-archived drafts), minus every `availability_blocks` row of the teacher. Rewritten per month (DELETE + INSERT, compare-before-write) on every pull, availability refresh, studio-hours change and read (`get_month_availability`). No PK, no FKs — it can always be rebuilt.
+
+```sql
+CREATE TABLE teacher_availability_windows (
+  target_month  VARCHAR NOT NULL,   -- 'YYYY-MM'
+  sling_user_id INTEGER NOT NULL,
+  window_date   VARCHAR NOT NULL,   -- 'YYYY-MM-DD' studio local
+  start_time    VARCHAR NOT NULL,   -- 'HH:MM' studio local
+  end_time      VARCHAR NOT NULL
+);
+CREATE INDEX idx_avail_windows_month ON teacher_availability_windows(target_month);
+```
+
+Blocks remain the source of truth for scheduling decisions (`propose.py`, `conflicts.rs`, the issue queue). The windows feed the Availability view, the day editor's candidate list, "suggest a fix" and the Claude editor payload. A Rust test (`windows_and_blocks_agree_for_every_slot`) asserts that for every class slot and teacher, "slot inside a window" ⇔ "no overlapping block".
 
 ### `proposals`
 

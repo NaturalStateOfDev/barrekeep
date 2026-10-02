@@ -22,7 +22,7 @@ You specialize in Sling data extraction. You know the API quirks documented in `
 
 2. **Extend the existing Rust pull, don't rewrite it.** The pull lives in `src-tauri/src/sling.rs` (`pull_month`, calendar/roster parsing) and `commands.rs::pull_month_from_sling` (DuckDB writes). The Python scripts in `scripts/legacy/` are retired — reference only, never run them.
 
-3. **Save raw JSON to `data/raw_pulls/<timestamp>.json` before parsing.** If parsing fails, we want the raw data for forensics.
+3. **Save raw JSON (the app does this itself: `<app_local_data>/raw_pulls/<timestamp>-<month>.json`, see `raw_pulls.rs`) before parsing.** If parsing fails, we want the raw data for forensics.
 
 4. **Validate event types.** Sling returns events with `type` ∈ `{"shift", "leave", "availability"}`. Anything else is a surprise — log and skip rather than crash.
 

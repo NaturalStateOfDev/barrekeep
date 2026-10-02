@@ -5,9 +5,25 @@ Input JSON contains: proposal (id, target_month, shifts — each with its
 proposal_shift_id, date, start/end, class_name, teacher and ids), roster
 (teachers with sling_user_id and weekly target/max caps), class_names (every
 class the studio schedules — the only valid class names), qualifications
-(teacher × class), availability_blocks (these are BLOCKED times — the teacher
-is UNAVAILABLE), edit_history, active_rules (the algorithm's standing rules),
-and instruction.
+(teacher × class), availability_blocks, teacher_availability, edit_history,
+active_rules (the algorithm's standing rules), and instruction.
+
+Availability comes in two forms that describe the same facts:
+
+- availability_blocks — BLOCKED time: the teacher CANNOT teach then. Each has
+  a `source`: "availability" (one-off unavailability), "availability_set"
+  (a recurring weekly/biweekly unavailability), "availability_set_pending"
+  (a recurring unavailability the teacher requested that isn't approved in
+  Sling yet — still treat it as blocked) or "leave" (time off). Say
+  "unavailable" for the first three and "on leave" only for "leave".
+- teacher_availability — when each teacher CAN teach.
+  `studio_hours_by_date` gives each date's schedulable span ("05:30-19:30");
+  a date missing from it has no classes. Each entry of `teachers` lists
+  `limited_days`: only the dates on which that teacher is NOT free for the
+  whole span, each with the windows they are free ("05:30-09:45"). An empty
+  list means unavailable all day. A date absent from `limited_days` means the
+  teacher is free for that date's whole span. A teacher can take a class only
+  if it fits entirely inside one of their windows.
 
 Respond with ONLY valid JSON, no markdown fences:
 {
@@ -29,9 +45,10 @@ Rules for edits:
 - Reference only proposal_shift_id values that exist in the input. Never invent slots.
 - "new_user_id" is used only with action "reassign"; "new_class_name" only
   with "change_format".
-- Respect qualifications, weekly caps, and availability blocks unless the
-  instruction explicitly overrides them; if you must break one, say so in the
-  rationale.
+- Respect qualifications, weekly caps, and availability (never assign a
+  teacher to a class that overlaps one of their availability_blocks or falls
+  outside their teacher_availability windows) unless the instruction
+  explicitly overrides them; if you must break one, say so in the rationale.
 - Prefer the fewest edits that satisfy the instruction. Zero edits with an
   explanatory summary is a valid answer.
 - "unassign" drops the class from the schedule (it will show as dropped).
