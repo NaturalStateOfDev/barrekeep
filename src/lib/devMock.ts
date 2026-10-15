@@ -461,25 +461,25 @@ let nextEditId = 1;
 let nextProposalId = 9;
 let nextRunId = 42;
 
-// One sample per block source (all are time the teacher is NOT available).
+// Sample blocks from the calendar feed (all are time the teacher is NOT
+// available). Recurring entries arrive expanded per date.
 const BLOCKS: AvailabilityBlock[] = [
   // leave — approved time off (calendar feed)
   { sling_user_id: 1930004, source: "leave", starts_at: "2026-08-20T08:00:00", ends_at: "2026-08-20T12:00:00" },
   { sling_user_id: 1930006, source: "leave", starts_at: "2026-08-24T00:00:00", ends_at: "2026-08-26T23:59:59" },
-  // availability — one-off unavailability (calendar feed)
+  // availability — one-off unavailability
   { sling_user_id: 1930002, source: "availability", starts_at: "2026-08-13T17:00:00", ends_at: "2026-08-13T19:30:00" },
-  // availability_set — a recurring set: Priya, every Tuesday 9–10:15
+  // availability — a recurring entry: Priya, every Tuesday 9–10:15
   ...["04", "11", "18", "25"].map((d) => ({
     sling_user_id: 1930005,
-    source: "availability_set",
+    source: "availability",
     starts_at: `2026-08-${d}T09:00:00`,
     ends_at: `2026-08-${d}T10:15:00`,
   })),
-  // availability_set_pending — a recurring set not yet approved in Sling:
-  // Casey, Saturdays all day
+  // availability — a recurring entry: Casey, Saturdays all day
   ...["01", "08", "15", "22", "29"].map((d) => ({
     sling_user_id: 1930003,
-    source: "availability_set_pending",
+    source: "availability",
     starts_at: `2026-08-${d}T00:00:00`,
     ends_at: `2026-08-${d}T23:59:59`,
   })),
@@ -521,27 +521,11 @@ function mockMonthAvailability(month: string): MonthAvailability {
       if (cursor < h.close) windows.push({ sling_user_id: t.sling_user_id, date, start: cursor, end: h.close });
     }
   }
-  const set_issues =
-    month === "2026-08"
-      ? [{
-          sling_user_id: 1930006,
-          teacher_name: "Morgan Ellis",
-          name: "First Monday",
-          interval_raw: '"monthly on the first Monday"',
-          problem: 'interval "monthly on the first Monday" not understood',
-        }]
-      : [];
   return {
     target_month: month,
     windows,
     day_ranges,
     hours_set: STUDIO_HOURS.length > 0,
-    set_count: 3,
-    pending_set_count: 1,
-    set_issues,
-    warnings: set_issues.length
-      ? ["1 availability set from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file"]
-      : [],
   };
 }
 
@@ -917,11 +901,9 @@ export function installDevMock() {
           unavailability_count: 10,
           leave_count: 2,
           leave_day_count: 4,
-          set_block_count: 9,
-          pending_block_count: 5,
           external_shift_count: 1,
           history_shift_count: 42,
-          warnings: ["1 availability set from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file"],
+          warnings: [],
           raw_pull_file: "raw_pulls/20260705T120000Z-2026-08.json",
         };
       case "list_availability_blocks":

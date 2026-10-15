@@ -860,7 +860,7 @@ function BackupsCard() {
         <button
           className="btn-ghost"
           onClick={onOpenRawPulls}
-          title="The raw JSON Sling returned for each pull — calendar and recurring availability"
+          title="The raw JSON Sling returned for each pull (calendar pages)"
         >
           Open raw pulls folder
         </button>

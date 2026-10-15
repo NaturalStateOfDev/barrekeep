@@ -101,15 +101,16 @@ When you (Claude) edit code in this repo:
 ## Known gotchas (the kind that bite at 11pm)
 
 - **The `availability` event type in Sling means BLOCKED time, not available
-  time.** The naming is backward. The same goes for recurring *availability
-  sets* (`GET /availability?userId=…`): they hold a teacher's standing
-  UNavailability and are NOT reliably in the calendar feed — the pull fetches
-  them per teacher and expands them into `availability_blocks`
-  (`availability.rs`). UI wording: "Unavailable" for these, "On leave" only
-  for `leave`.
+  time.** The naming is backward. Recurring unavailability arrives in the
+  calendar feed too, expanded per date, with an `rrule` object and a
+  composite string id (`"5207099321:2026-10-07"`). Never fail an event over
+  its id: v0.2.4 did, silently dropped every recurring block, and teachers
+  looked free when they weren't. Don't use `GET /availability?userId=…`
+  (sets): it returns headers only, no times (verified 2026-10-14). UI
+  wording: "Unavailable" for these, "On leave" only for `leave`.
 - **Sling publishes a Swagger spec** (https://api.getsling.com/), but it
-  omits wire formats and defaults. Where it is silent (e.g. a set's
-  `interval`), parse defensively and surface what couldn't be interpreted;
+  omits wire formats and defaults. Where it is silent (e.g. event-id
+  formats), parse defensively and surface what couldn't be interpreted;
   each pull's raw JSON is in `raw_pulls/` next to the database.
 - **Sling's POST `/shifts` uses `users: [{id}]` (array) but PUT uses
   `user: {id}` (singular).** Not symmetric. The response shape uses singular.

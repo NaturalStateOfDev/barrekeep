@@ -68,19 +68,15 @@ pub struct PullResult {
     pub qual_count: i64,
     /// Every blocked-time row written for the month (all sources).
     pub availability_count: i64,
-    /// Blocks that are unavailability (calendar + recurring sets).
+    /// Blocks that are unavailability (calendar `availability` events).
     pub unavailability_count: i64,
     /// Blocks that are leave.
     pub leave_count: i64,
     /// Calendar days of the month those leave blocks cover.
     pub leave_day_count: i64,
-    /// Of the unavailability blocks, how many came from recurring sets.
-    pub set_block_count: i64,
-    /// … and how many of those belong to sets still pending approval.
-    pub pending_block_count: i64,
     pub external_shift_count: i64,
     pub history_shift_count: i64,
-    /// Things the user should know (uninterpreted sets, failed fetches).
+    /// Things the user should know (e.g. unreadable calendar events).
     pub warnings: Vec<String>,
     /// The raw pull audit file written for this pull.
     pub raw_pull_file: Option<String>,
@@ -439,7 +435,7 @@ fn build_propose_payload(
             let mut events: Vec<serde_json::Value> = query_availability_blocks(conn, target_month)?
                 .into_iter()
                 // propose.py blocks on type 'leave' / 'availability' only;
-                // recurring-set sources are presented as 'availability'.
+                // any other (legacy) source is presented as 'availability'.
                 .map(|b| serde_json::json!({
                     "type": crate::availability::propose_event_type(&b.source),
                     "dtstart": b.starts_at,
@@ -2669,32 +2665,29 @@ fn sync_roster(
 /// What `write_month_events` wrote for one month.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct MonthWrite {
-    /// One-off unavailability blocks from the calendar feed.
+    /// Unavailability blocks from the calendar feed (one-off and recurring
+    /// occurrences alike).
     pub calendar_unavailability: i64,
     pub leave: i64,
     /// Calendar days of the month covered by the leave blocks.
     pub leave_days: i64,
-    /// Blocks expanded from recurring availability sets.
-    pub sets: crate::availability::SetBlockStats,
     pub external_shifts: i64,
 }
 
 impl MonthWrite {
-    pub fn set_blocks(&self) -> i64 {
-        self.sets.written + self.sets.pending
-    }
     pub fn unavailability(&self) -> i64 {
-        self.calendar_unavailability + self.set_blocks()
+        self.calendar_unavailability
     }
     pub fn blocks(&self) -> i64 {
         self.unavailability() + self.leave
     }
 }
 
-/// Replace one month's blocked time and external shifts: the calendar
-/// events Sling just returned (unavailability + leave), then every stored
-/// recurring availability set expanded into that month. Shared by the full
-/// pull and the availability refresh. Must run inside a transaction.
+/// Replace one month's blocked time and external shifts with the calendar
+/// events Sling just returned (unavailability + leave; the calendar feed
+/// carries recurring unavailability expanded per date). Every block that
+/// starts in the month is deleted first, whatever its source. Shared by the
+/// full pull and the availability refresh. Must run inside a transaction.
 fn write_month_events(
     tx: &duckdb::Connection,
     target_month: &str,
@@ -2733,9 +2726,6 @@ fn write_month_events(
             out.calendar_unavailability += 1;
         }
     }
-    // Recurring sets, after the calendar rows so identical blocks de-dupe.
-    out.sets = crate::availability::write_set_blocks(tx, target_month, roster_ids)?;
-
     tx.execute(
         "DELETE FROM external_sling_shifts WHERE target_month = ?",
         duckdb::params![target_month],
@@ -2761,54 +2751,16 @@ fn write_month_events(
     Ok(out)
 }
 
-/// Class types switched off in the app (their members aren't roster
-/// teachers, so their availability sets aren't fetched).
-fn inactive_position_ids(conn: &duckdb::Connection) -> Result<std::collections::HashSet<i64>, String> {
-    let mut s = conn.prepare("SELECT sling_position_id FROM positions WHERE NOT active").map_err(err)?;
-    let ids = s.query_map([], |r| r.get::<_, i32>(0)).map_err(err)?
-        .collect::<Result<Vec<_>, _>>().map_err(err)?;
-    Ok(ids.into_iter().map(i64::from).collect())
-}
-
-/// Store freshly fetched availability sets (replace per teacher). Teachers
-/// whose fetch failed keep their previous sets. Must run inside a transaction.
-fn store_availability_sets(
-    tx: &duckdb::Connection,
-    fetched: &crate::sling::AvailabilityFetch,
-    roster_ids: &std::collections::HashSet<i32>,
-) -> Result<(), String> {
-    for (uid, sets) in &fetched.by_user {
-        if roster_ids.contains(&(*uid as i32)) {
-            crate::availability::replace_sets_for_user(tx, *uid, sets)?;
-        }
-    }
-    Ok(())
-}
-
 /// User-facing warnings after a pull/refresh wrote its data.
-fn pull_warnings(
-    conn: &duckdb::Connection,
-    fetched: &crate::sling::AvailabilityFetch,
-    unparsed_events: usize,
-) -> Result<Vec<String>, String> {
+fn pull_warnings(unparsed_events: usize) -> Vec<String> {
     let mut warnings = Vec::new();
-    let issues = crate::availability::set_issues(conn)?;
-    warnings.extend(crate::availability::uninterpreted_warning(issues.len()));
-    if !fetched.failed.is_empty() {
-        let n = fetched.failed.len();
-        warnings.push(format!(
-            "Couldn't fetch recurring availability from Sling for {n} teacher{} ({}) — their unavailability may be incomplete; see raw pull file",
-            if n == 1 { "" } else { "s" },
-            fetched.failed[0].1,
-        ));
-    }
     if unparsed_events > 0 {
         warnings.push(format!(
             "{unparsed_events} calendar event{} from Sling couldn't be read — see raw pull file",
             if unparsed_events == 1 { "" } else { "s" },
         ));
     }
-    Ok(warnings)
+    warnings
 }
 
 /// Write the raw pull audit file; a failure becomes a warning, never an error.
@@ -2851,9 +2803,9 @@ pub fn pull_month_from_sling(
     };
     // Studio identifiers come from runtime config (migration 0007), not
     // compiled-in constants. Load before the network pull.
-    let (cfg, inactive_positions) = {
+    let cfg = {
         let conn = db.0.lock().map_err(err)?;
-        (load_studio_config(&conn)?, inactive_position_ids(&conn)?)
+        load_studio_config(&conn)?
     };
     if cfg.org_id == 0 || cfg.home_location_id == 0 {
         return Err(
@@ -2864,7 +2816,7 @@ pub fn pull_month_from_sling(
     }
     let mut session = sling::PullSession::live(&token_str);
     let months = [target_month.clone()];
-    let payload = match sling::pull_month(&mut session, &target_month, &cfg, &inactive_positions) {
+    let payload = match sling::pull_month(&mut session, &target_month, &cfg) {
         Ok(p) => p,
         Err(e) => {
             // Keep what did arrive: a failed pull is when forensics matter.
@@ -2889,7 +2841,6 @@ pub fn pull_month_from_sling(
     let user_count: i64 = roster_ids.len() as i64;
     let qual_count: i64 = _roster.qualifications;
 
-    store_availability_sets(&tx, &payload.availability, &roster_ids)?;
     let written = write_month_events(&tx, &target_month, &payload.month_events, &roster_ids, &cfg)?;
     let (availability_count, external_shift_count) = (written.blocks(), written.external_shifts);
     let mut history_shift_count: i64 = 0;
@@ -2922,7 +2873,7 @@ pub fn pull_month_from_sling(
 
     // Available windows for the month, from the blocks just written.
     crate::availability::recompute_month(&tx, &target_month)?;
-    let mut warnings = pull_warnings(&tx, &payload.availability, payload.month_events_unparsed)?;
+    let mut warnings = pull_warnings(payload.month_events_unparsed);
 
     tx.commit().map_err(err)?;
     // Same WAL-bounding policy as generate/edit: checkpoint after the
@@ -2936,13 +2887,8 @@ pub fn pull_month_from_sling(
         &months,
         &session,
         json!({
-            "availability_path_form": payload.availability.path_form,
-            "availability_fetch_failed": payload.availability.failed,
             "calendar_unavailability_blocks": written.calendar_unavailability,
             "leave_blocks": written.leave,
-            "set_blocks": written.sets.written,
-            "pending_set_blocks": written.sets.pending,
-            "set_blocks_duplicating_calendar": written.sets.duplicates,
             "calendar_events_unparsed": payload.month_events_unparsed,
             "warnings": warnings,
         }),
@@ -2959,8 +2905,6 @@ pub fn pull_month_from_sling(
         unavailability_count: written.unavailability(),
         leave_count: written.leave,
         leave_day_count: written.leave_days,
-        set_block_count: written.set_blocks(),
-        pending_block_count: written.sets.pending,
         external_shift_count,
         history_shift_count,
         warnings,
@@ -3312,9 +3256,9 @@ pub fn refresh_availability_from_sling(
         t.clone().ok_or_else(|| "no Sling token — log in to Sling first".to_string())?
     };
     let current = crate::sling::studio_month_at(chrono::Utc::now());
-    let (cfg, months, inactive_positions) = {
+    let (cfg, months) = {
         let conn = db.0.lock().map_err(err)?;
-        (load_studio_config_checked(&conn)?, refresh_months(&conn, &current)?, inactive_position_ids(&conn)?)
+        (load_studio_config_checked(&conn)?, refresh_months(&conn, &current)?)
     };
     if months.is_empty() {
         return Err("Nothing to refresh — pull a month from Sling first.".to_string());
@@ -3330,7 +3274,6 @@ pub fn refresh_availability_from_sling(
         Vec<sling::SlingGroup>,
         Vec<(String, Vec<sling::CalendarEvent>)>,
         usize,
-        sling::AvailabilityFetch,
     );
     let fetch = |session: &mut sling::PullSession<'_>| -> anyhow::Result<Fetched> {
         let (users, groups) = sling::fetch_roster_in(session)?;
@@ -3341,13 +3284,9 @@ pub fn refresh_availability_from_sling(
             unparsed += dropped;
             calendars.push((m.clone(), events));
         }
-        // Recurring sets are per teacher, not per month: one fetch serves
-        // every month refreshed.
-        let ids = sling::availability_user_ids(&users, &groups, &cfg, &inactive_positions);
-        let sets = sling::fetch_availability_sets(session, &cfg, &ids)?;
-        Ok((users, groups, calendars, unparsed, sets))
+        Ok((users, groups, calendars, unparsed))
     };
-    let (users, groups, calendars, unparsed, fetched_sets) = match fetch(&mut session) {
+    let (users, groups, calendars, unparsed) = match fetch(&mut session) {
         Ok(f) => f,
         Err(e) => {
             let mut ignored = Vec::new();
@@ -3364,7 +3303,6 @@ pub fn refresh_availability_from_sling(
         let mut s = tx.prepare("SELECT sling_user_id FROM teachers WHERE active = TRUE").map_err(err)?;
         s.query_map([], |r| r.get(0)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?
     };
-    store_availability_sets(&tx, &fetched_sets, &roster_ids)?;
     let mut out = Vec::with_capacity(calendars.len());
     for (month, events) in &calendars {
         let written = write_month_events(&tx, month, events, &roster_ids, &cfg)?;
@@ -3387,7 +3325,7 @@ pub fn refresh_availability_from_sling(
             external_shift_count: written.external_shifts,
         });
     }
-    let mut warnings = pull_warnings(&tx, &fetched_sets, unparsed)?;
+    let mut warnings = pull_warnings(unparsed);
     tx.commit().map_err(err)?;
     let _ = conn.execute("CHECKPOINT", []);
     drop(conn);
@@ -3398,8 +3336,6 @@ pub fn refresh_availability_from_sling(
         &months,
         &session,
         json!({
-            "availability_path_form": fetched_sets.path_form,
-            "availability_fetch_failed": fetched_sets.failed,
             "months": out,
             "calendar_events_unparsed": unparsed,
             "warnings": warnings,
@@ -3953,13 +3889,7 @@ mod tests {
         assert_eq!(jul.len(), 1, "spanning block also visible from its starting month");
     }
 
-    // --- recurring availability sets through the pull's write path ---
-
-    fn julia_sets() -> Vec<serde_json::Value> {
-        let raw = std::fs::read_to_string("test_fixtures/sling_availability_sets.json").unwrap();
-        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        doc["user_julia"].as_array().unwrap().clone()
-    }
+    // --- calendar-feed blocks through the pull's write path ---
 
     fn events(v: serde_json::Value) -> Vec<crate::sling::CalendarEvent> {
         serde_json::from_value(v).unwrap()
@@ -3976,90 +3906,84 @@ mod tests {
         .unwrap();
     }
 
-    /// The reported bug: Julia's recurring Tuesday 9:45 unavailability lives
-    /// in an availability set, not the calendar feed. After a pull writes the
-    /// month, she has a block every Tuesday — and the calendar's own copy of
-    /// one occurrence is not doubled.
+    /// Julia's recurring Tuesday 9:45 unavailability arrives in the calendar
+    /// feed already expanded per date (each occurrence carries an id like
+    /// "<event>:<date>"). The month write stores one block per occurrence,
+    /// and rewriting the month replaces EVERY block that starts in it —
+    /// including legacy rows expanded from availability sets by earlier
+    /// versions, which therefore vanish on the next pull.
     #[test]
-    fn month_write_merges_calendar_blocks_and_recurring_sets() {
+    fn month_write_stores_calendar_blocks_and_replaces_legacy_set_rows() {
         let mut conn = conn_with_schema();
         seed_three_teachers(&conn);
+        // Left over from a pre-removal pull: set-derived rows in November,
+        // plus an October row that this November pull must not touch.
+        conn.execute_batch(
+            "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at) VALUES
+               (1930004, 'availability_set', TIMESTAMPTZ '2026-11-03 09:45:00-06', TIMESTAMPTZ '2026-11-03 10:45:00-06'),
+               (1930004, 'availability_set_pending', TIMESTAMPTZ '2026-11-08 00:00:00-06', TIMESTAMPTZ '2026-11-09 00:00:00-06'),
+               (1930004, 'availability_set', TIMESTAMPTZ '2026-10-27 09:45:00-05', TIMESTAMPTZ '2026-10-27 10:45:00-05');",
+        )
+        .unwrap();
         let roster: std::collections::HashSet<i32> = [1930001, 1930002, 1930004].into_iter().collect();
-        let fetched = crate::sling::AvailabilityFetch {
-            by_user: vec![(1930004, julia_sets()), (1930002, vec![]), (555, julia_sets())],
-            failed: vec![(1930001, "sling-500: boom".into())],
-            path_form: Some("bare".into()),
+        let tuesday = |date: &str| {
+            json!({"id": format!("5207099321:{date}"), "type": "availability",
+                   "dtstart": format!("{date}T09:45:00-06:00"), "dtend": format!("{date}T10:45:00-06:00"),
+                   "user": {"id": 1930004}, "rrule": {"freq": "WEEKLY", "byday": "TU"}})
         };
-        let cal = events(json!([
-            {"id": "a1", "type": "availability", "dtstart": "2026-11-10T09:45:00-06:00",
-             "dtend": "2026-11-10T10:45:00-06:00", "user": {"id": 1930004}},
-            {"id": "l1", "type": "leave", "dtstart": "2026-11-20T00:00:00-06:00",
-             "dtend": "2026-11-21T23:59:59-06:00", "user": {"id": 1930001}},
-            {"id": "a2", "type": "availability", "dtstart": "2026-11-11T09:45:00-06:00",
-             "dtend": "2026-11-11T10:45:00-06:00", "user": {"id": 555}},
-            {"id": "77", "type": "shift", "dtstart": "2026-11-03T05:45:00-06:00", "dtend": "2026-11-03T06:45:00-06:00",
-             "user": {"id": 1930001}, "position": {"id": 101}, "location": {"id": 901}, "status": "planning"}
-        ]));
+        let mut cal: Vec<serde_json::Value> =
+            ["2026-11-03", "2026-11-10", "2026-11-17", "2026-11-24"].iter().map(|d| tuesday(d)).collect();
+        cal.extend([
+            json!({"id": "l1", "type": "leave", "dtstart": "2026-11-20T00:00:00-06:00",
+                   "dtend": "2026-11-21T23:59:59-06:00", "user": {"id": 1930001}}),
+            // Not on the roster: skipped.
+            json!({"id": "a2", "type": "availability", "dtstart": "2026-11-11T09:45:00-06:00",
+                   "dtend": "2026-11-11T10:45:00-06:00", "user": {"id": 555}}),
+            json!({"id": "77", "type": "shift", "dtstart": "2026-11-03T05:45:00-06:00", "dtend": "2026-11-03T06:45:00-06:00",
+                   "user": {"id": 1930001}, "position": {"id": 101}, "location": {"id": 901}, "status": "planning"}),
+        ]);
+        let cal = events(json!(cal));
 
         let tx = conn.transaction().unwrap();
-        store_availability_sets(&tx, &fetched, &roster).unwrap();
         let w = write_month_events(&tx, "2026-11", &cal, &roster, &cfg()).unwrap();
         tx.commit().unwrap();
-        assert_eq!((w.calendar_unavailability, w.leave, w.external_shifts), (1, 1, 1));
+        assert_eq!((w.calendar_unavailability, w.leave, w.external_shifts), (4, 1, 1));
         assert_eq!(w.leave_days, 2, "Nov 20–21");
-        assert_eq!((w.sets.written, w.sets.pending, w.sets.duplicates), (5, 3, 1));
-        assert_eq!((w.unavailability(), w.blocks()), (9, 10));
-
-        // Sets are stored for roster teachers only.
-        let n: i64 = conn
-            .query_row("SELECT count(DISTINCT sling_user_id) FROM sling_availability_sets", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!((w.unavailability(), w.blocks()), (4, 5));
 
         let rows = query_availability_blocks(&conn, "2026-11").unwrap();
-        assert_eq!(rows.len(), 10);
-        let tuesdays: Vec<(&str, &str)> = rows
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|b| b.source == "availability" || b.source == "leave"), "legacy set rows replaced");
+        let mut tuesdays: Vec<&str> = rows
             .iter()
             .filter(|b| b.sling_user_id == 1930004 && b.starts_at.ends_with("T15:45:00Z"))
-            .map(|b| (&b.starts_at[..10], b.source.as_str()))
+            .map(|b| &b.starts_at[..10])
             .collect();
-        let mut tuesdays = tuesdays;
         tuesdays.sort();
-        assert_eq!(
-            tuesdays,
-            [
-                ("2026-11-03", "availability_set"),
-                ("2026-11-10", "availability"),
-                ("2026-11-17", "availability_set"),
-                ("2026-11-24", "availability_set"),
-            ]
-        );
-        assert_eq!(rows.iter().filter(|b| b.source == "availability_set_pending").count(), 3);
+        assert_eq!(tuesdays, ["2026-11-03", "2026-11-10", "2026-11-17", "2026-11-24"]);
+        let october: i64 = conn
+            .query_row("SELECT count(*) FROM availability_blocks WHERE source = 'availability_set'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(october, 1, "another month's rows are untouched");
 
-        // The uninterpreted set and the failed fetch both become warnings.
-        let warnings = pull_warnings(&conn, &fetched, 2).unwrap();
-        assert_eq!(warnings.len(), 3, "{warnings:?}");
-        assert!(warnings[0].starts_with("1 availability set from Sling couldn't be interpreted"));
-        assert!(warnings[1].contains("1 teacher") && warnings[1].contains("sling-500"));
-        assert!(warnings[2].starts_with("2 calendar events"));
+        assert!(pull_warnings(0).is_empty());
+        let warnings = pull_warnings(2);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("2 calendar events"));
 
-        // A second pull of the same data rewrites the month without growth,
-        // and a teacher whose fetch failed keeps the sets already stored.
-        let later = crate::sling::AvailabilityFetch {
-            by_user: vec![],
-            failed: vec![(1930004, "sling-500".into())],
-            path_form: None,
-        };
+        // A second pull of the same data rewrites the month without growth.
         let tx = conn.transaction().unwrap();
-        store_availability_sets(&tx, &later, &roster).unwrap();
         let again = write_month_events(&tx, "2026-11", &cal, &roster, &cfg()).unwrap();
         tx.commit().unwrap();
-        assert_eq!(again.blocks(), 10);
-        assert_eq!(query_availability_blocks(&conn, "2026-11").unwrap().len(), 10);
+        assert_eq!(again.blocks(), 5);
+        assert_eq!(query_availability_blocks(&conn, "2026-11").unwrap().len(), 5);
 
-        // The conflict check reads every source as blocked.
+        // The conflict check reads every source as blocked, including a
+        // legacy pending-set row that survives in a month not re-pulled.
         conn.execute_batch(
-            "INSERT INTO proposals (id, target_month, algorithm_version, parameters, is_current)
+            "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at) VALUES
+               (1930004, 'availability_set_pending', TIMESTAMPTZ '2026-11-08 00:00:00-06', TIMESTAMPTZ '2026-11-09 00:00:00-06');
+             INSERT INTO proposals (id, target_month, algorithm_version, parameters, is_current)
                VALUES (1, '2026-11', 'v9', '{}', TRUE);
              INSERT INTO proposal_shifts (proposal_id, shift_date, start_time, end_time, sling_position_id,
                  sling_user_id, generation_reason) VALUES
@@ -4081,9 +4005,9 @@ mod tests {
     }
 
     /// propose.py only blocks on event types 'leave' and 'availability'.
-    /// Set-derived blocks reach it as 'availability'; the two existing
-    /// sources pass through untouched, so a month without recurring sets
-    /// produces a byte-identical payload to before.
+    /// Legacy set-derived blocks (no longer written, but possibly still in
+    /// a month not re-pulled) reach it as 'availability'; the two calendar
+    /// sources pass through untouched.
     #[test]
     fn propose_payload_presents_every_block_source_as_blocked() {
         let conn = conn_with_schema();

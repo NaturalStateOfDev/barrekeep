@@ -2,7 +2,7 @@
 
 What this app relies on in Sling's API.
 
-**Sling does publish an API spec**: Swagger 2.0 at https://api.getsling.com/v1/spec.json (browsable at https://api.getsling.com/). Use it as the reference for endpoints, parameters and object shapes. It is thin, though — it does not document wire formats (e.g. an availability set's `interval`), defaults (calendar page size), rate limits, or the Cloudflare header requirements. This file records what has been verified on top of the spec by watching DevTools and running production pulls/pushes, and flags what is still assumed. Verify against live behavior before making structural changes.
+**Sling does publish an API spec**: Swagger 2.0 at https://api.getsling.com/v1/spec.json (browsable at https://api.getsling.com/). Use it as the reference for endpoints, parameters and object shapes. It is thin, though — it does not document wire formats (e.g. composite availability-event ids), defaults (calendar page size), rate limits, or the Cloudflare header requirements. This file records what has been verified on top of the spec by watching DevTools and running production pulls/pushes, and flags what is still assumed. Verify against live behavior before making structural changes.
 
 A note on paths: the spec's base path is `/v1` and it lists e.g. `/calendar/{org_id}/users/{user_id}` and `/availability`. The web client (and this app) call the calendar and shift endpoints with an extra org prefix — `/v1/{orgId}/calendar/{orgId}/users/{userId}`, `/v1/{orgId}/shifts` — which is what has been verified to work. `/users/concise` and `/groups` are called without it.
 
@@ -72,45 +72,23 @@ So a typical calendar fetch costs 2–3 GETs instead of 1. Which case Sling actu
 
 Other documented query params (not used): `eventTypes`, `userIds`, `locationIds`, `positionIds`, `showPlanningEvents`, `skipUnscheduled`, `groupBy`.
 
-### GET availability sets (recurring unavailability)
+### Recurring unavailability: use the calendar feed, NOT `/availability` sets
 
-```
-GET /v1/{orgId}/availability?userId=<teacherId>     ← tried first
-GET /v1/availability?userId=<teacherId>             ← the spec's form; fallback
-```
+**Verified against live data (2026-10-14 probe, Oct + Nov 2026):**
 
-Teachers enter their standing unavailability ("I can't teach Tuesdays 9:45") as a recurring **availability set**. These do NOT reliably appear in the calendar feed — before migration 0014 the app read only `/calendar`, so most teachers' recurring unavailability never arrived and the scheduler treated them as free. One GET per roster teacher (`sling::fetch_availability_sets`), through the paced pull session.
+- Every teacher-entered block, one-off or recurring, arrives in the calendar feed as a `type: "availability"` event. Recurring ones are **expanded per occurrence** and carry an `rrule` object; their ids are composite strings, `"<rruleId>:<YYYY-MM-DD>"`:
 
-The spec documents the bare path; the app's other org-scoped calls take an org prefix and the retired Python extractor used `/{orgId}/availability`. Both forms are supported: the org-prefixed one is tried first, a 404/405 falls back to the other, and whichever answers is used for the remaining teachers and logged (`availability sets: the … URL form answered`; also `summary.availability_path_form` in the raw pull file). A set that names a different user than the one requested is ignored (it arrives with its owner's request). If neither form answers for the first two teachers the rest are skipped and a warning is shown.
+  ```json
+  {"id": "5207099321:2026-10-07", "type": "availability", "status": "published",
+   "fullDay": true, "dtstart": "2026-10-07T00:00:00-05:00", "dtend": "2026-10-07T23:59:59-05:00",
+   "approved": "2026-07-22T16:09:54-05:00", "user": {"id": 29511634},
+   "rrule": {"id": 5207099321, "from": "2026-09-02T00:00:00-05:00", "until": null,
+             "interval": 1, "byday": "", "freq": "WEEKLY"}}
+  ```
 
-Response: an array of `AvailabilitySet` (a wrapped array — `{"data": […]}` etc. — or a single object is also accepted):
-
-```json
-{
-  "id": 9001,
-  "name": "Fall mornings",
-  "start": "2026-09-01T00:00:00-05:00",
-  "until": null,
-  "interval": "…",
-  "approved": "2026-08-30T14:00:00-05:00",
-  "user": {"id": 1930004},
-  "availabilities": [
-    {"id": "…", "dtstart": "2026-09-01T09:45:00-05:00", "dtend": "2026-09-01T10:45:00-05:00",
-     "summary": "", "fullDay": false}
-  ]
-}
-```
-
-How the app reads it (`src-tauri/src/availability.rs`) — **these are assumptions until checked against a real raw pull**:
-
-- Like calendar `availability` events, every entry is **unavailable** time.
-- Each entry of `availabilities` gives a weekday + local time range (America/Chicago). It repeats every `interval` from its own `dtstart`, keeping the wall-clock time across DST changes. `fullDay` = the whole local day(s).
-- Occurrences before the `start` date or after the `until` date are dropped; `until` is inclusive (the safer reading) and `null` = forever.
-- `interval` is documented only as "recurrence interval i.e. every week, every two weeks, etc." The parser accepts: numbers 1–6 (weeks) and multiples of 604800 (seconds), also as strings; ISO-8601 `P1W` / `P2W` / `P7D` / `P14D`; RRULE fragments `FREQ=WEEKLY;INTERVAL=2` (and `FREQ=DAILY`); words (`weekly`, `every week`, `biweekly`, `fortnightly`, `every other week`, `every two weeks`, `2 weeks`, `daily`); Python-timedelta text (`7 days, 0:00:00`). A bare `7` or `14` is ambiguous (weeks? days?) and is NOT guessed.
-- Anything else (including a missing interval or unreadable dates) makes the set **uninterpreted**: it is stored with a `problem`, produces no blocks, and the pull shows "N availability sets from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file". Extend `parse_interval` (with a test) when a new spelling turns up.
-- `approved: null` (or absent) = pending approval. Pending sets still block — scheduling over a pending request is the worse mistake — but are stored as `availability_set_pending` and labelled "pending approval".
-
-Sets are stored raw in `sling_availability_sets` (replaced per teacher on each successful fetch; a teacher whose fetch failed keeps the previous sets) and expanded into `availability_blocks` for each pulled month, skipping occurrences identical to a block the calendar already supplied.
+  **v0.2.4 and earlier dropped every one of these**: the id parser rejected the composite id and the whole event failed to deserialize. Only one-off blocks and leave got through, which is why recurring unavailability looked "backwards" (teachers with standing blocks appeared free). The `availability_event_with_non_numeric_id_is_kept` test pins the fix.
+- Semantics confirmed: of 413 published shifts for teachers with availability events, 396 avoid every one of their events. `availability` = **blocked**.
+- `GET /availability?userId=…` (both `/{orgId}/availability` and bare `/availability` answer, same body) returns only set **headers**: `{id, name, start, until, interval, freq: "WEEKLY", byday: "", user, approved, cancelled}`. There are **no `availabilities` entries and no end times**, so a set can't be turned into blocks. `interval: 0` (most sets) means a one-off; `start` values like `…T00:00:00+00:00` are local wall time mislabeled as UTC. Set ids do NOT match calendar `rrule.id`s. Migration 0014 + PR #81 pulled and expanded these; that code was removed, and the `sling_availability_sets` table is left unused (migrations are forward-only).
 
 Related, unused: `GET /availability/{set_id}`, `GET /availability/event/{event_id}`, `GET /calendar/available`.
 
@@ -221,10 +199,9 @@ error. 401/429 as elsewhere. Ported from the legacy `scripts/legacy/rollback_pus
 
 `refresh_availability_from_sling` re-pulls, for every month from the current
 one on that has a pull or a draft: `/users/concise` + `/groups` (roster sync),
-the month's calendar (paged) and — once, not per month — every roster
-teacher's availability sets, all through one paced `PullSession` (1s apart,
-10s after every 10th GET). It rewrites that month's `availability_blocks`
-(calendar blocks + expanded sets), `teacher_availability_windows` and
+and the month's calendar (paged), all through one paced `PullSession` (1s
+apart, 10s after every 10th GET). It rewrites that month's
+`availability_blocks` (calendar blocks + leave), `teacher_availability_windows` and
 `external_sling_shifts` and bumps
 `month_pulls.pulled_at` — drafts are NOT regenerated. `check_draft_conflicts`
 then re-validates a draft (blocked/leave overlap, deactivated, unqualified,
@@ -277,9 +254,7 @@ Existing shifts may have `rrule` fields (weekly recurring shifts). The push does
 
 ## Things we don't know
 
-- The wire format of an availability set's `interval`, whether `until` is inclusive, and whether an entry can be marked as *available/preferred* rather than unavailable (the app assumes every entry is unavailability). Check a raw pull file.
-- Which URL form `/availability` answers on, and whether `?userId=` is honoured for an admin token on both.
-- The calendar endpoint's default page size and whether `page` is 0- or 1-based.
+- Whether `page` on the calendar endpoint is 0- or 1-based. (Verified: with no `pageSize` a full month came back in one response, 876 events; with `pageSize=50&page=1` it returned 50 of those same events.)
 
 - Whether Sling has a "publish all planning shifts" API. Currently the manager publishes via the web UI.
 - Whether the rate limit is per-token or per-org or per-IP.

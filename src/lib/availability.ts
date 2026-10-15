@@ -4,9 +4,10 @@
 // Two views of the same facts:
 //   - BLOCKS (`availability_blocks`): time a teacher is NOT available. Sling's
 //     naming is backward — its "availability" entries are unavailability.
-//     Sources: 'availability' (one-off, calendar feed), 'availability_set'
-//     (an occurrence of a recurring set), 'availability_set_pending' (a
-//     recurring set not yet approved in Sling — still blocked) and 'leave'.
+//     Sources: 'availability' (calendar feed — one-off or an occurrence of a
+//     recurring entry) and 'leave'. Legacy 'availability_set' /
+//     'availability_set_pending' rows (expanded from Sling availability sets
+//     by older versions; no longer written) still read as blocked.
 //   - WINDOWS (`teacher_availability_windows`): when a teacher IS available —
 //     the date's studio hours minus every block, computed by the backend.
 
@@ -29,7 +30,8 @@ export function blockKind(source: string): BlockKind {
   return "unavailable";
 }
 
-/** True for blocks that come from a recurring Sling availability set. */
+/** True for legacy blocks expanded from a recurring Sling availability set
+ *  (older versions only; calendar-feed blocks carry no recurrence flag). */
 export function isRecurring(source: string): boolean {
   return source === "availability_set" || source === "availability_set_pending";
 }

@@ -180,28 +180,26 @@ export interface PullResult {
   qual_count: number;
   /** Every blocked-time row written for the month (all sources). */
   availability_count: number;
-  /** Unavailability blocks (calendar one-offs + recurring-set occurrences). */
+  /** Unavailability blocks from the calendar feed (one-off + recurring). */
   unavailability_count: number;
   leave_count: number;
   /** Calendar days of the month the leave blocks cover. */
   leave_day_count: number;
-  /** Of the unavailability blocks, how many came from recurring sets… */
-  set_block_count: number;
-  /** …and how many of those are still pending approval in Sling. */
-  pending_block_count: number;
   external_shift_count: number;
   history_shift_count: number;
-  /** e.g. availability sets the app couldn't interpret. Show them. */
+  /** e.g. calendar events the app couldn't read. Show them. */
   warnings: string[];
   raw_pull_file: string | null;
 }
 
 /** Where a block of blocked time came from. Every source is time the
  *  teacher is NOT available (Sling's "availability" naming is backward):
- *  - 'availability'             one-off unavailability (calendar feed)
- *  - 'availability_set'         an occurrence of a recurring availability set
- *  - 'availability_set_pending' same, but the set isn't approved in Sling yet
+ *  - 'availability'             unavailability from the calendar feed
+ *                               (one-off, or an occurrence of a recurring entry)
  *  - 'leave'                    approved time off
+ *  - 'availability_set' / 'availability_set_pending'  legacy: occurrences of
+ *    recurring availability sets written by older versions (no longer
+ *    produced; a month's rows are replaced on its next pull)
  *  Use blockKind()/blockLabel() from lib/availability rather than comparing
  *  strings — unknown sources must still read as "unavailable". */
 export type AvailabilityBlockSource =
@@ -234,25 +232,12 @@ export interface DayRange {
   widened: boolean;
 }
 
-/** A recurring availability set the app could not (fully) interpret. */
-export interface AvailabilitySetIssue {
-  sling_user_id: number;
-  teacher_name: string | null;
-  name: string | null;
-  interval_raw: string | null;
-  problem: string;
-}
-
 export interface MonthAvailability {
   target_month: string;
   windows: AvailabilityWindow[];
   day_ranges: DayRange[];
   /** false = studio hours never set; spans come from the class slots. */
   hours_set: boolean;
-  set_count: number;
-  pending_set_count: number;
-  set_issues: AvailabilitySetIssue[];
-  warnings: string[];
 }
 
 /** One weekday's studio hours. weekday: 0 = Monday … 6 = Sunday. */

@@ -123,7 +123,7 @@ export const api = {
   listExternalShiftsForMonth: (targetMonth: string) =>
     invoke<ExternalShiftRow[]>("list_external_shifts_for_month", { targetMonth }),
   /** The month's computed availability: per-teacher available windows, each
-   *  date's schedulable span, and any uninterpreted Sling availability sets.
+   *  date's schedulable span.
    *  Recomputed (and stored) on every call. */
   getMonthAvailability: (targetMonth: string) =>
     invoke<MonthAvailability>("get_month_availability", { targetMonth }),

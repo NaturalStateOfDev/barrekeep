@@ -235,11 +235,6 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
       setPullResult(
         `Pulled ${activeMonth}: ${r.user_count} users, ${r.qual_count} qualifications, ` +
           `${availabilitySummary(r.unavailability_count, r.leave_day_count)}` +
-          (r.set_block_count > 0
-            ? ` (${r.set_block_count} from recurring availability` +
-              (r.pending_block_count > 0 ? `, ${r.pending_block_count} pending approval` : "") +
-              ")"
-            : "") +
           `, ${r.external_shift_count} external shifts, ` +
           `${r.history_shift_count} trailing-history shifts.`,
       );
