@@ -670,7 +670,7 @@ struct Throttle {
 impl Throttle {
     fn before_call(&mut self, ops: &mut dyn SlingShiftOps) {
         if self.calls > 0 {
-            ops.pause(if self.calls % BATCH_SIZE == 0 { INTER_DELAY_SECS } else { INTRA_DELAY_SECS });
+            ops.pause(if self.calls.is_multiple_of(BATCH_SIZE) { INTER_DELAY_SECS } else { INTRA_DELAY_SECS });
         }
         self.calls += 1;
     }
