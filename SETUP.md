@@ -94,7 +94,7 @@ Clippy is blocking in CI.
 The Windows laptop that runs the installed app needs:
 
 - **The MSI** from the latest GitHub Release (WebView2 ships with Windows 10/11).
-- **Python 3.11 or newer** — the schedule algorithm (`propose.py`) runs as a
+- **Python 3.8 or newer** — the schedule algorithm (`propose.py`) runs as a
   Python subprocess. Install from the [python.org](https://www.python.org/downloads/windows/)
   installer and tick **"Add python.exe to PATH"**. Then turn off the Microsoft
   Store stubs: *Settings → Apps → Advanced app settings → App execution

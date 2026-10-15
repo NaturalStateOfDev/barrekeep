@@ -50,11 +50,13 @@ export function initials(displayName: string | null): string {
 }
 
 // today: ISO date "YYYY-MM-DD"
-// returns four "YYYY-MM" strings: prev, current, next, next+1
+// returns "YYYY-MM" strings from prev month through current+5. The order is
+// fixed (index 2 is next month); callers index into it. Months past next+1
+// can be planned before teachers have entered availability.
 export function monthWindow(today: string): string[] {
   const [y, m] = today.split("-").map(Number);
   const out: string[] = [];
-  for (const delta of [-1, 0, 1, 2]) {
+  for (const delta of [-1, 0, 1, 2, 3, 4, 5]) {
     let ny = y;
     let nm = m + delta;
     while (nm < 1) { nm += 12; ny -= 1; }

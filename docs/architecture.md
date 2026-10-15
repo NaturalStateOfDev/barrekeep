@@ -49,7 +49,7 @@ Rust modules at a glance (`src-tauri/src/`):
 | `studio_setup.rs` | Auto-detect org / acting user / home location after a Sling login |
 | `algorithm.rs` | Versioned algorithm rules and scripts (`algorithm_versions`) |
 | `review.rs`, `editor.rs` | Claude review; Claude-driven draft edits |
-| `python.rs` | Find a usable Python 3.11+ for `propose.py` |
+| `python.rs` | Find a usable Python 3.8+ for `propose.py` |
 | `backup.rs` | Rotating database backups |
 | `migrations.rs`, `db.rs` | Forward-only schema migrations; connection setup |
 | `secrets.rs`, `sling_login.rs` | Stronghold vault; in-app Sling login window |
@@ -106,10 +106,10 @@ See `docs/data-model.md` for full DDL. Tables:
 
 ## Python runtime
 
-`propose.py` needs Python 3.11+ (stdlib only). `src-tauri/src/python.rs`
+`propose.py` needs Python 3.8+ (stdlib only; CI checks this with vermin). `src-tauri/src/python.rs`
 probes, in order, `py -3`, `python`, `python3` on Windows (`python3`, `python`
 elsewhere), rejects the Microsoft Store placeholder (`WindowsApps\python.exe`,
-exit 9009) and anything older than 3.11, and caches the first good one for the
+exit 9009) and anything older than 3.8, and caches the first good one for the
 session. Settings → Python shows the result and re-probes on "Re-check".
 Because Windows apps inherit PATH at launch, installing Python requires an
 app restart before it's picked up.

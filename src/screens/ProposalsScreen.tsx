@@ -558,7 +558,11 @@ export function ProposalsScreen({ onGoSettings }: { onGoSettings: () => void }) 
                 <EmptyState
                   icon={Sparkles}
                   title={`No proposal for ${monthLabel(newMonth)} yet`}
-                  message="Pull the latest availability, then generate a first draft from your Sling roster and qualifications. Review and adjust it here before pushing."
+                  message={
+                    monthWindow(today).indexOf(newMonth) >= 4
+                      ? "Teachers may not have entered availability for this month yet. The draft only accounts for availability and leave already in Sling. Once it is in, pull from Sling again on the draft to see what it affects before pushing."
+                      : "Pull the latest availability, then generate a first draft from your Sling roster and qualifications. Review and adjust it here before pushing."
+                  }
                   actionLabel={`Generate proposal for ${newMonth}`}
                   onAction={() => onGenerate()}
                 />
