@@ -1,6 +1,4 @@
-// Fixture-driven tests for availability sets, studio hours and windows.
-// No network: the fixture (test_fixtures/sling_availability_sets.json) is
-// built from the shapes in Sling's Swagger spec.
+// Tests for block helpers, studio hours and windows. No network.
 
 use super::*;
 use serde_json::json;
@@ -9,36 +7,8 @@ const JULIA: i32 = 1930004;
 const ALEX: i32 = 1930001;
 const KAYLA: i32 = 1930002;
 
-fn fixture() -> Value {
-    let raw = std::fs::read_to_string("test_fixtures/sling_availability_sets.json").expect("fixture present");
-    serde_json::from_str(&raw).expect("fixture is JSON")
-}
-
-fn julia_sets() -> Vec<Value> {
-    unwrap_sets(&fixture()["user_julia"]).expect("array")
-}
-
 fn d(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
-}
-
-fn month(m: &str) -> (NaiveDate, NaiveDate) {
-    month_bounds(m).unwrap()
-}
-
-/// Occurrences as "YYYY-MM-DD HH:MM→HH:MM" (or "…→MM-DD HH:MM" across days).
-fn occurrences(set: &ParsedSet, m: &str) -> Vec<String> {
-    let (first, next) = month(m);
-    expand_set(set, first, next)
-        .into_iter()
-        .map(|(s, e)| {
-            if s.date() == e.date() {
-                format!("{}→{}", s.format("%Y-%m-%d %H:%M"), e.format("%H:%M"))
-            } else {
-                format!("{}→{}", s.format("%Y-%m-%d %H:%M"), e.format("%m-%d %H:%M"))
-            }
-        })
-        .collect()
 }
 
 fn db() -> duckdb::Connection {
@@ -53,146 +23,7 @@ fn db() -> duckdb::Connection {
     conn
 }
 
-fn roster() -> HashSet<i32> {
-    [ALEX, KAYLA, JULIA].into_iter().collect()
-}
-
-/// (user, source, starts_at UTC, ends_at UTC) for every stored block.
-fn blocks(conn: &duckdb::Connection) -> Vec<(i32, String, String, String)> {
-    conn.prepare(concat!(
-        "SELECT sling_user_id, source, ",
-        crate::db::utc_iso!("starts_at"),
-        ", ",
-        crate::db::utc_iso!("ends_at"),
-        " FROM availability_blocks ORDER BY starts_at, sling_user_id, source"
-    ))
-    .unwrap()
-    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-    .unwrap()
-    .collect::<Result<_, _>>()
-    .unwrap()
-}
-
-// ---------- parsing ----------
-
-#[test]
-fn unwraps_every_response_shape() {
-    let fx = fixture();
-    // Documented shape: a bare array.
-    assert_eq!(unwrap_sets(&fx["user_julia"]).unwrap().len(), 4);
-    // Wrapped under a conventional key.
-    assert_eq!(unwrap_sets(&fx["user_alex_wrapped"]).unwrap().len(), 1);
-    assert_eq!(unwrap_sets(&json!({"availabilitySets": [{"interval": 1}]})).unwrap().len(), 1);
-    assert_eq!(unwrap_sets(&json!({"data": {"sets": [{}, {}]}})).unwrap().len(), 2);
-    // A teacher with no sets.
-    assert!(unwrap_sets(&fx["user_kayla_none"]).unwrap().is_empty());
-    // A single set object (GET /availability/{id}).
-    let single = fx["user_julia"][0].clone();
-    assert_eq!(unwrap_sets(&single).unwrap(), vec![single]);
-    // Unrecognized shapes are reported, not treated as "no sets".
-    assert!(unwrap_sets(&json!({"error": "nope"})).is_none());
-    assert!(unwrap_sets(&json!("oops")).is_none());
-}
-
-#[test]
-fn parses_ids_as_strings_or_numbers() {
-    let sets: Vec<ParsedSet> = julia_sets().iter().map(parse_set).collect();
-    // Numeric set id + numeric user id.
-    assert_eq!(sets[0].set_id.as_deref(), Some("9001"));
-    assert_eq!(sets[0].user_id, Some(1930004));
-    // String set id + string user id.
-    assert_eq!(sets[1].set_id.as_deref(), Some("9002"));
-    assert_eq!(sets[1].user_id, Some(1930004));
-    assert_eq!(sets[0].name.as_deref(), Some("Fall mornings"));
-    assert_eq!(sets[0].interval_raw.as_deref(), Some("\"P1W\""));
-    assert_eq!(sets[1].interval_raw.as_deref(), Some("2"));
-    assert_eq!(sets[0].entries.len(), 1);
-    assert!(!sets[0].entries[0].full_day);
-    assert!(sets[2].entries[0].full_day);
-    // A flat userId and a missing id are fine too.
-    let flat = parse_set(&json!({"userId": "42", "interval": 1, "availabilities": []}));
-    assert_eq!((flat.user_id, flat.set_id), (Some(42), None));
-    assert!(flat.problem.is_none());
-}
-
-#[test]
-fn approved_null_or_missing_is_pending() {
-    let sets: Vec<ParsedSet> = julia_sets().iter().map(parse_set).collect();
-    assert!(!sets[0].pending());
-    assert!(sets[2].pending(), "approved: null");
-    assert!(parse_set(&json!({"interval": 1})).pending(), "approved missing");
-    assert!(parse_set(&json!({"interval": 1, "approved": ""})).pending());
-    assert!(parse_set(&json!({"interval": 1, "approved": false})).pending());
-    assert!(!parse_set(&json!({"interval": 1, "approved": true})).pending());
-}
-
-#[test]
-fn interval_forms() {
-    let days = |v: Value| parse_interval(&v);
-    // Integer weeks, as numbers and numeric strings.
-    assert_eq!(days(json!(1)), Some(7));
-    assert_eq!(days(json!(2)), Some(14));
-    assert_eq!(days(json!("1")), Some(7));
-    assert_eq!(days(json!("2")), Some(14));
-    assert_eq!(days(json!(2.0)), Some(14));
-    // Seconds.
-    assert_eq!(days(json!(604800)), Some(7));
-    assert_eq!(days(json!("1209600")), Some(14));
-    // ISO-8601 durations.
-    assert_eq!(days(json!("P1W")), Some(7));
-    assert_eq!(days(json!("P2W")), Some(14));
-    assert_eq!(days(json!("p7d")), Some(7));
-    assert_eq!(days(json!("P14D")), Some(14));
-    // Words.
-    for (text, want) in [
-        ("weekly", 7),
-        ("Weekly", 7),
-        ("week", 7),
-        ("every week", 7),
-        ("Every Week", 7),
-        ("1 week", 7),
-        ("every 1 week", 7),
-        ("biweekly", 14),
-        ("bi-weekly", 14),
-        ("fortnightly", 14),
-        ("every other week", 14),
-        ("every two weeks", 14),
-        ("every 2 weeks", 14),
-        ("2 weeks", 14),
-        ("every three weeks", 21),
-        ("daily", 1),
-        ("every day", 1),
-        // Python timedelta text.
-        ("7 days, 0:00:00", 7),
-        ("14 days", 14),
-    ] {
-        assert_eq!(days(json!(text)), Some(want), "{text}");
-    }
-    // RRULE-like.
-    assert_eq!(days(json!("FREQ=WEEKLY")), Some(7));
-    assert_eq!(days(json!("FREQ=WEEKLY;INTERVAL=2")), Some(14));
-    assert_eq!(days(json!("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU")), Some(14));
-    assert_eq!(days(json!("FREQ=DAILY;INTERVAL=7")), Some(7));
-    // Not understood — never guessed.
-    for bad in [
-        json!(null),
-        json!(""),
-        json!(0),
-        json!(7), // 7 weeks or 7 days?
-        json!(-1),
-        json!("monthly"),
-        json!("every month"),
-        json!("FREQ=MONTHLY"),
-        json!("FREQ=WEEKLY;INTERVAL=0"),
-        json!("P1M"),
-        json!("whenever"),
-        json!(true),
-        json!({"weeks": 1}),
-    ] {
-        assert_eq!(days(bad.clone()), None, "{bad}");
-    }
-}
-
+// ---------- timestamps ----------
 #[test]
 fn parse_local_accepts_sling_timestamp_shapes() {
     let want = d("2026-11-03").and_hms_opt(9, 45, 0).unwrap();
@@ -220,278 +51,6 @@ fn leave_days_are_counted_within_the_month() {
     assert_eq!(n("2026-11-28T00:00:00-06:00", "2026-12-05T23:59:59-06:00"), 3, "clipped to the month");
     assert_eq!(n("2026-10-28T00:00:00-05:00", "2026-11-02T23:59:59-06:00"), 2);
     assert_eq!(n("nope", "2026-11-02T23:59:59-06:00"), 0);
-}
-
-// ---------- expansion ----------
-
-#[test]
-fn weekly_set_recurs_forever_on_its_weekday() {
-    let set = parse_set(&julia_sets()[0]);
-    assert_eq!(
-        occurrences(&set, "2026-11"),
-        ["2026-11-03 09:45→10:45", "2026-11-10 09:45→10:45", "2026-11-17 09:45→10:45", "2026-11-24 09:45→10:45"]
-    );
-    // until: null = forever.
-    assert_eq!(occurrences(&set, "2031-06").len(), 4);
-    // Nothing before the set starts.
-    assert!(occurrences(&set, "2026-08").is_empty());
-    // The first occurrence is the entry itself.
-    assert_eq!(occurrences(&set, "2026-09")[0], "2026-09-01 09:45→10:45");
-}
-
-#[test]
-fn until_is_inclusive_and_start_is_respected() {
-    let set = parse_set(&json!({
-        "interval": "P1W",
-        "start": "2026-11-10T00:00:00-06:00",
-        "until": "2026-11-17T00:00:00-06:00",
-        "availabilities": [{"dtstart": "2026-10-06T09:45:00-05:00", "dtend": "2026-10-06T10:45:00-05:00"}]
-    }));
-    // The entry sits before `start`: occurrences only from `start` on, and
-    // the `until` date itself still counts (blocked is the safer reading).
-    assert_eq!(occurrences(&set, "2026-11"), ["2026-11-10 09:45→10:45", "2026-11-17 09:45→10:45"]);
-    assert!(occurrences(&set, "2026-10").is_empty());
-    assert!(occurrences(&set, "2026-12").is_empty());
-}
-
-#[test]
-fn biweekly_keeps_the_parity_of_its_start() {
-    let set = parse_set(&julia_sets()[1]);
-    // Anchored on Thu Sep 3: Sep 3, 17 · Oct 1, 15, 29 · Nov 12, 26.
-    assert_eq!(occurrences(&set, "2026-09"), ["2026-09-03 17:30→18:30", "2026-09-17 17:30→18:30"]);
-    assert_eq!(
-        occurrences(&set, "2026-10"),
-        ["2026-10-01 17:30→18:30", "2026-10-15 17:30→18:30", "2026-10-29 17:30→18:30"]
-    );
-    assert_eq!(occurrences(&set, "2026-11"), ["2026-11-12 17:30→18:30", "2026-11-26 17:30→18:30"]);
-    // The opposite parity never appears.
-    let other_week = parse_set(&json!({
-        "interval": "every two weeks",
-        "start": "2026-09-10T00:00:00-05:00",
-        "availabilities": [{"dtstart": "2026-09-10T17:30:00-05:00", "dtend": "2026-09-10T18:30:00-05:00"}]
-    }));
-    assert_eq!(occurrences(&other_week, "2026-11"), ["2026-11-05 17:30→18:30", "2026-11-19 17:30→18:30"]);
-}
-
-#[test]
-fn two_week_cycle_with_entries_in_both_weeks() {
-    // Week A: Monday; week B: Wednesday of the following week.
-    let set = parse_set(&json!({
-        "interval": "P2W",
-        "start": "2026-11-02T00:00:00-06:00",
-        "availabilities": [
-            {"dtstart": "2026-11-02T06:00:00-06:00", "dtend": "2026-11-02T07:00:00-06:00"},
-            {"dtstart": "2026-11-11T06:00:00-06:00", "dtend": "2026-11-11T07:00:00-06:00"}
-        ]
-    }));
-    assert_eq!(
-        occurrences(&set, "2026-11"),
-        ["2026-11-02 06:00→07:00", "2026-11-11 06:00→07:00", "2026-11-16 06:00→07:00", "2026-11-25 06:00→07:00", "2026-11-30 06:00→07:00"]
-    );
-}
-
-#[test]
-fn full_day_covers_the_whole_local_day() {
-    let set = parse_set(&julia_sets()[2]);
-    // Sundays through Nov 15 (until). Midnight to midnight.
-    assert_eq!(
-        occurrences(&set, "2026-11"),
-        ["2026-11-01 00:00→11-02 00:00", "2026-11-08 00:00→11-09 00:00", "2026-11-15 00:00→11-16 00:00"]
-    );
-    // dtend forms: same instant, next midnight, and a missing dtend.
-    for entry in [
-        json!({"dtstart": "2026-11-04T09:00:00-06:00", "dtend": "2026-11-04T09:00:00-06:00", "fullDay": true}),
-        json!({"dtstart": "2026-11-04T00:00:00-06:00", "dtend": "2026-11-05T00:00:00-06:00", "fullDay": true}),
-        json!({"dtstart": "2026-11-04", "fullDay": true}),
-    ] {
-        let s = parse_set(&json!({"interval": 1, "availabilities": [entry]}));
-        assert!(s.problem.is_none(), "{:?}", s.problem);
-        assert_eq!(occurrences(&s, "2026-11")[0], "2026-11-04 00:00→11-05 00:00");
-    }
-    // A two-day full-day entry.
-    let two = parse_set(&json!({"interval": 1, "availabilities": [
-        {"dtstart": "2026-11-06T00:00:00-06:00", "dtend": "2026-11-07T23:59:59-06:00", "fullDay": true}]}));
-    assert_eq!(occurrences(&two, "2026-11")[0], "2026-11-06 00:00→11-08 00:00");
-}
-
-#[test]
-fn wall_clock_time_survives_dst_changes() {
-    let utc = |ndt: NaiveDateTime| studio_local(ndt).with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%MZ").to_string();
-    let tuesdays = parse_set(&julia_sets()[0]);
-
-    // Fall back: Sun Nov 1 2026. 9:45 stays 9:45; the UTC instant moves.
-    let (f, n) = month("2026-10");
-    let oct = expand_set(&tuesdays, f, n);
-    assert_eq!(utc(oct.last().unwrap().0), "2026-10-27T14:45Z"); // CDT
-    let (f, n) = month("2026-11");
-    let nov = expand_set(&tuesdays, f, n);
-    assert_eq!(utc(nov[0].0), "2026-11-03T15:45Z"); // CST
-    assert_eq!(nov[0].0.format("%H:%M").to_string(), "09:45");
-
-    // Spring forward: Sun Mar 14 2027.
-    let (f, n) = month("2027-03");
-    let mar: Vec<String> = expand_set(&tuesdays, f, n).into_iter().map(|(s, _)| utc(s)).collect();
-    assert_eq!(
-        mar,
-        ["2027-03-02T15:45Z", "2027-03-09T15:45Z", "2027-03-16T14:45Z", "2027-03-23T14:45Z", "2027-03-30T14:45Z"]
-    );
-
-    // On the change days themselves (Sunday classes), and a full-day block
-    // that is 25h / 23h long in absolute time.
-    let sundays = parse_set(&json!({"interval": "weekly", "availabilities": [
-        {"dtstart": "2026-10-25T09:45:00-05:00", "dtend": "2026-10-25T10:45:00-05:00"},
-        {"dtstart": "2026-10-25T00:00:00-05:00", "dtend": "2026-10-25T23:59:59-05:00", "fullDay": true}]}));
-    let (f, n) = month("2026-11");
-    let nov = expand_set(&sundays, f, n);
-    let (day_s, day_e) = nov[0];
-    assert_eq!((utc(day_s), utc(day_e)), ("2026-11-01T05:00Z".to_string(), "2026-11-02T06:00Z".to_string()));
-    assert_eq!((studio_local(day_e) - studio_local(day_s)).num_hours(), 25);
-    assert_eq!(utc(nov[1].0), "2026-11-01T15:45Z");
-    let (f, n) = month("2027-03");
-    let mar = expand_set(&sundays, f, n);
-    let on_14 = |x: &&(NaiveDateTime, NaiveDateTime)| x.0.date() == d("2027-03-14");
-    let day = mar.iter().filter(on_14).min().unwrap();
-    assert_eq!((studio_local(day.1) - studio_local(day.0)).num_hours(), 23);
-    let class = mar.iter().filter(on_14).max().unwrap();
-    assert_eq!(utc(class.0), "2027-03-14T14:45Z");
-}
-
-#[test]
-fn unrecognized_interval_is_recorded_not_dropped() {
-    let set = parse_set(&julia_sets()[3]);
-    assert_eq!(set.interval_days, None);
-    assert_eq!(set.interval_raw.as_deref(), Some("\"monthly on the first Monday\""));
-    assert!(set.problem.as_deref().unwrap().contains("not understood"), "{:?}", set.problem);
-    assert!(occurrences(&set, "2026-11").is_empty());
-
-    // Other problems are recorded too; readable entries still expand.
-    let partial = parse_set(&json!({"interval": 1, "availabilities": [
-        {"dtstart": "2026-11-03T09:45:00-06:00", "dtend": "2026-11-03T10:45:00-06:00"},
-        {"dtstart": "tuesday-ish", "dtend": "later"},
-        {"summary": "no times"}]}));
-    let problem = partial.problem.clone().unwrap();
-    assert!(problem.contains("1 entry without dtstart/dtend") && problem.contains("unreadable times"), "{problem}");
-    assert_eq!(occurrences(&partial, "2026-11").len(), 4);
-    let bad_until = parse_set(&json!({"interval": 1, "until": "someday", "availabilities": [
-        {"dtstart": "2026-11-03T09:45:00-06:00", "dtend": "2026-11-03T10:45:00-06:00"}]}));
-    assert!(bad_until.problem.as_deref().unwrap().contains("until"));
-    assert!(occurrences(&bad_until, "2026-11").is_empty(), "an unreadable bound is not guessed");
-
-    assert_eq!(uninterpreted_warning(0), None);
-    assert_eq!(
-        uninterpreted_warning(2).unwrap(),
-        "2 availability sets from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file"
-    );
-    assert!(uninterpreted_warning(1).unwrap().starts_with("1 availability set from Sling couldn't"));
-}
-
-// ---------- storage + blocks ----------
-
-#[test]
-fn stores_sets_raw_and_replaces_per_user() {
-    let conn = db();
-    assert_eq!(replace_sets_for_user(&conn, JULIA as i64, &julia_sets()).unwrap(), 4);
-    let alex = unwrap_sets(&fixture()["user_alex_wrapped"]).unwrap();
-    assert_eq!(replace_sets_for_user(&conn, ALEX as i64, &alex).unwrap(), 1);
-
-    type Row = (Option<String>, Option<String>, Option<i32>, bool, Option<String>, Option<String>);
-    let rows: Vec<Row> = conn
-        .prepare(
-            "SELECT sling_set_id, interval_raw, interval_days, pending, until, problem
-             FROM sling_availability_sets WHERE sling_user_id = ? ORDER BY id",
-        )
-        .unwrap()
-        .query_map([JULIA], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(rows[0], (Some("9001".into()), Some("\"P1W\"".into()), Some(7), false, None, None));
-    assert_eq!(rows[1].2, Some(14));
-    assert_eq!((rows[2].2, rows[2].3), (Some(7), true));
-    assert_eq!(rows[2].4.as_deref(), Some("2026-11-15T23:59:59-06:00"));
-    assert_eq!(rows[3].2, None);
-    assert!(rows[3].5.is_some());
-    // The raw JSON round-trips.
-    let raw: String = conn
-        .query_row("SELECT raw_json FROM sling_availability_sets WHERE sling_set_id = '9001'", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), julia_sets()[0]);
-
-    // A second pull replaces Julia's sets and leaves Alex's alone; a set
-    // naming another user is not stored under this one.
-    let mut next = vec![julia_sets()[0].clone()];
-    next.push(alex[0].clone());
-    assert_eq!(replace_sets_for_user(&conn, JULIA as i64, &next).unwrap(), 1);
-    let count = |uid: i32| -> i64 {
-        conn.query_row("SELECT count(*) FROM sling_availability_sets WHERE sling_user_id = ?", [uid], |r| r.get(0))
-            .unwrap()
-    };
-    assert_eq!((count(JULIA), count(ALEX)), (1, 1));
-    // An empty response clears them.
-    replace_sets_for_user(&conn, JULIA as i64, &[]).unwrap();
-    assert_eq!(count(JULIA), 0);
-}
-
-#[test]
-fn writes_blocks_with_sources_and_dedupes_against_calendar() {
-    let conn = db();
-    replace_sets_for_user(&conn, JULIA as i64, &julia_sets()).unwrap();
-    // The calendar already carries Julia's Nov 10 Tuesday block (same
-    // instants, written as UTC) and an unrelated leave.
-    conn.execute_batch(
-        "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at) VALUES
-           (1930004, 'availability', TIMESTAMPTZ '2026-11-10 15:45:00+00', TIMESTAMPTZ '2026-11-10 16:45:00+00'),
-           (1930002, 'leave', TIMESTAMPTZ '2026-11-20 00:00:00-06', TIMESTAMPTZ '2026-11-22 00:00:00-06');",
-    )
-    .unwrap();
-    let stats = write_set_blocks(&conn, "2026-11", &roster()).unwrap();
-    // Tuesdays 3/10/17/24 (10th is a duplicate) + Thursdays 12/26 = 5
-    // approved; Sundays 1/8/15 = 3 pending; the monthly set = 0.
-    assert_eq!(stats, SetBlockStats { written: 5, pending: 3, duplicates: 1 });
-
-    let all = blocks(&conn);
-    let julia: Vec<(&str, &str)> =
-        all.iter().filter(|b| b.0 == JULIA).map(|b| (b.1.as_str(), b.2.as_str())).collect();
-    assert_eq!(
-        julia,
-        [
-            ("availability_set_pending", "2026-11-01T05:00:00Z"),
-            ("availability_set", "2026-11-03T15:45:00Z"),
-            ("availability_set_pending", "2026-11-08T06:00:00Z"),
-            ("availability", "2026-11-10T15:45:00Z"),
-            ("availability_set", "2026-11-12T23:30:00Z"),
-            ("availability_set_pending", "2026-11-15T06:00:00Z"),
-            ("availability_set", "2026-11-17T15:45:00Z"),
-            ("availability_set", "2026-11-24T15:45:00Z"),
-            ("availability_set", "2026-11-26T23:30:00Z"),
-        ]
-    );
-    // Julia's Tuesday 9:45 block exists every week of the month.
-    assert_eq!(all.iter().filter(|b| b.0 == JULIA && b.2.ends_with("T15:45:00Z")).count(), 4);
-
-    // Running it again adds nothing (every occurrence is now a duplicate).
-    let again = write_set_blocks(&conn, "2026-11", &roster()).unwrap();
-    assert_eq!((again.written, again.pending, again.duplicates), (0, 0, 9));
-    assert_eq!(blocks(&conn).len(), all.len());
-
-    // A teacher who is not on the roster gets no blocks.
-    let only_alex: HashSet<i32> = [ALEX].into_iter().collect();
-    assert_eq!(write_set_blocks(&conn, "2026-12", &only_alex).unwrap(), SetBlockStats::default());
-}
-
-#[test]
-fn uninterpreted_sets_surface_as_issues() {
-    let conn = db();
-    replace_sets_for_user(&conn, JULIA as i64, &julia_sets()).unwrap();
-    let issues = set_issues(&conn).unwrap();
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].teacher_name.as_deref(), Some("Julia Stone"));
-    assert_eq!(issues[0].name.as_deref(), Some("First Monday"));
-    assert_eq!(issues[0].interval_raw.as_deref(), Some("\"monthly on the first Monday\""));
-    let month = compute_month(&conn, "2026-11").unwrap();
-    assert_eq!((month.set_count, month.pending_set_count), (4, 1));
-    assert_eq!(month.warnings.len(), 1);
-    assert!(month.warnings[0].starts_with("1 availability set from Sling couldn't be interpreted"));
 }
 
 // ---------- studio hours ----------
@@ -641,12 +200,22 @@ fn windows_are_hours_minus_blocks() {
     assert!(!slot_in_windows(&w, JULIA, "2026-11-03", "09:00", "10:00"), "straddles a block edge");
 }
 
-/// November 2026 with Julia's recurring sets, a calendar block, a leave and
-/// a month of class slots (including one outside studio hours).
+/// November 2026 with Julia's recurring calendar blocks (Tuesday mornings,
+/// every other Thursday evening, full-day Sundays through Nov 15, as the
+/// calendar feed expands them per date), calendar blocks, a leave and a
+/// month of class slots (including one outside studio hours).
 fn november(conn: &duckdb::Connection) {
-    replace_sets_for_user(conn, JULIA as i64, &julia_sets()).unwrap();
     conn.execute_batch(
         "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at) VALUES
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-01 00:00:00-05', TIMESTAMPTZ '2026-11-02 00:00:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-03 09:45:00-06', TIMESTAMPTZ '2026-11-03 10:45:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-08 00:00:00-06', TIMESTAMPTZ '2026-11-09 00:00:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-10 09:45:00-06', TIMESTAMPTZ '2026-11-10 10:45:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-12 17:30:00-06', TIMESTAMPTZ '2026-11-12 18:30:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-15 00:00:00-06', TIMESTAMPTZ '2026-11-16 00:00:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-17 09:45:00-06', TIMESTAMPTZ '2026-11-17 10:45:00-06'),
+           (1930004, 'availability', TIMESTAMPTZ '2026-11-24 09:45:00-06', TIMESTAMPTZ '2026-11-24 10:45:00-06'),
+           (1930004, 'availability_set_pending', TIMESTAMPTZ '2026-11-26 17:30:00-06', TIMESTAMPTZ '2026-11-26 18:30:00-06'),
            (1930002, 'leave', TIMESTAMPTZ '2026-10-30 00:00:00-05', TIMESTAMPTZ '2026-11-03 23:59:59-06'),
            (1930001, 'availability', TIMESTAMPTZ '2026-11-04 08:45:00-06', TIMESTAMPTZ '2026-11-04 09:45:00-06'),
            (1930001, 'availability', TIMESTAMPTZ '2026-11-05 10:15:00-06', TIMESTAMPTZ '2026-11-05 12:00:00-06'),
@@ -655,7 +224,6 @@ fn november(conn: &duckdb::Connection) {
            VALUES (1, '2026-11', 'v9', '{}', TRUE);",
     )
     .unwrap();
-    write_set_blocks(conn, "2026-11", &roster()).unwrap();
     let mut day = d("2026-11-01");
     while day < d("2026-12-01") {
         for (start, end) in [("05:45", "06:45"), ("09:45", "10:45"), ("17:30", "18:30")] {
@@ -704,7 +272,7 @@ fn month_windows_with_and_without_studio_hours() {
         month.windows.iter().filter(|w| w.sling_user_id == uid && w.date == date).map(|w| (w.start.clone(), w.end.clone())).collect()
     };
     let w = |a: &str, b: &str| (a.to_string(), b.to_string());
-    // Julia: recurring Tuesday 9:45 block; pending full-day Sundays.
+    // Julia: recurring Tuesday 9:45 block; full-day Sundays.
     assert_eq!(of(JULIA, "2026-11-03"), [w("05:30", "09:45"), w("10:45", "19:30")]);
     assert_eq!(of(JULIA, "2026-11-10"), [w("05:30", "09:45"), w("10:45", "19:30")]);
     assert!(of(JULIA, "2026-11-08").is_empty());
@@ -810,6 +378,8 @@ fn editor_summary_lists_only_limited_days() {
 fn propose_sees_every_source_as_blocked() {
     assert_eq!(propose_event_type("leave"), "leave");
     assert_eq!(propose_event_type("availability"), "availability");
-    assert_eq!(propose_event_type(SOURCE_SET), "availability");
+    // Legacy set-derived rows (no longer written) and unknown sources.
+    assert_eq!(propose_event_type("availability_set"), "availability");
     assert_eq!(propose_event_type(SOURCE_SET_PENDING), "availability");
+    assert_eq!(propose_event_type("something_new"), "availability");
 }

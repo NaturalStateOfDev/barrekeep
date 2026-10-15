@@ -1,12 +1,14 @@
-// Teacher availability beyond the one-off calendar blocks:
+// Teacher availability: blocks, studio hours and computed windows.
 //
-//   1. Recurring availability SETS (Sling `GET /availability?userId=…`).
-//      Teachers enter their standing unavailability as a set: a list of
-//      (weekday, time range) entries that repeats every N weeks from `start`
-//      until `until`. The calendar feed does not reliably carry these, so
-//      they are pulled per teacher, stored raw (`sling_availability_sets`)
-//      and expanded here into concrete `availability_blocks` rows for a month
-//      (source 'availability_set' / 'availability_set_pending').
+//   1. Blocks (`availability_blocks`) come from the Sling calendar feed only,
+//      written by commands::write_month_events: type `availability` (BLOCKED
+//      time — Sling's naming is backward, see CLAUDE.md) and `leave`. The
+//      feed already carries recurring unavailability expanded per date (each
+//      occurrence has an `rrule` and an id like "5207099321:2026-10-07").
+//      Sling's `GET /availability?userId=…` "availability sets" endpoint
+//      returns only set headers with no times or durations, so it is not
+//      used (its `sling_availability_sets` table from migration 0014 stays,
+//      unused — migrations are forward-only).
 //   2. Studio hours (`studio_hours`) — per-weekday open/close.
 //   3. Computed AVAILABLE windows (`teacher_availability_windows`): each
 //      date's studio hours, widened to any class slot outside them, minus
@@ -16,14 +18,7 @@
 //      Claude editor. `windows_and_blocks_agree_for_every_slot` pins the two
 //      together.
 //
-// Sling's naming is backward: an "availability" entry is time the teacher is
-// UNAVAILABLE (CLAUDE.md). Every source in availability_blocks is blocked
-// time.
-//
-// The `interval` wire format of a set is not documented beyond "recurrence
-// interval i.e. every week, every two weeks", so `parse_interval` accepts
-// every plausible spelling and anything else is kept as an UNINTERPRETED set:
-// no blocks, a stored `problem`, and a visible warning — never a silent drop.
+// Every source in availability_blocks is blocked time.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -33,7 +28,7 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::db::Db;
-use crate::sling::{studio_iso, studio_local, STUDIO_TZ};
+use crate::sling::{studio_local, STUDIO_TZ};
 
 fn err(e: impl std::fmt::Display) -> String {
     format!("{e:#}")
@@ -43,222 +38,24 @@ fn err(e: impl std::fmt::Display) -> String {
 // Block sources
 // ============================================================
 
-// `availability` — one-off blocked time from the calendar feed (the Sling
-// event type, stored verbatim by commands::write_month_events).
+// `availability` — blocked time from the calendar feed (the Sling event
+// type, stored verbatim by commands::write_month_events), one-off or an
+// occurrence of a recurring entry.
 /// Approved time off from the calendar feed (Sling type `leave`).
 pub const SOURCE_LEAVE: &str = "leave";
-/// An occurrence of an approved recurring availability set.
-pub const SOURCE_SET: &str = "availability_set";
-/// An occurrence of a set that has no `approved` timestamp yet. Still
-/// blocked — scheduling over a pending request is the worse mistake.
+/// Legacy: blocks expanded from a pending availability set (no longer
+/// written; old rows vanish when their month is re-pulled). Still blocked.
 pub const SOURCE_SET_PENDING: &str = "availability_set_pending";
 
 /// The event `type` propose.py sees for a block source. It only knows
-/// 'leave' and 'availability' (both blocked); the set-derived sources are
-/// presented as 'availability' so every script version — the baseline and
-/// any adopted copy — treats them as blocked without changing a line.
+/// 'leave' and 'availability' (both blocked); any other (legacy or unknown)
+/// source is presented as 'availability' so every script version treats it
+/// as blocked.
 pub fn propose_event_type(source: &str) -> &'static str {
     if source == SOURCE_LEAVE {
         "leave"
     } else {
         "availability"
-    }
-}
-
-// ============================================================
-// Parsing availability sets
-// ============================================================
-
-/// One (weekday, time range) entry of a set, as Sling sent it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SetEntry {
-    pub dtstart: String,
-    pub dtend: String,
-    pub full_day: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ParsedSet {
-    /// Sling's set id as text (may be absent).
-    pub set_id: Option<String>,
-    /// The owning user when the set names one.
-    pub user_id: Option<i64>,
-    pub name: Option<String>,
-    pub start: Option<String>,
-    pub until: Option<String>,
-    /// `interval` exactly as sent, as JSON text (`"P1W"`, `2`, `null`).
-    pub interval_raw: Option<String>,
-    /// Interpreted recurrence step in days; None = not understood.
-    pub interval_days: Option<u32>,
-    pub approved: Option<String>,
-    pub entries: Vec<SetEntry>,
-    /// Why the set can't be (fully) expanded, if anything is wrong.
-    pub problem: Option<String>,
-}
-
-impl ParsedSet {
-    pub fn pending(&self) -> bool {
-        self.approved.is_none()
-    }
-}
-
-fn json_text(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-fn json_i64(v: &Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-}
-
-fn looks_like_set(o: &serde_json::Map<String, Value>) -> bool {
-    o.get("availabilities").is_some_and(Value::is_array)
-        && ["interval", "start", "until", "user", "approved", "name"].iter().any(|k| o.contains_key(*k))
-}
-
-/// The list of raw sets inside an `/availability` response: a bare array
-/// (the documented shape), a single set object, or an array wrapped in an
-/// object under a conventional key. None = unrecognized shape.
-pub fn unwrap_sets(doc: &Value) -> Option<Vec<Value>> {
-    match doc {
-        Value::Array(a) => Some(a.clone()),
-        Value::Object(o) => {
-            if looks_like_set(o) {
-                return Some(vec![doc.clone()]);
-            }
-            for key in ["availabilitySets", "availability_sets", "sets", "availability", "data", "results", "items", "rules"] {
-                match o.get(key) {
-                    Some(Value::Array(a)) => return Some(a.clone()),
-                    Some(inner @ Value::Object(_)) => {
-                        if let Some(found) = unwrap_sets(inner) {
-                            return Some(found);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-const NUMBER_WORDS: [(&str, u32); 6] =
-    [("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6)];
-
-fn count_word(s: &str) -> Option<u32> {
-    s.parse::<u32>().ok().or_else(|| NUMBER_WORDS.iter().find(|(w, _)| *w == s).map(|(_, n)| *n))
-}
-
-/// A bare number: 1–6 = that many weeks; a multiple of 604,800 = seconds.
-/// Anything else (7? 14? weeks or days?) is ambiguous and not guessed.
-fn interval_from_number(n: i64) -> Option<u32> {
-    const WEEK_SECS: i64 = 604_800;
-    if (1..=6).contains(&n) {
-        Some(n as u32 * 7)
-    } else if n >= WEEK_SECS && n % WEEK_SECS == 0 && n / WEEK_SECS <= 52 {
-        Some((n / WEEK_SECS) as u32 * 7)
-    } else {
-        None
-    }
-}
-
-/// "<n> week(s)" / "<n> day(s)" → days.
-fn interval_from_unit_phrase(s: &str) -> Option<u32> {
-    let mut parts = s.split_whitespace();
-    let (first, second, third) = (parts.next()?, parts.next(), parts.next());
-    if third.is_some() {
-        return None;
-    }
-    let (count, unit) = match second {
-        Some(unit) => (count_word(first)?, unit),
-        None => (1, first),
-    };
-    if count == 0 {
-        return None;
-    }
-    match unit {
-        "week" | "weeks" | "wk" | "wks" | "w" => Some(count * 7),
-        "day" | "days" | "d" => Some(count),
-        _ => None,
-    }
-}
-
-/// Interpret a set's `interval` as a recurrence step in days (7 = weekly,
-/// 14 = every two weeks). Accepted spellings:
-///   - numbers / numeric strings: 1–6 = weeks; multiples of 604800 = seconds
-///   - ISO-8601 durations: `P1W`, `P2W`, `P7D`, `P14D`
-///   - RRULE fragments: `FREQ=WEEKLY`, `FREQ=WEEKLY;INTERVAL=2`,
-///     `RRULE:FREQ=DAILY;INTERVAL=7`
-///   - words: `weekly`, `every week`, `biweekly`, `fortnightly`, `every other
-///     week`, `every two weeks`, `every 2 weeks`, `2 weeks`, `daily`
-///   - Python timedelta text: `7 days, 0:00:00`, `14 days`
-///
-/// None for anything else (monthly, yearly, null, free text): the caller
-/// records the set as uninterpreted instead of guessing.
-pub fn parse_interval(v: &Value) -> Option<u32> {
-    match v {
-        Value::Number(n) => {
-            let i = n.as_i64().or_else(|| n.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))?;
-            interval_from_number(i)
-        }
-        Value::String(raw) => {
-            let s = raw.trim().to_ascii_lowercase();
-            if s.is_empty() {
-                return None;
-            }
-            if let Ok(n) = s.parse::<i64>() {
-                return interval_from_number(n);
-            }
-            // RRULE
-            if s.contains("freq=") {
-                let body = s.strip_prefix("rrule:").unwrap_or(&s);
-                let mut freq = None;
-                let mut every = 1u32;
-                for part in body.split(';') {
-                    match part.split_once('=') {
-                        Some(("freq", f)) => freq = Some(f.trim().to_string()),
-                        Some(("interval", n)) => every = n.trim().parse().ok().filter(|n| *n > 0)?,
-                        _ => {}
-                    }
-                }
-                return match freq.as_deref() {
-                    Some("weekly") => Some(every * 7),
-                    Some("daily") => Some(every),
-                    _ => None,
-                };
-            }
-            // ISO-8601 duration: PnW / PnD.
-            if let Some(body) = s.strip_prefix('p') {
-                if let Some(n) = body.strip_suffix('w').and_then(|n| n.parse::<u32>().ok()) {
-                    return (n > 0).then_some(n * 7);
-                }
-                if let Some(n) = body.strip_suffix('d').and_then(|n| n.parse::<u32>().ok()) {
-                    return (n > 0).then_some(n);
-                }
-                // fall through: "per week" etc. are not expected, but harmless
-            }
-            // Python timedelta text: "7 days, 0:00:00".
-            let s = match s.split_once(',') {
-                Some((head, tail)) if tail.trim().chars().all(|c| c == '0' || c == ':') => head.trim().to_string(),
-                _ => s,
-            };
-            let s = s.replace(['-', '_'], " ");
-            let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-            let core = s.strip_prefix("every ").or_else(|| s.strip_prefix("each ")).unwrap_or(&s);
-            match core {
-                "weekly" => Some(7),
-                "daily" => Some(1),
-                "biweekly" | "bi weekly" | "fortnight" | "fortnightly" | "other week" | "second week"
-                | "2nd week" => Some(14),
-                "other day" | "second day" | "2nd day" => Some(2),
-                other => interval_from_unit_phrase(other),
-            }
-        }
-        _ => None,
     }
 }
 
@@ -283,217 +80,6 @@ pub fn parse_local(s: &str) -> Option<NaiveDateTime> {
     NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok().map(|d| d.and_time(NaiveTime::MIN))
 }
 
-/// Parse one raw set defensively: ids may be strings or numbers, fields may
-/// be missing. Never fails — whatever is wrong ends up in `problem`.
-pub fn parse_set(raw: &Value) -> ParsedSet {
-    let text = |key: &str| raw.get(key).and_then(json_text);
-    let user_id = match raw.get("user") {
-        Some(Value::Object(u)) => u.get("id").and_then(json_i64),
-        Some(v) => json_i64(v),
-        None => None,
-    }
-    .or_else(|| raw.get("userId").and_then(json_i64));
-    let interval_value = raw.get("interval").filter(|v| !v.is_null()).or_else(|| raw.get("rrule"));
-    let interval_raw = interval_value.map(|v| v.to_string());
-    let interval_days = interval_value.and_then(parse_interval);
-    let approved = match raw.get("approved") {
-        Some(Value::Bool(true)) => Some("true".to_string()),
-        Some(v) => json_text(v),
-        None => None,
-    };
-    let mut bad_entries = 0usize;
-    let entries: Vec<SetEntry> = raw
-        .get("availabilities")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|it| {
-                    let get = |k: &str| it.get(k).and_then(|v| v.as_str()).map(str::to_string);
-                    let full_day = ["fullDay", "full_day", "fullday"]
-                        .iter()
-                        .any(|k| it.get(*k).and_then(Value::as_bool).unwrap_or(false));
-                    match (get("dtstart"), get("dtend")) {
-                        (Some(dtstart), Some(dtend)) => Some(SetEntry { dtstart, dtend, full_day }),
-                        // A full-day entry needs only its start date.
-                        (Some(dtstart), None) if full_day => {
-                            Some(SetEntry { dtend: dtstart.clone(), dtstart, full_day })
-                        }
-                        _ => {
-                            bad_entries += 1;
-                            None
-                        }
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let start = text("start");
-    let until = text("until");
-    let mut problems: Vec<String> = Vec::new();
-    if interval_days.is_none() {
-        problems.push(format!(
-            "interval {} not understood",
-            interval_raw.as_deref().unwrap_or("missing")
-        ));
-    }
-    for (label, value) in [("start", &start), ("until", &until)] {
-        if let Some(v) = value {
-            if parse_local(v).is_none() {
-                problems.push(format!("{label} \"{v}\" is not a date"));
-            }
-        }
-    }
-    if bad_entries > 0 {
-        problems.push(format!("{bad_entries} entr{} without dtstart/dtend", if bad_entries == 1 { "y" } else { "ies" }));
-    }
-    let unreadable = entries
-        .iter()
-        .filter(|e| entry_span(e).is_none())
-        .count();
-    if unreadable > 0 {
-        problems.push(format!("{unreadable} entr{} with unreadable times", if unreadable == 1 { "y" } else { "ies" }));
-    }
-
-    ParsedSet {
-        set_id: raw.get("id").and_then(json_text),
-        user_id,
-        name: text("name"),
-        start,
-        until,
-        interval_raw,
-        interval_days,
-        approved,
-        entries,
-        problem: (!problems.is_empty()).then(|| problems.join("; ")),
-    }
-}
-
-/// The first occurrence of an entry as a studio-local (start, end). A
-/// full-day entry covers whole local days, midnight to midnight.
-fn entry_span(e: &SetEntry) -> Option<(NaiveDateTime, NaiveDateTime)> {
-    let start = parse_local(&e.dtstart)?;
-    let end = parse_local(&e.dtend)?;
-    if e.full_day {
-        let first = start.date();
-        // dtend may be the same instant, 23:59:59 that day, or the next
-        // midnight (exclusive) — all mean "through `first`".
-        let last = if end > start { (end - chrono::Duration::seconds(1)).date() } else { first };
-        let last = last.max(first);
-        Some((first.and_time(NaiveTime::MIN), last.succ_opt()?.and_time(NaiveTime::MIN)))
-    } else if end > start {
-        Some((start, end))
-    } else {
-        None
-    }
-}
-
-/// Every occurrence of `set` that STARTS on a date in `[first, next_first)`,
-/// as studio-local wall-clock (start, end) pairs.
-///
-/// Each entry repeats every `interval_days` from its OWN dtstart — so an
-/// every-two-weeks set keeps the parity of the week its entry sits in, and a
-/// set spanning both weeks of its cycle keeps both. Wall-clock times are
-/// preserved across DST changes (9:45 stays 9:45). Occurrences before the
-/// set's `start` date or after its `until` date (inclusive — the safer
-/// reading) are left out. An uninterpreted set yields nothing.
-pub fn expand_set(set: &ParsedSet, first: NaiveDate, next_first: NaiveDate) -> Vec<(NaiveDateTime, NaiveDateTime)> {
-    let Some(step) = set.interval_days.filter(|d| *d > 0).map(i64::from) else {
-        return Vec::new();
-    };
-    let bound = |v: &Option<String>| -> Result<Option<NaiveDate>, ()> {
-        match v {
-            None => Ok(None),
-            Some(s) => parse_local(s).map(|dt| Some(dt.date())).ok_or(()),
-        }
-    };
-    let (Ok(from), Ok(until)) = (bound(&set.start), bound(&set.until)) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in &set.entries {
-        let Some((start, end)) = entry_span(entry) else { continue };
-        let length = end - start;
-        let anchor = start.date();
-        // Smallest k >= 0 with anchor + k*step >= first.
-        let gap = (first - anchor).num_days();
-        let mut k = if gap <= 0 { 0 } else { (gap + step - 1) / step };
-        loop {
-            let Some(day) = anchor.checked_add_signed(chrono::Duration::days(k * step)) else { break };
-            if day >= next_first {
-                break;
-            }
-            k += 1;
-            if from.is_some_and(|f| day < f) || until.is_some_and(|u| day > u) {
-                continue;
-            }
-            let occ_start = day.and_time(start.time());
-            out.push((occ_start, occ_start + length));
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-// ============================================================
-// Storing sets + writing their blocks
-// ============================================================
-
-/// Replace one teacher's stored sets with what Sling just returned (DELETE +
-/// INSERT, never UPDATE). Sets that name a different user are ignored — they
-/// arrive with their owner's request. Must run inside a transaction.
-pub fn replace_sets_for_user(conn: &duckdb::Connection, user_id: i64, raw_sets: &[Value]) -> Result<usize, String> {
-    conn.execute("DELETE FROM sling_availability_sets WHERE sling_user_id = ?", duckdb::params![user_id as i32])
-        .map_err(err)?;
-    let mut stored = 0usize;
-    for raw in raw_sets {
-        let set = parse_set(raw);
-        if set.user_id.is_some_and(|u| u != user_id) {
-            continue;
-        }
-        conn.execute(
-            "INSERT INTO sling_availability_sets
-                (sling_set_id, sling_user_id, name, starts_on, until, interval_raw, interval_days,
-                 approved_at, pending, availability_count, problem, raw_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            duckdb::params![
-                set.set_id,
-                user_id as i32,
-                set.name,
-                set.start,
-                set.until,
-                set.interval_raw,
-                set.interval_days.map(|d| d as i32),
-                set.approved,
-                set.pending(),
-                set.entries.len() as i32,
-                set.problem,
-                raw.to_string(),
-            ],
-        )
-        .map_err(err)?;
-        stored += 1;
-    }
-    Ok(stored)
-}
-
-/// Stored sets, re-parsed from their raw JSON (one code path for parsing).
-pub fn load_sets(conn: &duckdb::Connection) -> Result<Vec<(i32, ParsedSet)>, String> {
-    let rows: Vec<(i32, String)> = conn
-        .prepare("SELECT sling_user_id, raw_json FROM sling_availability_sets ORDER BY sling_user_id, id")
-        .map_err(err)?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(err)?
-        .collect::<Result<_, _>>()
-        .map_err(err)?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(uid, raw)| serde_json::from_str::<Value>(&raw).ok().map(|v| (uid, parse_set(&v))))
-        .collect())
-}
-
 /// How many calendar days of `target_month` a block from `dtstart` to
 /// `dtend` (Sling timestamps) touches, studio local. 0 if unreadable.
 pub fn days_in_month(dtstart: &str, dtend: &str, target_month: &str) -> i64 {
@@ -512,116 +98,6 @@ fn month_bounds(target_month: &str) -> Result<(NaiveDate, NaiveDate), String> {
         .map_err(|_| format!("bad target_month: {target_month}"))?;
     let next = first.checked_add_months(chrono::Months::new(1)).ok_or("invalid month")?;
     Ok((first, next))
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct SetBlockStats {
-    /// Blocks written from approved sets.
-    pub written: i64,
-    /// Blocks written from sets pending approval.
-    pub pending: i64,
-    /// Occurrences skipped because the calendar already supplied the
-    /// identical block (same teacher, start and end).
-    pub duplicates: i64,
-}
-
-/// Expand the stored sets into `availability_blocks` for one month. Call
-/// AFTER the month's calendar blocks are written (and its old blocks
-/// deleted): occurrences identical to an existing block are skipped. Only
-/// roster teachers get blocks (availability_blocks has an FK into teachers).
-/// Must run inside a transaction.
-pub fn write_set_blocks(
-    conn: &duckdb::Connection,
-    target_month: &str,
-    roster_ids: &HashSet<i32>,
-) -> Result<SetBlockStats, String> {
-    let (first, next) = month_bounds(target_month)?;
-    let (m_start, m_end) = crate::sling::month_range(target_month).map_err(err)?;
-    let mut seen: HashSet<(i32, i64, i64)> = conn
-        .prepare(
-            "SELECT sling_user_id, epoch_us(starts_at) // 1000000, epoch_us(ends_at) // 1000000
-             FROM availability_blocks
-             WHERE starts_at >= CAST(? AS TIMESTAMPTZ) AND starts_at <= CAST(? AS TIMESTAMPTZ)",
-        )
-        .map_err(err)?
-        .query_map(duckdb::params![&m_start, &m_end], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map_err(err)?
-        .collect::<Result<_, _>>()
-        .map_err(err)?;
-
-    let mut stats = SetBlockStats::default();
-    // Approved sets first, so an approved and a pending set describing the
-    // same block leave the approved label.
-    let mut sets = load_sets(conn)?;
-    sets.sort_by_key(|(_, s)| s.pending());
-    for (uid, set) in &sets {
-        if !roster_ids.contains(uid) {
-            continue;
-        }
-        let source = if set.pending() { SOURCE_SET_PENDING } else { SOURCE_SET };
-        for (start, end) in expand_set(set, first, next) {
-            let (s, e) = (studio_local(start), studio_local(end));
-            if !seen.insert((*uid, s.timestamp(), e.timestamp())) {
-                stats.duplicates += 1;
-                continue;
-            }
-            conn.execute(
-                "INSERT INTO availability_blocks (sling_user_id, source, starts_at, ends_at)
-                 VALUES (?, ?, CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ))",
-                duckdb::params![uid, source, studio_iso(start), studio_iso(end)],
-            )
-            .map_err(err)?;
-            if set.pending() {
-                stats.pending += 1;
-            } else {
-                stats.written += 1;
-            }
-        }
-    }
-    Ok(stats)
-}
-
-/// A stored set the app could not (fully) interpret.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct SetIssue {
-    pub sling_user_id: i32,
-    pub teacher_name: Option<String>,
-    pub name: Option<String>,
-    pub interval_raw: Option<String>,
-    pub problem: String,
-}
-
-pub fn set_issues(conn: &duckdb::Connection) -> Result<Vec<SetIssue>, String> {
-    conn.prepare(
-        "SELECT s.sling_user_id, t.display_name, s.name, s.interval_raw, s.problem
-         FROM sling_availability_sets s
-         LEFT JOIN teachers t ON t.sling_user_id = s.sling_user_id
-         WHERE s.problem IS NOT NULL
-         ORDER BY t.display_name, s.id",
-    )
-    .map_err(err)?
-    .query_map([], |r| {
-        Ok(SetIssue {
-            sling_user_id: r.get(0)?,
-            teacher_name: r.get(1)?,
-            name: r.get(2)?,
-            interval_raw: r.get(3)?,
-            problem: r.get(4)?,
-        })
-    })
-    .map_err(err)?
-    .collect::<Result<_, _>>()
-    .map_err(err)
-}
-
-/// The warning shown wherever availability is pulled or viewed.
-pub fn uninterpreted_warning(n: usize) -> Option<String> {
-    (n > 0).then(|| {
-        format!(
-            "{n} availability set{} from Sling couldn't be interpreted — schedule may miss unavailability; see raw pull file",
-            if n == 1 { "" } else { "s" }
-        )
-    })
 }
 
 // ============================================================
@@ -923,10 +399,6 @@ pub struct MonthAvailability {
     pub day_ranges: Vec<DayRange>,
     /// false = studio hours were never set; spans come from class slots.
     pub hours_set: bool,
-    pub set_count: i64,
-    pub pending_set_count: i64,
-    pub set_issues: Vec<SetIssue>,
-    pub warnings: Vec<String>,
 }
 
 fn load_month_blocks(conn: &duckdb::Connection, first: NaiveDate, next_first: NaiveDate) -> Result<Vec<BlockSpan>, String> {
@@ -969,24 +441,11 @@ pub fn compute_month(conn: &duckdb::Connection, target_month: &str) -> Result<Mo
     let blocks = load_month_blocks(conn, first, next)?;
     let windows = compute_windows(&teacher_ids, &ranges, &blocks);
 
-    let (set_count, pending_set_count): (i64, i64) = conn
-        .query_row(
-            "SELECT count(*), coalesce(sum(CASE WHEN pending THEN 1 ELSE 0 END), 0) FROM sling_availability_sets",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .map_err(err)?;
-    let issues = set_issues(conn)?;
-    let warnings = uninterpreted_warning(issues.len()).into_iter().collect();
     Ok(MonthAvailability {
         target_month: target_month.to_string(),
         windows,
         day_ranges: ranges,
         hours_set,
-        set_count,
-        pending_set_count,
-        set_issues: issues,
-        warnings,
     })
 }
 

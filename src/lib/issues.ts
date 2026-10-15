@@ -105,8 +105,8 @@ export function computeIssues(
     }
   }
 
-  // Blocked time: leave vs. unavailability (Sling "availability" entries
-  // and recurring availability sets — both mean the teacher is NOT free).
+  // Blocked time: leave vs. unavailability (Sling "availability" entries,
+  // one-off or recurring — the teacher is NOT free).
   // Blocks are the source of truth here, as in propose.py and conflicts.rs.
   for (const s of shifts) {
     if (s.is_dropped || s.sling_user_id == null) continue;

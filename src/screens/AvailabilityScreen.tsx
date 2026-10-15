@@ -7,7 +7,7 @@
 // (teacher_availability_windows), blocks from `list_availability_blocks`.
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CalendarClock } from "lucide-react";
+import { CalendarClock } from "lucide-react";
 import { api } from "../lib/api";
 import { MonthSelector } from "../components/MonthSelector";
 import { PageHead } from "../components/ui/PageHead";
@@ -78,41 +78,6 @@ export function AvailabilityScreen({ onGoSettings }: { onGoSettings: () => void 
       />
       {error && <div className="card error">{error}</div>}
 
-      {availability?.warnings.map((w) => (
-        <div key={w} className="bk-warn" style={{ marginBottom: 12 }}>
-          <AlertTriangle size={15} /> {w}
-        </div>
-      ))}
-      {availability && availability.set_issues.length > 0 && (
-        <div className="card" style={{ marginBottom: 12 }}>
-          <strong>Availability sets Barrekeep couldn't interpret</strong>
-          <p className="muted" style={{ marginTop: 4 }}>
-            These recurring entries from Sling produce no unavailability here. Check them in Sling, or send
-            the newest raw pull file (Settings → Backups → Open raw pulls folder) to whoever maintains the app.
-          </p>
-          <table style={{ marginTop: 8 }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left" }}>Teacher</th>
-                <th style={{ textAlign: "left" }}>Set</th>
-                <th style={{ textAlign: "left" }}>Repeats</th>
-                <th style={{ textAlign: "left" }}>Problem</th>
-              </tr>
-            </thead>
-            <tbody>
-              {availability.set_issues.map((s, i) => (
-                <tr key={i}>
-                  <td>{s.teacher_name ?? `user ${s.sling_user_id}`}</td>
-                  <td>{s.name ?? <span className="muted">unnamed</span>}</td>
-                  <td><code>{s.interval_raw ?? "—"}</code></td>
-                  <td className="muted">{s.problem}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
       {grid && grid.rows.length === 0 ? (
         <div className="card">
           <EmptyState
@@ -142,9 +107,6 @@ export function AvailabilityScreen({ onGoSettings }: { onGoSettings: () => void 
                   <button className="btn-link" onClick={onGoSettings}>Set studio hours</button>
                 </>
               )}
-              {availability.set_count > 0 &&
-                ` ${availability.set_count} recurring availability set${availability.set_count === 1 ? "" : "s"} from Sling` +
-                  (availability.pending_set_count > 0 ? ` (${availability.pending_set_count} pending approval).` : ".")}
             </div>
           </div>
 

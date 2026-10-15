@@ -143,12 +143,11 @@ Pulled from Sling per month. Despite the name, these are BLOCKED times (Sling's 
 
 | source | meaning | UI label |
 |---|---|---|
-| `availability` | one-off unavailability from the calendar feed | Unavailable |
-| `availability_set` | an occurrence of an approved recurring availability set (migration 0014) | Unavailable |
-| `availability_set_pending` | same, but the set has no `approved` timestamp in Sling yet — still blocked | Unavailable (pending approval) |
+| `availability` | unavailability from the calendar feed: one-off, or one occurrence of a recurring block (Sling expands those per date) | Unavailable |
+| `availability_set` / `availability_set_pending` | legacy, written only by the removed set expansion (v0.3.0 pre-release builds); gone after the month's next pull. Still read as blocked | Unavailable |
 | `leave` | time off from the calendar feed | On leave |
 
-`propose.py` receives the two set-derived sources as event type `availability` (it blocks on `leave` / `availability` only), so every script version treats them as blocked.
+`propose.py` receives the legacy set-derived sources as event type `availability` (it blocks on `leave` / `availability` only), so every script version treats them as blocked.
 
 ```sql
 CREATE TABLE availability_blocks (
@@ -165,7 +164,7 @@ CREATE INDEX idx_avail_user_time ON availability_blocks(sling_user_id, starts_at
 
 ### `sling_availability_sets` (migration 0014)
 
-Recurring availability sets exactly as Sling returned them (`GET /availability?userId=…`, see `docs/sling-api.md`), one row per set. Replaced per teacher on every successful fetch (DELETE + INSERT; never UPDATEd). `availability.rs` re-parses `raw_json` and expands the sets into `availability_blocks` for each pulled month. Surrogate PK only; no FKs, no UNIQUE.
+**Unused.** Created for the recurring-set pull (`GET /availability?userId=…`), which was removed once live data showed the endpoint returns set headers with no times; recurring blocks come from the calendar feed instead (see `docs/sling-api.md`). Nothing reads or writes it; it stays because migrations are forward-only.
 
 ```sql
 CREATE TABLE sling_availability_sets (
@@ -188,7 +187,7 @@ CREATE SEQUENCE seq_sling_availability_sets;
 CREATE INDEX idx_avail_sets_user ON sling_availability_sets(sling_user_id);
 ```
 
-A row with `problem IS NOT NULL` is an **uninterpreted** set: it yields no (or only some) blocks and is listed in the Availability view and the pull warning.
+
 
 ### `studio_hours` (migration 0014)
 

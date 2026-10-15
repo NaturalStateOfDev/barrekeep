@@ -1,9 +1,9 @@
 // Re-validate an existing draft against the latest pulled Sling data
 // (availability refresh, migration 0013) instead of regenerating it.
 //
-// Checks per shift: teacher blocked (Sling `availability` events and
-// recurring availability sets are BLOCKED time — the naming is backward;
-// every availability_blocks source except 'leave' reads as "unavailable"),
+// Checks per shift: teacher blocked (Sling `availability` events, one-off or
+// recurring, are BLOCKED time — the naming is backward; every
+// availability_blocks source except 'leave' reads as "unavailable"),
 // on leave, deactivated, not
 // qualified, over their weekly cap, and unassigned slots. These mirror the
 // frontend issue queue (src/lib/issues.ts) but run against the database so
@@ -86,7 +86,8 @@ pub struct ConflictShift {
 pub struct Block {
     pub user_id: i64,
     /// "leave", or any unavailability source (see availability.rs):
-    /// "availability" | "availability_set" | "availability_set_pending".
+    /// "availability", or a legacy "availability_set" /
+    /// "availability_set_pending" row from an older version.
     pub source: String,
     pub start: i64,     // Unix seconds
     pub end: i64,
