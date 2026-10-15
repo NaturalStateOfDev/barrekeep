@@ -25,37 +25,39 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 // Each target: file, human label, a regex whose group 1 is the text before
 // the version and group 2 is the version itself. Every regex must match
-// exactly once.
+// exactly once. Line endings may be CRLF: the release job runs on Windows,
+// where checkouts get CRLF, and JS `.` doesn't match `\r`, so the patterns
+// use `\r?\n` and `[^\n]*`, never `.*` or a bare `\n`.
 const TARGETS = [
   {
     file: "package.json",
     label: 'package.json "version"',
-    re: /^(\{\s*\n(?:.*\n)*?\s{2}"version":\s*")([^"]+)(")/,
+    re: /^(\{\s*\r?\n(?:[^\n]*\n)*?\s{2}"version":\s*")([^"]+)(")/,
   },
   {
     file: "package-lock.json",
     label: 'package-lock.json top-level "version"',
-    re: /^(\{\s*\n\s{2}"name":\s*"barrekeep",\s*\n\s{2}"version":\s*")([^"]+)(")/,
+    re: /^(\{\s*\r?\n\s{2}"name":\s*"barrekeep",\s*\r?\n\s{2}"version":\s*")([^"]+)(")/,
   },
   {
     file: "package-lock.json",
     label: 'package-lock.json packages[""].version',
-    re: /(\n\s{4}"":\s*\{\s*\n\s{6}"name":\s*"barrekeep",\s*\n\s{6}"version":\s*")([^"]+)(")/,
+    re: /(\n\s{4}"":\s*\{\s*\r?\n\s{6}"name":\s*"barrekeep",\s*\r?\n\s{6}"version":\s*")([^"]+)(")/,
   },
   {
     file: "src-tauri/tauri.conf.json",
     label: 'tauri.conf.json "version"',
-    re: /^(\{\s*\n(?:.*\n)*?\s{2}"version":\s*")([^"]+)(")/,
+    re: /^(\{\s*\r?\n(?:[^\n]*\n)*?\s{2}"version":\s*")([^"]+)(")/,
   },
   {
     file: "src-tauri/Cargo.toml",
     label: "Cargo.toml [package] version",
-    re: /(^\[package\]\s*\n(?:(?!\[).*\n)*?version\s*=\s*")([^"]+)(")/m,
+    re: /(^\[package\]\s*\r?\n(?:(?!\[)[^\n]*\n)*?version\s*=\s*")([^"]+)(")/m,
   },
   {
     file: "src-tauri/Cargo.lock",
     label: "Cargo.lock barrekeep entry",
-    re: /(\[\[package\]\]\nname = "barrekeep"\nversion = ")([^"]+)(")/,
+    re: /(\[\[package\]\]\r?\nname = "barrekeep"\r?\nversion = ")([^"]+)(")/,
   },
 ];
 
