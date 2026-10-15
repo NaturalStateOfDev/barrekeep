@@ -649,7 +649,7 @@ export function installDevMock() {
         return { path: "data/scheduler.duckdb", schema_version: 9, teacher_count: TEACHERS.length, position_count: POSITIONS.length };
       case "check_python":
         await sleep(300);
-        return { found: true, version: "3.12.4", command: "py -3", path: "C:\\Python312\\python.exe", error: null, min_version: "3.11" };
+        return { found: true, version: "3.12.4", command: "py -3", path: "C:\\Python312\\python.exe", error: null, min_version: "3.8" };
       case "list_backups":
         return { dir: "C:\\Users\\you\\AppData\\Local\\com.barrekeep.app\\backups", keep: 14, backups: DEV_BACKUPS, last_error: null };
       case "backup_now": {

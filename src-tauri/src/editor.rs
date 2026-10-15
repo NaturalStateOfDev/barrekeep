@@ -170,6 +170,8 @@ The changed script MUST:
   version_label, target_month, parameters, shifts[])
 - produce exactly the current output when the instruction's situation does
   not arise — change only what the instruction requires.
+- run on Python 3.8 with the standard library only: no third-party imports,
+  no match statements, no `X | Y` type unions, no zoneinfo/tomllib.
 "#;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

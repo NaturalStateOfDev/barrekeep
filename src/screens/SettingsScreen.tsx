@@ -718,7 +718,7 @@ function PythonCard() {
       <strong>Python</strong>
       <p className="muted" style={{ marginTop: 4 }}>
         "Generate proposal" runs the schedule algorithm (<code>propose.py</code>)
-        with Python {status?.min_version ?? "3.11"} or newer.
+        with Python {status?.min_version ?? "3.8"} or newer.
       </p>
       <div style={{ marginTop: 12 }}>
         Status:{" "}

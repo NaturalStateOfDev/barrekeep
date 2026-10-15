@@ -29,7 +29,7 @@ server, no cloud database.
 - **Sling integration:** in-process Rust (`src-tauri/src/sling.rs` — pull, push,
   dedupe, rate limiting; `push_sync.rs` — incremental push/sync). Only
   `scripts/propose.py` (the schedule algorithm) runs as a subprocess, fed a
-  JSON payload over stdin; `python.rs` finds a Python 3.11+ to run it.
+  JSON payload over stdin; `python.rs` finds a Python 3.8+ to run it.
 
 ## Repository layout
 

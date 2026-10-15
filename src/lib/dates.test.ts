@@ -67,19 +67,19 @@ describe("initials", () => {
 });
 
 describe("monthWindow", () => {
-  it("returns prev + current + next 2 months", () => {
+  it("returns prev + current + next 5 months", () => {
     expect(monthWindow("2026-05-19")).toEqual([
-      "2026-04", "2026-05", "2026-06", "2026-07",
+      "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10",
     ]);
   });
   it("rolls over across year boundary", () => {
     expect(monthWindow("2026-12-15")).toEqual([
-      "2026-11", "2026-12", "2027-01", "2027-02",
+      "2026-11", "2026-12", "2027-01", "2027-02", "2027-03", "2027-04", "2027-05",
     ]);
   });
   it("rolls back across year boundary", () => {
     expect(monthWindow("2026-01-05")).toEqual([
-      "2025-12", "2026-01", "2026-02", "2026-03",
+      "2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06",
     ]);
   });
 });

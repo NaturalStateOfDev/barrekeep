@@ -65,7 +65,7 @@ npm run tauri build        # -> src-tauri/target/release/bundle/
   + [MSVC C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
   Linux: WebKitGTK/GTK dev packages and `mold` — see [SETUP.md](./SETUP.md)
   for apt and pacman package lists.
-- The installed app needs Python 3.11+ on PATH too (it runs `propose.py`);
+- The installed app needs Python 3.8+ on PATH too (it runs `propose.py`);
   Settings → Python checks it. See SETUP.md → Studio PC requirements.
 
 ### First-run configuration

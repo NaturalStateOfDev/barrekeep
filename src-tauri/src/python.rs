@@ -1,6 +1,6 @@
 //! Python interpreter discovery for the propose.py sidecar.
 //!
-//! propose.py is stdlib-only but needs Python >= 3.11. On Windows the obvious
+//! propose.py is stdlib-only and needs Python >= 3.8 (CI checks it with vermin). On Windows the obvious
 //! `python` is often the Microsoft Store "App execution alias" stub, which
 //! prints "Python was not found…" and exits 9009 instead of running anything.
 //! So instead of spawning a hard-coded name, probe candidates in order —
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-pub const MIN_VERSION: (u32, u32) = (3, 11);
+pub const MIN_VERSION: (u32, u32) = (3, 8);
 
 /// Prints "X.Y.Z" then sys.executable, one per line.
 const PROBE_SCRIPT: &str =
@@ -386,11 +386,12 @@ mod tests {
     }
 
     #[test]
-    fn minimum_is_3_11() {
-        assert!(meets_minimum((3, 11, 0)));
+    fn minimum_is_3_8() {
+        assert!(meets_minimum((3, 8, 0)));
+        assert!(meets_minimum((3, 10, 12)));
         assert!(meets_minimum((3, 13, 2)));
         assert!(meets_minimum((4, 0, 0)));
-        assert!(!meets_minimum((3, 10, 12)));
+        assert!(!meets_minimum((3, 7, 17)));
         assert!(!meets_minimum((2, 7, 18)));
     }
 
@@ -444,7 +445,7 @@ mod tests {
     fn selects_first_new_enough_candidate() {
         let r = vec![
             ("py -3".to_string(), ProbeOutcome::NotFound),
-            ("python".to_string(), ok((3, 9, 1))),
+            ("python".to_string(), ok((3, 7, 9))),
             ("python3".to_string(), ok((3, 12, 0))),
         ];
         assert_eq!(select(&r, true), Ok(2));
@@ -460,7 +461,7 @@ mod tests {
             ("python3".to_string(), ProbeOutcome::StoreStub),
         ];
         let e = select(&r, true).unwrap_err();
-        assert!(e.starts_with("Python 3.11+ not found."), "{e}");
+        assert!(e.starts_with("Python 3.8+ not found."), "{e}");
         assert!(e.contains("Microsoft Store placeholder"), "{e}");
         assert!(e.contains("'Add python.exe to PATH'"), "{e}");
         assert!(e.contains("App execution aliases"), "{e}");
@@ -470,9 +471,9 @@ mod tests {
 
     #[test]
     fn too_old_is_named_in_the_error() {
-        let r = vec![("python3".to_string(), ok((3, 10, 12))), ("python".to_string(), ProbeOutcome::NotFound)];
+        let r = vec![("python3".to_string(), ok((3, 7, 17))), ("python".to_string(), ProbeOutcome::NotFound)];
         let e = select(&r, false).unwrap_err();
-        assert!(e.contains("'python3' is Python 3.10.12"), "{e}");
+        assert!(e.contains("'python3' is Python 3.7.17"), "{e}");
         assert!(e.contains("too old"), "{e}");
         assert!(!e.contains("App execution aliases"), "non-Windows advice only: {e}");
     }
